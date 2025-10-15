@@ -264,7 +264,6 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
         controls = st.columns(2)
         if controls[0].button("➕ Add row", key=f"add_{safe_key}"):
             table.add_row({column: None for column in table.columns})
-            st.experimental_rerun()
 
         if not table.data.empty:
             row_options = list(table.data.index)
@@ -277,7 +276,6 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
             )
             if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
                 table.remove_row(int(remove_index))
-                st.experimental_rerun()
         else:
             controls[1].markdown("&nbsp;")
 
