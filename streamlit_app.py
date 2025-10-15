@@ -212,7 +212,12 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 base_value = numeric_series.iloc[0] if not numeric_series.empty else 0.0
             if pd.isna(base_value):
                 base_value = 0.0
-            step = _numeric_step(base_value)
+            # Streamlit number_input requires all numeric arguments to share the
+            # same underlying type (ints vs floats). ``_numeric_step`` can
+            # return an integer when the magnitude is large, so coerce the
+            # step to ``float`` to avoid "mixed numeric types" errors when the
+            # value is a float.
+            step = float(_numeric_step(base_value))
             number_format = "%.0f" if step >= 1 else "%.4f"
             new_value = st.number_input(
                 column,
