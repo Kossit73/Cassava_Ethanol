@@ -71,34 +71,56 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
     monthly = monthly.sort_values("Month").reset_index(drop=True)
 
     growth_col = next((c for c in monthly.columns if "growth" in c.lower()), None)
-    growth_series = None
-    if growth_col:
+    growth_series = pd.Series(dtype=float)
+    if growth_col and growth_col in monthly.columns:
         growth_series = pd.to_numeric(monthly[growth_col], errors="coerce")
-    else:
-        growth_series = pd.Series(0.0, index=monthly.index)
 
-    numeric_cols = [c for c in monthly.columns if c not in {"Month", growth_col}]
-
-    for col in numeric_cols:
-        values = pd.to_numeric(monthly[col], errors="coerce").fillna(0.0)
-        adjusted = values.copy()
-        prev_rate = 0.0
-        for idx in range(1, len(adjusted)):
-            raw_rate = growth_series.iloc[idx - 1]
-            rate = prev_rate if pd.isna(raw_rate) else float(raw_rate)
-            if not pd.isna(raw_rate):
-                prev_rate = rate
-            if abs(rate) > 1e-12:
-                adjusted.iloc[idx] = adjusted.iloc[idx - 1] * (1.0 + rate)
-        monthly[col] = adjusted
-
-    if growth_col:
+    monthly = monthly.set_index("Month")
+    if growth_col and growth_col in monthly.columns:
         monthly = monthly.drop(columns=[growth_col])
 
-    monthly = monthly.set_index("Month").sort_index()
+    numeric_cols = [c for c in monthly.columns if c != growth_col]
     months = year_month_range(start_year, end_year)
-    monthly = monthly.reindex(months)
-    monthly = monthly.ffill().fillna(0.0)
+    compound_monthly = pd.DataFrame(index=months)
+
+    # Pre-compute dictionaries for quick lookup.
+    growth_lookup: Dict[pd.Timestamp, float] = {}
+    if not growth_series.empty:
+        growth_lookup = {
+            idx if isinstance(idx, pd.Timestamp) else pd.Timestamp(idx): float(val)
+            for idx, val in growth_series.dropna().items()
+        }
+
+    for col in numeric_cols:
+        base_series = pd.to_numeric(monthly.get(col, pd.Series(dtype=float)), errors="coerce")
+        base_lookup = {
+            idx if isinstance(idx, pd.Timestamp) else pd.Timestamp(idx): float(val)
+            for idx, val in base_series.dropna().items()
+        }
+
+        values = []
+        prev_value = None
+        current_growth = 0.0
+        for month in months:
+            month_value = base_lookup.get(month)
+            if month_value is not None:
+                value = month_value
+                prev_value = month_value
+            elif prev_value is not None:
+                value = prev_value * (1.0 + current_growth)
+                prev_value = value
+            else:
+                value = 0.0
+
+            values.append(value)
+
+            if month in growth_lookup:
+                current_growth = growth_lookup[month]
+
+        compound_monthly[col] = values
+
+    compound_monthly = compound_monthly.sort_index()
+    monthly = compound_monthly
     annual = monthly.resample("Y").sum()
     annual.index = annual.index.year
     return ProductionOutput(monthly, annual)
