@@ -136,12 +136,12 @@ def _key_assumptions_controls(table: EditableTable) -> None:
                 parameter,
                 min_value=min_value,
                 max_value=max_value,
-                step=step,
-                value=st.session_state[value_key],
+                step=float(step),
+                value=float(st.session_state[value_key]),
                 key=f"{state_key}_input",
             )
-            st.session_state[value_key] = current_value
-            df.at[idx, "Value"] = current_value
+            st.session_state[value_key] = float(current_value)
+            df.at[idx, "Value"] = float(current_value)
     table.data = df
 
 
