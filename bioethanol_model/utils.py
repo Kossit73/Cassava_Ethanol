@@ -26,23 +26,81 @@ def npv(rate: float, cashflows: Iterable[float]) -> float:
     return sum(cf / ((1 + rate) ** i) for i, cf in enumerate(cashflows))
 
 
-def irr(cashflows: Iterable[float], guess: float = 0.1, tol: float = 1e-6, max_iter: int = 100) -> float:
+def irr(
+    cashflows: Iterable[float],
+    guess: float = 0.1,
+    tol: float = 1e-6,
+    max_iter: int = 100,
+) -> float:
+    """Internal rate of return with Newton-Raphson + bisection fallback.
+
+    Streamlit interactions sometimes push the Newton iteration below -100% which
+    previously triggered divide-by-zero errors. This version keeps the search
+    inside (-1, +inf) and falls back to a robust bisection when Newton either
+    diverges or encounters a flat derivative.
+    """
+
     cashflows = list(cashflows)
+    if not cashflows:
+        return float("nan")
+
+    # IRR only exists if we have at least one positive and one negative cash flow.
+    has_pos = any(cf > 0 for cf in cashflows)
+    has_neg = any(cf < 0 for cf in cashflows)
+    if not (has_pos and has_neg):
+        return float("nan")
+
+    def _npv(rate: float) -> float:
+        # Keep the rate slightly above -100% to avoid division by zero.
+        rate = max(rate, -0.999999)
+        return sum(cf / ((1 + rate) ** i) for i, cf in enumerate(cashflows))
+
+    def _npv_derivative(rate: float) -> float:
+        rate = max(rate, -0.999999)
+        d_val = 0.0
+        for i, cf in enumerate(cashflows[1:], start=1):
+            d_val += -i * cf / ((1 + rate) ** (i + 1))
+        return d_val
+
     rate = guess
     for _ in range(max_iter):
-        npv_val = 0.0
-        d_npv = 0.0
-        for i, cf in enumerate(cashflows):
-            denom = (1 + rate) ** i
-            npv_val += cf / denom
-            if i > 0:
-                d_npv += -i * cf / ((1 + rate) ** (i + 1))
+        rate = max(rate, -0.999999)
+        npv_val = _npv(rate)
         if abs(npv_val) < tol:
             return rate
+        d_npv = _npv_derivative(rate)
         if d_npv == 0:
             break
-        rate -= npv_val / d_npv
-    return rate
+        next_rate = rate - npv_val / d_npv
+        if not np.isfinite(next_rate):
+            break
+        rate = next_rate
+
+    # Bisection fallback – widen the upper bound until the function changes sign.
+    low = -0.999999
+    high = max(guess, 0.1)
+    f_low = _npv(low)
+    f_high = _npv(high)
+    expand_iter = 0
+    while f_low * f_high > 0 and expand_iter < 50:
+        high *= 2.0
+        f_high = _npv(high)
+        expand_iter += 1
+    if f_low * f_high > 0:
+        return rate
+
+    for _ in range(200):
+        mid = 0.5 * (low + high)
+        f_mid = _npv(mid)
+        if abs(f_mid) < tol:
+            return mid
+        if f_low * f_mid < 0:
+            high = mid
+            f_high = f_mid
+        else:
+            low = mid
+            f_low = f_mid
+    return 0.5 * (low + high)
 
 
 @dataclass
