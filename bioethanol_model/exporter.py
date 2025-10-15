@@ -74,15 +74,21 @@ def export_to_excel(
     output_path: Path,
     sensitivity_scenarios: Iterable[SensitivityScenario] | None = None,
     scenario_configs: Iterable[ScenarioConfig] | None = None,
+    results: Dict[str, object] | None = None,
+    scenario: str | None = None,
 ) -> Path:
     output_path = Path(output_path)
-    results = model.build()
+    if results is None:
+        results = model.build(scenario=scenario)
+    elif scenario is not None:
+        model.scenario = scenario
 
     sensitivity_scenarios = list(sensitivity_scenarios or [])
     scenario_configs = list(scenario_configs or [])
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-        _write_input_page(writer, model.input_page)
+        scenario_page = results.get("input_page_snapshot", model.input_page)
+        _write_input_page(writer, scenario_page)
         _write_financial_statements_page(writer, results)
         _write_key_metrics(writer, model, results)
         _write_financial_performance(writer, results)

@@ -64,10 +64,12 @@ def _build_model_snapshot(page: InputLandingPage) -> tuple[CassavaBioethanolMode
     return model, model.build()
 
 
-def _generate_excel_bytes(model: CassavaBioethanolModel) -> bytes:
+def _generate_excel_bytes(
+    model: CassavaBioethanolModel, results: Dict[str, object], scenario: str
+) -> bytes:
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_path = Path(tmpdir) / "Cassava_Bioethanol_Financial_Model.xlsx"
-        export_to_excel(model, temp_path)
+        export_to_excel(model, temp_path, results=results, scenario=scenario)
         return temp_path.read_bytes()
 
 
@@ -607,8 +609,15 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 def _render_monte_carlo_page(model: CassavaBioethanolModel) -> None:
     current_version = st.session_state.get("model_version")
     cache_version = st.session_state.get("mc_cache_version")
-    if st.session_state.get("mc_cache") is None or cache_version != current_version:
+    cache_scenario = st.session_state.get("mc_cache_scenario")
+    current_scenario = model.scenario
+    if (
+        st.session_state.get("mc_cache") is None
+        or cache_version != current_version
+        or cache_scenario != current_scenario
+    ):
         mc_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+        mc_model.scenario = current_scenario
         st.session_state.mc_cache = monte_carlo_simulation(
             mc_model,
             parameter_std=MONTE_CARLO_STD,
@@ -616,6 +625,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel) -> None:
             random_seed=MONTE_CARLO_SEED,
         )
         st.session_state.mc_cache_version = current_version
+        st.session_state.mc_cache_scenario = current_scenario
     mc_results = st.session_state.get("mc_cache", pd.DataFrame())
 
     st.subheader("Monte Carlo Simulation Results")
@@ -638,22 +648,64 @@ def main() -> None:
     st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs across dedicated dashboards.")
 
     input_page = _load_session_inputs()
+    scenario_options = list(CassavaBioethanolModel.SCENARIOS)
+    if "selected_scenario" not in st.session_state:
+        st.session_state.selected_scenario = scenario_options[0]
 
-    action_cols = st.columns([1, 1])
+    action_cols = st.columns([1, 1, 1])
     with action_cols[0]:
         recalc = st.button("Recalculate model", type="primary")
+    with action_cols[1]:
+        scenario_index = scenario_options.index(st.session_state.selected_scenario)
+        selected_scenario = st.selectbox(
+            "Scenario",
+            scenario_options,
+            index=scenario_index,
+            key="scenario_select",
+        )
 
-    if recalc or "model_results" not in st.session_state:
-        model, results = _build_model_snapshot(input_page)
-        st.session_state.model_results = (model, results)
+    if selected_scenario != st.session_state.selected_scenario:
+        st.session_state.selected_scenario = selected_scenario
+        payloads = st.session_state.get("scenario_payloads", {})
+        if selected_scenario in payloads:
+            st.session_state.model_results = payloads[selected_scenario]
+        excel_map = st.session_state.get("excel_bytes_map", {})
+        if selected_scenario in excel_map:
+            st.session_state.excel_bytes = excel_map[selected_scenario]
+
+    if recalc or "scenario_payloads" not in st.session_state:
+        payloads: Dict[str, Tuple[CassavaBioethanolModel, Dict[str, object]]] = {}
+        excel_map: Dict[str, bytes] = {}
+        for scenario_name in scenario_options:
+            scenario_model = CassavaBioethanolModel(copy.deepcopy(input_page))
+            scenario_results = scenario_model.build(scenario_name)
+            payloads[scenario_name] = (scenario_model, scenario_results)
+            excel_map[scenario_name] = _generate_excel_bytes(
+                scenario_model, scenario_results, scenario_name
+            )
+        st.session_state.scenario_payloads = payloads
+        st.session_state.excel_bytes_map = excel_map
         st.session_state.model_version = st.session_state.get("model_version", 0) + 1
         st.session_state.mc_cache = None
         st.session_state.mc_cache_version = None
-        st.session_state.excel_bytes = _generate_excel_bytes(model)
+
+    payloads = st.session_state.get("scenario_payloads")
+    if not payloads:
+        st.warning("Recalculate the model to generate scenario outputs.")
+        return
+
+    selected_scenario = st.session_state.selected_scenario
+    if selected_scenario not in payloads:
+        selected_scenario = scenario_options[0]
+        st.session_state.selected_scenario = selected_scenario
+
+    st.session_state.model_results = payloads[selected_scenario]
+    st.session_state.excel_bytes = st.session_state.get("excel_bytes_map", {}).get(selected_scenario)
 
     model, results = st.session_state.model_results
+    model.scenario = selected_scenario
 
-    with action_cols[1]:
+    with action_cols[2]:
         excel_bytes = st.session_state.get("excel_bytes")
         if excel_bytes:
             st.download_button(

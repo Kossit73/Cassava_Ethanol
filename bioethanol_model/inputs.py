@@ -178,6 +178,9 @@ def default_input_page() -> InputLandingPage:
                 {"Parameter": "Owner share capital", "Value": 0.55, "Units": "%"},
                 {"Parameter": "Terminal growth", "Value": 0.02, "Units": "%"},
                 {"Parameter": "Capital gains tax rate", "Value": 0.05, "Units": "%"},
+                {"Parameter": "Cassava farm cost per ton", "Value": 45.0, "Units": "USD/ton"},
+                {"Parameter": "Cassava purchase cost per ton", "Value": 70.0, "Units": "USD/ton"},
+                {"Parameter": "Hybrid farm share", "Value": 0.5, "Units": "%"},
             ]
         ),
     )
