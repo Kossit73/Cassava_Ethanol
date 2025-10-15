@@ -1,0 +1,290 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional
+
+import pandas as pd
+
+
+@dataclass
+class EditableTable:
+    """Generic structure that supports row add/remove operations."""
+
+    name: str
+    columns: List[str]
+    data: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def __post_init__(self) -> None:
+        if self.data.empty:
+            self.data = pd.DataFrame(columns=self.columns)
+        else:
+            self.data = self.data[self.columns]
+
+    def add_row(self, values: Dict[str, object]) -> None:
+        missing = [c for c in self.columns if c not in values]
+        if missing:
+            raise ValueError(f"Missing values for columns: {missing}")
+        self.data = pd.concat([self.data, pd.DataFrame([values])], ignore_index=True)
+
+    def remove_row(self, index: int) -> None:
+        if index not in self.data.index:
+            raise KeyError(f"Row {index} not found in {self.name}")
+        self.data = self.data.drop(index).reset_index(drop=True)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"name": self.name, "columns": self.columns, "data": self.data.copy()}
+
+
+@dataclass
+class ProjectionHorizon:
+    start_year: int
+    end_year: int
+
+    def to_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(
+            {"Start Year": [self.start_year], "End Year": [self.end_year], "Years": [self.end_year - self.start_year + 1]}
+        )
+
+
+@dataclass
+class InputLandingPage:
+    projection: ProjectionHorizon
+    global_inputs: EditableTable
+    initial_investment: EditableTable
+    revenue_inputs: EditableTable
+    production_annual: EditableTable
+    production_monthly: EditableTable
+    direct_costs_monthly: EditableTable
+    staff_costs_monthly: EditableTable
+    other_opex_monthly: EditableTable
+    accounts_receivable: EditableTable
+    inventory_payable: EditableTable
+    loan_schedule: EditableTable
+    tax_schedule: EditableTable
+    inflation_schedule: EditableTable
+    risk_schedule: EditableTable
+
+    def tables(self) -> Dict[str, EditableTable]:
+        return {
+            "Global Inputs": self.global_inputs,
+            "Initial Investment": self.initial_investment,
+            "Revenue Inputs": self.revenue_inputs,
+            "Production Annual": self.production_annual,
+            "Production Monthly": self.production_monthly,
+            "Direct Costs Monthly": self.direct_costs_monthly,
+            "Staff Monthly": self.staff_costs_monthly,
+            "Other Opex Monthly": self.other_opex_monthly,
+            "Accounts Receivable": self.accounts_receivable,
+            "Inventory & Accounts Payable": self.inventory_payable,
+            "Loan Schedule": self.loan_schedule,
+            "Tax Schedule": self.tax_schedule,
+            "Inflation Schedule": self.inflation_schedule,
+            "Risk Schedule": self.risk_schedule,
+        }
+
+
+@dataclass
+class ScenarioAssumption:
+    name: str
+    value: float
+    description: str
+
+
+def default_input_page() -> InputLandingPage:
+    projection = ProjectionHorizon(2024, 2034)
+
+    global_inputs = EditableTable(
+        "Global Inputs",
+        ["Parameter", "Value", "Units"],
+        pd.DataFrame(
+            [
+                {"Parameter": "Corporate tax rate", "Value": 0.28, "Units": "%"},
+                {"Parameter": "Investor share capital", "Value": 0.45, "Units": "%"},
+                {"Parameter": "Owner share capital", "Value": 0.55, "Units": "%"},
+                {"Parameter": "Terminal growth", "Value": 0.02, "Units": "%"},
+                {"Parameter": "Capital gains tax rate", "Value": 0.05, "Units": "%"},
+            ]
+        ),
+    )
+
+    initial_investment = EditableTable(
+        "Initial Investment",
+        ["Item", "Cost", "Life (years)", "Depreciation Rate", "Start Month"],
+        pd.DataFrame(
+            [
+                {"Item": "Land", "Cost": 2_000_000, "Life (years)": 40, "Depreciation Rate": 0.0, "Start Month": "2024-01"},
+                {"Item": "Building", "Cost": 12_000_000, "Life (years)": 25, "Depreciation Rate": None, "Start Month": "2024-01"},
+                {"Item": "Plant & Equipment", "Cost": 18_000_000, "Life (years)": 15, "Depreciation Rate": None, "Start Month": "2024-01"},
+                {"Item": "Farm Development", "Cost": 3_000_000, "Life (years)": 10, "Depreciation Rate": None, "Start Month": "2024-01"},
+                {"Item": "EPC & Others", "Cost": 5_000_000, "Life (years)": 8, "Depreciation Rate": None, "Start Month": "2024-01"},
+            ]
+        ),
+    )
+
+    revenue_inputs = EditableTable(
+        "Revenue Inputs",
+        ["Product", "Base Price", "Escalation", "Units"],
+        pd.DataFrame(
+            [
+                {"Product": "Fuel Ethanol", "Base Price": 0.70, "Escalation": 0.02, "Units": "USD/L"},
+                {"Product": "By-product DDGS", "Base Price": 120.0, "Escalation": 0.015, "Units": "USD/ton"},
+            ]
+        ),
+    )
+
+    production_annual = EditableTable(
+        "Production Annual",
+        ["Year", "Cassava ton", "Ethanol litres", "DDGS ton"],
+        pd.DataFrame(
+            [
+                {"Year": 2024, "Cassava ton": 95_000, "Ethanol litres": 11_000_000, "DDGS ton": 40_000},
+                {"Year": 2025, "Cassava ton": 100_000, "Ethanol litres": 12_000_000, "DDGS ton": 43_000},
+            ]
+        ),
+    )
+
+    # Monthly production will be spread evenly by default
+    monthly_index = pd.period_range("2024-01", "2024-12", freq="M")
+    production_monthly = EditableTable(
+        "Production Monthly",
+        ["Month", "Cassava ton", "Ethanol litres", "DDGS ton"],
+        pd.DataFrame(
+            {
+                "Month": monthly_index.astype(str),
+                "Cassava ton": [8_000.0] * len(monthly_index),
+                "Ethanol litres": [1_000_000.0] * len(monthly_index),
+                "DDGS ton": [3_300.0] * len(monthly_index),
+            }
+        ),
+    )
+
+    direct_costs_monthly = EditableTable(
+        "Direct Costs Monthly",
+        ["Month", "Cost Category", "Amount"],
+        pd.DataFrame(
+            [
+                {"Month": "2024-01", "Cost Category": "Cassava Feedstock", "Amount": 450_000},
+                {"Month": "2024-01", "Cost Category": "Enzymes & Chemicals", "Amount": 120_000},
+            ]
+        ),
+    )
+
+    staff_costs_monthly = EditableTable(
+        "Staff Costs Monthly",
+        ["Month", "Department", "Headcount", "Cost"],
+        pd.DataFrame(
+            [
+                {"Month": "2024-01", "Department": "Operations", "Headcount": 45, "Cost": 95_000},
+                {"Month": "2024-01", "Department": "Farming", "Headcount": 120, "Cost": 60_000},
+            ]
+        ),
+    )
+
+    other_opex_monthly = EditableTable(
+        "Other Opex Monthly",
+        ["Month", "Category", "Amount"],
+        pd.DataFrame(
+            [
+                {"Month": "2024-01", "Category": "Insurance", "Amount": 35_000},
+                {"Month": "2024-01", "Category": "Service Contracts", "Amount": 28_000},
+                {"Month": "2024-01", "Category": "General Administration", "Amount": 75_000},
+                {"Month": "2024-01", "Category": "Sales & Marketing", "Amount": 20_000},
+                {"Month": "2024-01", "Category": "Research & Development", "Amount": 12_000},
+                {"Month": "2024-01", "Category": "Energy Cost", "Amount": 150_000},
+            ]
+        ),
+    )
+
+    accounts_receivable = EditableTable(
+        "Accounts Receivable & Other Assets",
+        ["Metric", "Value", "Units"],
+        pd.DataFrame(
+            [
+                {"Metric": "Receivables days", "Value": 45, "Units": "days"},
+                {"Metric": "Prepaid expense days", "Value": 15, "Units": "days"},
+                {"Metric": "Other assets percent of revenue", "Value": 0.02, "Units": "%"},
+            ]
+        ),
+    )
+
+    inventory_payable = EditableTable(
+        "Inventory & Accounts Payable",
+        ["Metric", "Value", "Units"],
+        pd.DataFrame(
+            [
+                {"Metric": "Inventory days", "Value": 35, "Units": "days"},
+                {"Metric": "Payables days", "Value": 40, "Units": "days"},
+            ]
+        ),
+    )
+
+    loan_schedule = EditableTable(
+        "Loan Schedule",
+        ["Loan", "Type", "Base Interest", "Interest Rate", "Tenor Years", "Grace Years", "Amortization"],
+        pd.DataFrame(
+            [
+                {
+                    "Loan": "Senior Debt",
+                    "Type": "Term Loan",
+                    "Base Interest": "SOFR",
+                    "Interest Rate": 0.075,
+                    "Tenor Years": 8,
+                    "Grace Years": 1,
+                    "Amortization": "Annuity",
+                }
+            ]
+        ),
+    )
+
+    tax_schedule = EditableTable(
+        "Tax Schedule",
+        ["Item", "Base Rate", "Timing", "Notes"],
+        pd.DataFrame(
+            [
+                {"Item": "Corporate income tax", "Base Rate": 0.28, "Timing": "Quarterly", "Notes": "Paid one month after quarter end"},
+                {"Item": "VAT", "Base Rate": 0.07, "Timing": "Monthly", "Notes": "Input credit offset within 60 days"},
+            ]
+        ),
+    )
+
+    inflation_schedule = EditableTable(
+        "Inflation Schedule",
+        ["Year", "CPI", "FX Index", "Tariff Escalation"],
+        pd.DataFrame(
+            [
+                {"Year": 2024, "CPI": 0.035, "FX Index": 1.0, "Tariff Escalation": 0.0},
+                {"Year": 2025, "CPI": 0.032, "FX Index": 1.02, "Tariff Escalation": 0.01},
+                {"Year": 2026, "CPI": 0.03, "FX Index": 1.05, "Tariff Escalation": 0.015},
+            ]
+        ),
+    )
+
+    risk_schedule = EditableTable(
+        "Risk Schedule",
+        ["Risk", "Probability", "Impact", "Mitigation"],
+        pd.DataFrame(
+            [
+                {"Risk": "Cassava yield shortfall", "Probability": 0.2, "Impact": "High", "Mitigation": "Crop insurance and agronomy support"},
+                {"Risk": "Ethanol price volatility", "Probability": 0.25, "Impact": "Medium", "Mitigation": "Hedging and supply contracts"},
+                {"Risk": "Construction delay", "Probability": 0.15, "Impact": "High", "Mitigation": "EPC guarantees"},
+            ]
+        ),
+    )
+
+    return InputLandingPage(
+        projection=projection,
+        global_inputs=global_inputs,
+        initial_investment=initial_investment,
+        revenue_inputs=revenue_inputs,
+        production_annual=production_annual,
+        production_monthly=production_monthly,
+        direct_costs_monthly=direct_costs_monthly,
+        staff_costs_monthly=staff_costs_monthly,
+        other_opex_monthly=other_opex_monthly,
+        accounts_receivable=accounts_receivable,
+        inventory_payable=inventory_payable,
+        loan_schedule=loan_schedule,
+        tax_schedule=tax_schedule,
+        inflation_schedule=inflation_schedule,
+        risk_schedule=risk_schedule,
+    )
