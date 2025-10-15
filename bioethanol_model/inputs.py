@@ -82,6 +82,28 @@ class InputLandingPage:
             "Risk Schedule": self.risk_schedule,
         }
 
+    def add_row(self, table_name: str, values: Dict[str, object]) -> None:
+        """Add a row to one of the landing-page tables by name."""
+
+        tables = self.tables()
+        if table_name not in tables:
+            raise KeyError(f"Table '{table_name}' not found. Available: {list(tables)}")
+        tables[table_name].add_row(values)
+
+    def remove_row(self, table_name: str, index: int) -> None:
+        """Remove the row at *index* from a named table."""
+
+        tables = self.tables()
+        if table_name not in tables:
+            raise KeyError(f"Table '{table_name}' not found. Available: {list(tables)}")
+        tables[table_name].remove_row(index)
+
+    @property
+    def total_initial_investment(self) -> float:
+        """Return the aggregated initial investment cost across all items."""
+
+        return float(self.initial_investment.data.get("Cost", pd.Series(dtype=float)).sum())
+
 
 @dataclass
 class ScenarioAssumption:

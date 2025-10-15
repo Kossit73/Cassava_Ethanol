@@ -73,6 +73,7 @@ def _editable_tables(page: InputLandingPage) -> None:
         _render_table(tab_map["Global Inputs"], expanded=True)
     with tabs[1]:
         _render_table(tab_map["Initial Investment"], expanded=True)
+        st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
     with tabs[2]:
         _render_table(tab_map["Revenue Inputs"], expanded=True)
     with tabs[3]:
@@ -97,6 +98,26 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
     """Show a Streamlit data editor for a specific table."""
     safe_key = f"table_{table.name.replace(' ', '_').lower()}"
     with st.expander(table.name, expanded=expanded):
+        controls = st.columns(2)
+        if controls[0].button("➕ Add row", key=f"add_{safe_key}"):
+            table.add_row({column: None for column in table.columns})
+            st.experimental_rerun()
+
+        if not table.data.empty:
+            row_options = list(table.data.index)
+            remove_index = controls[1].selectbox(
+                "Row to remove",
+                options=row_options,
+                key=f"remove_select_{safe_key}",
+                label_visibility="collapsed",
+                format_func=lambda i: f"Row {i + 1}",
+            )
+            if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
+                table.remove_row(int(remove_index))
+                st.experimental_rerun()
+        else:
+            controls[1].markdown("&nbsp;")
+
         edited = st.data_editor(
             table.data,
             num_rows="dynamic",
