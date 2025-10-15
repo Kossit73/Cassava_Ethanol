@@ -15,6 +15,7 @@ from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
 from bioethanol_model.inputs import EditableTable, InputLandingPage, default_input_page
 from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
+from bioethanol_model.schedules import compute_production_tables, compute_staff_schedule
 from bioethanol_model.sensitivity import (
     SensitivityScenario,
     monte_carlo_simulation,
@@ -54,6 +55,12 @@ def _load_session_inputs() -> InputLandingPage:
     if "input_page" not in st.session_state:
         st.session_state.input_page = default_input_page()
     return st.session_state.input_page
+
+
+def _mark_inputs_dirty() -> None:
+    """Flag the session so financial outputs are refreshed on the next run."""
+
+    st.session_state.inputs_dirty = True
 
 
 def _build_model_snapshot(page: InputLandingPage) -> tuple[CassavaBioethanolModel, Dict[str, object]]:
@@ -130,10 +137,121 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     st.session_state[end_key] = end
 
 
+def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
+    """Keep the monthly staff cost table aligned with position salaries."""
+
+    staff_df = page.staff_costs_monthly.data.copy()
+    if staff_df.empty or "Department" not in staff_df.columns:
+        return
+
+    schedule = compute_staff_schedule(page.staff_positions.data)
+    summary = schedule.department_summary
+    if summary.empty or "Average Monthly Salary" not in summary.columns:
+        return
+
+    avg_salary = summary.set_index("Department")["Average Monthly Salary"].to_dict()
+    staff_df["Headcount"] = pd.to_numeric(staff_df.get("Headcount"), errors="coerce").fillna(0.0)
+
+    updated_costs = []
+    for _, row in staff_df.iterrows():
+        dept = row.get("Department")
+        salary = avg_salary.get(dept)
+        if salary is None or not np.isfinite(salary):
+            try:
+                current_cost = float(row.get("Cost", 0.0))
+            except (TypeError, ValueError):
+                current_cost = 0.0
+            updated_costs.append(current_cost)
+        else:
+            updated_costs.append(float(row.get("Headcount", 0.0)) * float(salary))
+
+    staff_df["Cost"] = updated_costs
+    page.staff_costs_monthly.data = staff_df
+
+
+def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
+    """Recalculate cassava feedstock costs using the active scenario pricing."""
+
+    direct_df = page.direct_costs_monthly.data.copy()
+    if direct_df.empty or "Cost Category" not in direct_df.columns:
+        return
+
+    feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
+    if not feed_mask.any():
+        return
+
+    global_df = page.global_inputs.data
+    if global_df.empty or "Parameter" not in global_df.columns:
+        return
+
+    lookup = global_df.set_index("Parameter")["Value"].to_dict()
+
+    def _get_global(name: str, default: float) -> float:
+        try:
+            return float(lookup.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    farm_cost = _get_global("Cassava farm cost per ton", 45.0)
+    purchase_cost = _get_global("Cassava purchase cost per ton", 70.0)
+    farm_share = float(np.clip(_get_global("Hybrid farm share", 0.5), 0.0, 1.0))
+
+    scenario = (scenario or "FARM_ONLY").upper()
+    if scenario == "FARM_ONLY":
+        cost_per_ton = farm_cost
+    elif scenario == "BUY_ONLY":
+        cost_per_ton = purchase_cost
+    else:
+        cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
+
+    production = compute_production_tables(
+        page.production_monthly.data,
+        page.projection.start_year,
+        page.projection.end_year,
+    )
+    cassava_series = pd.to_numeric(
+        production.monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce"
+    ).fillna(method="ffill").fillna(method="bfill")
+    if cassava_series.empty:
+        return
+
+    cassava_series.index = cassava_series.index.to_period("M").to_timestamp()
+    fallback = float(cassava_series.mean()) if not cassava_series.empty else 0.0
+
+    def _month_to_timestamp(value: object) -> pd.Timestamp | None:
+        try:
+            return pd.Period(str(value), freq="M").to_timestamp()
+        except Exception:  # pragma: no cover - defensive parsing guard
+            return None
+
+    direct_df = direct_df.copy()
+    month_stamps = direct_df["Month"].apply(_month_to_timestamp)
+    updated_amounts = []
+    for is_feed, month, current in zip(feed_mask, month_stamps, direct_df["Amount"]):
+        if not is_feed:
+            updated_amounts.append(current)
+            continue
+        tons = fallback
+        if month is not None and month in cassava_series.index:
+            tons = float(cassava_series.loc[month])
+        updated_amounts.append(tons * cost_per_ton)
+
+    direct_df["Amount"] = updated_amounts
+    page.direct_costs_monthly.data = direct_df
+
+
+def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
+    """Ensure derived landing-page tables stay synchronised with inputs."""
+
+    _update_staff_costs_from_positions(page)
+    _update_feedstock_costs(page, scenario)
+
+
 def _key_assumptions_controls(table: EditableTable) -> None:
     """Expose frequently tweaked assumptions inside the main page."""
 
     st.subheader("Key Assumptions")
+    original_df = table.data.copy()
     df = table.data.copy()
     slider_cfg = {
         "Corporate tax rate": dict(min_value=0.0, max_value=0.7, step=0.01),
@@ -153,6 +271,8 @@ def _key_assumptions_controls(table: EditableTable) -> None:
 
             if value_key not in st.session_state:
                 st.session_state[value_key] = float(df.at[idx, "Value"])
+
+            original_value = float(df.at[idx, "Value"]) if pd.notna(df.at[idx, "Value"]) else 0.0
 
             minus_col, value_col, plus_col = st.columns([1, 4, 1])
             with minus_col:
@@ -176,7 +296,11 @@ def _key_assumptions_controls(table: EditableTable) -> None:
             )
             st.session_state[value_key] = float(current_value)
             df.at[idx, "Value"] = float(current_value)
+            if not np.isclose(original_value, float(current_value)):
+                _mark_inputs_dirty()
     table.data = df
+    if not df.equals(original_df):
+        table.data = df
 
 
 def _numeric_step(value: float) -> float:
@@ -232,6 +356,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     )
 
     st.markdown("Adjust the values for the selected row:")
+    updated = False
     for column in table.columns:
         current_value = table.data.at[row_idx, column]
         widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
@@ -246,6 +371,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 base_value = numeric_series.iloc[0] if not numeric_series.empty else 0.0
             if pd.isna(base_value):
                 base_value = 0.0
+            original_value = float(base_value)
             # Streamlit number_input requires all numeric arguments to share the
             # same underlying type (ints vs floats). ``_numeric_step`` can
             # return an integer when the magnitude is large, so coerce the
@@ -263,6 +389,8 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
             if pd.api.types.is_integer_dtype(table.data[column]):
                 new_value = int(round(new_value))
             table.data.at[row_idx, column] = new_value
+            if not np.isclose(original_value, float(new_value)):
+                updated = True
         else:
             text_value = "" if current_value is None or pd.isna(current_value) else str(current_value)
             new_value = st.text_input(
@@ -271,8 +399,12 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 key=widget_key,
             )
             table.data.at[row_idx, column] = new_value
+            if str(new_value) != str(text_value):
+                updated = True
 
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
+    if updated:
+        _mark_inputs_dirty()
 
 
 def _editable_tables(page: InputLandingPage) -> None:
@@ -295,9 +427,12 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
 
     safe_key = f"table_{table.name.replace(' ', '_').lower()}"
     with st.expander(table.name, expanded=expanded):
+        original_data = table.data.copy()
+        data_changed = False
         controls = st.columns(2)
         if controls[0].button("➕ Add row", key=f"add_{safe_key}"):
             table.add_row({column: None for column in table.columns})
+            data_changed = True
 
         if not table.data.empty:
             row_options = list(table.data.index)
@@ -310,6 +445,7 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
             )
             if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
                 table.remove_row(int(remove_index))
+                data_changed = True
         else:
             controls[1].markdown("&nbsp;")
 
@@ -320,9 +456,16 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
             key=safe_key,
         )
         if isinstance(edited, pd.DataFrame):
-            table.data = edited[table.columns].copy()
+            new_data = edited[table.columns].copy()
         else:  # pragma: no cover - safety for older Streamlit returning list of dicts
-            table.data = pd.DataFrame(edited, columns=table.columns)
+            new_data = pd.DataFrame(edited, columns=table.columns)
+
+        if not new_data.equals(table.data):
+            data_changed = True
+        table.data = new_data
+
+        if data_changed or not table.data.equals(original_data):
+            _mark_inputs_dirty()
 
 def _annualise(rate: float | None) -> float | None:
     if rate is None or pd.isna(rate):
@@ -722,65 +865,17 @@ def main() -> None:
             index=scenario_index,
             key="scenario_select",
         )
+    download_container = action_cols[2].container()
 
     if selected_choice != st.session_state.selected_scenario:
         st.session_state.selected_scenario = selected_choice
-        st.session_state.mc_cache = None
-        st.session_state.mc_cache_version = None
-        st.session_state.mc_cache_scenario = None
-
-    snapshot = st.session_state.get("input_snapshot")
-    snapshot_projection = None
-    if snapshot is not None:
-        snapshot_projection = (
-            int(snapshot.projection.start_year),
-            int(snapshot.projection.end_year),
-        )
-    current_projection = (
-        int(input_page.projection.start_year),
-        int(input_page.projection.end_year),
-    )
-    projection_changed = (
-        snapshot_projection is not None and snapshot_projection != current_projection
-    )
-
-    if recalc or projection_changed or "scenario_payloads" not in st.session_state:
         st.session_state.scenario_payloads = {}
         st.session_state.excel_bytes_map = {}
-        st.session_state.input_snapshot = copy.deepcopy(input_page)
-        st.session_state.model_version = st.session_state.get("model_version", 0) + 1
         st.session_state.mc_cache = None
         st.session_state.mc_cache_version = None
         st.session_state.mc_cache_scenario = None
 
-    snapshot = st.session_state.get("input_snapshot")
-    if snapshot is None:
-        snapshot = copy.deepcopy(input_page)
-        st.session_state.input_snapshot = snapshot
-
     selected_scenario = st.session_state.selected_scenario
-    model, results = _ensure_scenario_payload(selected_scenario, snapshot)
-    st.session_state.model_results = (model, results)
-
-    excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-    if selected_scenario not in excel_map:
-        excel_map[selected_scenario] = _generate_excel_bytes(
-            model, results, selected_scenario
-        )
-        st.session_state.excel_bytes_map = excel_map
-    st.session_state.excel_bytes = excel_map.get(selected_scenario)
-
-    model.scenario = selected_scenario
-
-    with action_cols[2]:
-        excel_bytes = st.session_state.get("excel_bytes")
-        if excel_bytes:
-            st.download_button(
-                "Download Excel Model",
-                data=excel_bytes,
-                file_name="Cassava_Bioethanol_Financial_Model.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
 
     st.caption("Use the navigation tabs to move between the input landing page and the analytical dashboards.")
 
@@ -803,7 +898,65 @@ def main() -> None:
         _update_projection(input_page)
         _key_assumptions_controls(input_page.global_inputs)
         _modify_default_inputs(input_page)
+        _apply_dependent_updates(input_page, selected_scenario)
         _editable_tables(input_page)
+
+    snapshot = st.session_state.get("input_snapshot")
+    snapshot_projection = None
+    if snapshot is not None:
+        snapshot_projection = (
+            int(snapshot.projection.start_year),
+            int(snapshot.projection.end_year),
+        )
+    current_projection = (
+        int(input_page.projection.start_year),
+        int(input_page.projection.end_year),
+    )
+    projection_changed = snapshot_projection is not None and snapshot_projection != current_projection
+    inputs_dirty = st.session_state.get("inputs_dirty", False)
+
+    if (
+        recalc
+        or projection_changed
+        or inputs_dirty
+        or "scenario_payloads" not in st.session_state
+    ):
+        st.session_state.scenario_payloads = {}
+        st.session_state.excel_bytes_map = {}
+        st.session_state.input_snapshot = copy.deepcopy(input_page)
+        st.session_state.model_version = st.session_state.get("model_version", 0) + 1
+        st.session_state.mc_cache = None
+        st.session_state.mc_cache_version = None
+        st.session_state.mc_cache_scenario = None
+        st.session_state.inputs_dirty = False
+
+    snapshot = st.session_state.get("input_snapshot")
+    if snapshot is None:
+        snapshot = copy.deepcopy(input_page)
+        st.session_state.input_snapshot = snapshot
+
+    model, results = _ensure_scenario_payload(selected_scenario, snapshot)
+    st.session_state.model_results = (model, results)
+
+    excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
+    if selected_scenario not in excel_map:
+        excel_map[selected_scenario] = _generate_excel_bytes(
+            model, results, selected_scenario
+        )
+        st.session_state.excel_bytes_map = excel_map
+    st.session_state.excel_bytes = excel_map.get(selected_scenario)
+
+    model.scenario = selected_scenario
+
+    with download_container:
+        excel_bytes = st.session_state.get("excel_bytes")
+        if excel_bytes:
+            st.download_button(
+                "Download Excel Model",
+                data=excel_bytes,
+                file_name="Cassava_Bioethanol_Financial_Model.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
     with tabs[1]:
         _render_key_metrics(model, results)
