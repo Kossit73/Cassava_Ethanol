@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Dict, Iterable
 
@@ -94,7 +95,7 @@ def export_to_excel(
         _write_financial_performance(writer, results)
         _write_financial_position(writer, results)
         _write_cash_flow_page(writer, results)
-        _write_sensitivity_page(writer, model, sensitivity_scenarios)
+        _write_sensitivity_page(writer, model, results, sensitivity_scenarios)
         _write_scenario_page(writer, model, results, scenario_configs)
         _write_break_even_page(writer, model, results)
     return output_path
@@ -626,6 +627,7 @@ def _write_cash_flow_page(writer: pd.ExcelWriter, results: Dict[str, object]) ->
 def _write_sensitivity_page(
     writer: pd.ExcelWriter,
     model: CassavaBioethanolModel,
+    results: Dict[str, object],
     scenarios: Iterable[SensitivityScenario],
 ) -> None:
     sheet = "Sensitivity Analyses"
@@ -636,11 +638,19 @@ def _write_sensitivity_page(
         else pd.DataFrame(columns=["name", "parameter", "delta"])
     )
     next_row = _write_table(writer, sheet, config_df, "Sensitivity Analysis Configuration")
+    base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+
+    def _scenario_model() -> CassavaBioethanolModel:
+        clone = CassavaBioethanolModel(copy.deepcopy(base_page))
+        clone.scenario = model.scenario
+        return clone
+
     if scenario_list:
-        results = run_sensitivity(model, scenario_list)
+        sensitivity_model = _scenario_model()
+        sensitivity_results = run_sensitivity(sensitivity_model, scenario_list)
     else:
-        results = pd.DataFrame(columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"])
-    next_row = _write_table(writer, sheet, results, "Simulation Results", startrow=next_row)
+        sensitivity_results = pd.DataFrame(columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"])
+    next_row = _write_table(writer, sheet, sensitivity_results, "Simulation Results", startrow=next_row)
 
     mc_parameter_std = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
     mc_iterations = 200
@@ -663,8 +673,9 @@ def _write_sensitivity_page(
         index=False,
     )
 
+    mc_model = _scenario_model()
     mc_results = monte_carlo_simulation(
-        model,
+        mc_model,
         parameter_std=mc_parameter_std,
         iterations=mc_iterations,
         random_seed=mc_seed,
@@ -676,8 +687,9 @@ def _write_sensitivity_page(
         "Monte Carlo Simulation Results",
         startrow=next_row,
     )
+    tornado_model = _scenario_model()
     tornado = tornado_chart_inputs(
-        model,
+        tornado_model,
         drivers=[("Corporate tax rate", 1.0), ("Investor share capital", 1.0), ("Owner share capital", 1.0)],
         scale=0.1,
     )
@@ -700,7 +712,8 @@ def _write_scenario_page(
     )
     next_row = _write_table(writer, sheet, config_df, "Scenario/Is Configuration", index=False)
 
-    base_inputs = model.input_page.global_inputs.data.copy()
+    base_page = copy.deepcopy(base_results.get("input_page_snapshot", model.input_page))
+    base_inputs = base_page.global_inputs.data.copy()
     tool_df = base_inputs.rename(columns={"Value": "Base Value"})
     numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
     tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
@@ -716,8 +729,14 @@ def _write_scenario_page(
         index=False,
     )
 
+    def _scenario_model() -> CassavaBioethanolModel:
+        clone = CassavaBioethanolModel(copy.deepcopy(base_page))
+        clone.scenario = model.scenario
+        return clone
+
     if config_list:
-        comparison = scenario_comparison(model, config_list)
+        comparison_model = _scenario_model()
+        comparison = scenario_comparison(comparison_model, config_list)
     else:
         comparison = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
     next_row = _write_table(writer, sheet, comparison, "Scenario Comparison", startrow=next_row, index=False)
@@ -748,8 +767,9 @@ def _write_scenario_page(
     )
 
     try:
+        goal_model = _scenario_model()
         goal_seek_result = goal_seek_to_target(
-            model,
+            goal_model,
             goal_seek_parameter,
             goal_seek_metric,
             target_value,

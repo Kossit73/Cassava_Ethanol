@@ -535,12 +535,19 @@ def _render_cash_flow_page(results: Dict[str, object]) -> None:
         cumulative_df = cumulative_equity.reset_index().rename(columns={cumulative_equity.index.name or "index": "Month"})
         st.dataframe(cumulative_df, use_container_width=True)
 
-def _render_sensitivity_page(model: CassavaBioethanolModel) -> None:
+def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("Sensitivity Analysis Configuration")
     config_df = pd.DataFrame([s.__dict__ for s in DEFAULT_SENSITIVITY_SCENARIOS]) if DEFAULT_SENSITIVITY_SCENARIOS else pd.DataFrame(columns=["name", "parameter", "delta"])
     st.dataframe(config_df.rename(columns={"name": "Scenario", "parameter": "Parameter", "delta": "Delta"}), use_container_width=True, hide_index=True)
 
-    analysis_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+    base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+
+    def _scenario_model() -> CassavaBioethanolModel:
+        clone = CassavaBioethanolModel(copy.deepcopy(base_page))
+        clone.scenario = model.scenario
+        return clone
+
+    analysis_model = _scenario_model()
     if DEFAULT_SENSITIVITY_SCENARIOS:
         sensitivity_results = run_sensitivity(analysis_model, DEFAULT_SENSITIVITY_SCENARIOS)
     else:
@@ -556,7 +563,7 @@ def _render_sensitivity_page(model: CassavaBioethanolModel) -> None:
     st.dataframe(pd.DataFrame(mc_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Tornado Drivers")
-    tornado_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+    tornado_model = _scenario_model()
     tornado_df = tornado_chart_inputs(tornado_model, TORNADO_DRIVERS, scale=0.1)
     st.dataframe(tornado_df, use_container_width=True)
 
@@ -574,7 +581,14 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     tool_df = tool_df[[c for c in desired_order if c in tool_df.columns]]
     st.dataframe(tool_df, use_container_width=True, hide_index=True)
 
-    comparison_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+    base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+
+    def _scenario_model() -> CassavaBioethanolModel:
+        clone = CassavaBioethanolModel(copy.deepcopy(base_page))
+        clone.scenario = model.scenario
+        return clone
+
+    comparison_model = _scenario_model()
     if DEFAULT_SCENARIO_CONFIGS:
         comparison_df = scenario_comparison(comparison_model, DEFAULT_SCENARIO_CONFIGS)
     else:
@@ -587,7 +601,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     goal_seek_metric = "Project NPV"
     try:
         target_value = float(results["metrics"].get(goal_seek_metric, 0.0))
-        goal_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+        goal_model = _scenario_model()
         goal_result = goal_seek_to_target(goal_model, goal_seek_parameter, goal_seek_metric, target_value)
         goal_df = pd.DataFrame(
             [
@@ -606,17 +620,18 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         goal_df = pd.DataFrame(columns=["Parameter", "Target Metric", "Target Value", "Target Name", "Achieved Value", "Tolerance", "Iterations"])
     st.dataframe(goal_df, use_container_width=True)
 
-def _render_monte_carlo_page(model: CassavaBioethanolModel) -> None:
+def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     current_version = st.session_state.get("model_version")
     cache_version = st.session_state.get("mc_cache_version")
     cache_scenario = st.session_state.get("mc_cache_scenario")
     current_scenario = model.scenario
+    base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
     if (
         st.session_state.get("mc_cache") is None
         or cache_version != current_version
         or cache_scenario != current_scenario
     ):
-        mc_model = CassavaBioethanolModel(copy.deepcopy(model.input_page))
+        mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
         mc_model.scenario = current_scenario
         st.session_state.mc_cache = monte_carlo_simulation(
             mc_model,
@@ -751,13 +766,13 @@ def main() -> None:
         _render_cash_flow_page(results)
 
     with tabs[5]:
-        _render_sensitivity_page(model)
+        _render_sensitivity_page(model, results)
 
     with tabs[6]:
         _render_scenario_page(model, results)
 
     with tabs[7]:
-        _render_monte_carlo_page(model)
+        _render_monte_carlo_page(model, results)
 
 
 if __name__ == "__main__":
