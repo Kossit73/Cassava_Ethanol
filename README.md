@@ -24,3 +24,11 @@ python generate_model.py --output Cassava_Bioethanol_Financial_Model.xlsx
 ```
 
 The script exports a multi-sheet Excel workbook that aligns with the requested modelling specification. Adjust inputs by editing the data tables defined in `bioethanol_model/inputs.py` or by extending the `EditableTable` structures programmatically before calling the exporter.
+
+To explore and tweak the model interactively, launch the Streamlit dashboard:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The web app lets you edit all landing-page tables, recalculates the integrated statements on demand, and provides an instant Excel download that mirrors the command line export.
