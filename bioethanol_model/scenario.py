@@ -48,6 +48,7 @@ def goal_seek_to_target(
 
     outcome = goal_seek(objective, target_value, base_value)
     table.loc[table["Parameter"] == parameter, "Value"] = base_value
+    outcome.target_name = parameter
     return outcome
 
 

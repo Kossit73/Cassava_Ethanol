@@ -88,8 +88,8 @@ def export_to_excel(
         _write_financial_position(writer, results)
         _write_cash_flow_page(writer, results)
         _write_sensitivity_page(writer, model, sensitivity_scenarios)
-        _write_scenario_page(writer, model, scenario_configs)
-        _write_break_even_page(writer, results)
+        _write_scenario_page(writer, model, results, scenario_configs)
+        _write_break_even_page(writer, model, results)
     return output_path
 
 
@@ -444,12 +444,108 @@ def _write_financial_position(writer: pd.ExcelWriter, results: Dict[str, object]
 
 def _write_cash_flow_page(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:
     sheet = "Cash Flow"
+    if sheet in writer.sheets:
+        worksheet = writer.sheets[sheet]
+    else:
+        worksheet = writer.book.add_worksheet(sheet)
+        writer.sheets[sheet] = worksheet
+
+    chart_col = 8
+    chart_height = 18
+
     cash_monthly = results["financials"].cashflow_monthly
     cash_annual = results["financials"].cashflow_annual
-    next_row = _write_table(writer, sheet, cash_monthly, "Monthly Cash Flow Statement")
-    next_row = _write_table(writer, sheet, cash_annual, "Annual Cash Flow Statement", startrow=next_row)
-    cumulative = cash_monthly["Equity Cash Flow"].cumsum().to_frame("Cumulative Equity Cash Flow")
-    _write_table(writer, sheet, cumulative, "Cumulative Equity Cash Flow", startrow=next_row)
+
+    def _format_month_table(df: pd.DataFrame) -> pd.DataFrame:
+        table = _reset_period_index(df, "Month")
+        if "Month" in table.columns:
+            try:
+                table["Month"] = pd.to_datetime(table["Month"]).dt.to_period("M").astype(str)
+            except Exception:
+                table["Month"] = table["Month"].astype(str)
+        return table
+
+    monthly_table = _format_month_table(cash_monthly)
+    monthly_start = 0
+    next_row = _write_table(
+        writer,
+        sheet,
+        monthly_table,
+        "Monthly Cash Flow Statement",
+        startrow=monthly_start,
+        index=False,
+    )
+
+    cash_columns = [c for c in monthly_table.columns if c != "Month"]
+    if cash_columns and len(monthly_table.index) > 0:
+        chart = writer.book.add_chart({"type": "column"})
+        header_row = monthly_start + 1
+        data_start = monthly_start + 2
+        data_end = monthly_start + 1 + len(monthly_table.index)
+        for idx, column in enumerate(cash_columns, start=1):
+            chart.add_series(
+                {
+                    "name": [sheet, header_row, idx],
+                    "categories": [sheet, data_start, 0, data_end, 0],
+                    "values": [sheet, data_start, idx, data_end, idx],
+                }
+            )
+        chart.set_title({"name": "Cash Flow & Returns"})
+        chart.set_x_axis({"name": "Month"})
+        chart.set_y_axis({"major_gridlines": {"visible": True}})
+        chart.set_legend({"position": "bottom"})
+        worksheet.insert_chart(monthly_start, chart_col, chart, {"x_scale": 1.1, "y_scale": 1.1})
+        next_row = max(next_row, monthly_start + chart_height)
+
+    annual_table = _reset_period_index(cash_annual, "Year")
+    annual_start = next_row
+    next_row = _write_table(
+        writer,
+        sheet,
+        annual_table,
+        "Annual Cash Flow Statement",
+        startrow=annual_start,
+        index=False,
+    )
+
+    cumulative_series = {}
+    if "Free Cash Flow" in cash_monthly.columns:
+        cumulative_series["Cumulative Free Cash Flow"] = cash_monthly["Free Cash Flow"].cumsum()
+    if "Equity Cash Flow" in cash_monthly.columns:
+        cumulative_series["Cumulative Equity Cash Flow"] = cash_monthly["Equity Cash Flow"].cumsum()
+
+    if cumulative_series and len(monthly_table.index) > 0:
+        cumulative_df = pd.DataFrame({"Month": monthly_table["Month"]})
+        for name, series in cumulative_series.items():
+            cumulative_df[name] = series.values
+        cumulative_start = next_row
+        next_row = _write_table(
+            writer,
+            sheet,
+            cumulative_df,
+            "Cumulative Equity Cash Flow Schedule",
+            startrow=cumulative_start,
+            index=False,
+        )
+
+        chart = writer.book.add_chart({"type": "line"})
+        header_row = cumulative_start + 1
+        data_start = cumulative_start + 2
+        data_end = cumulative_start + 1 + len(cumulative_df.index)
+        for idx, column in enumerate(cumulative_df.columns[1:], start=1):
+            chart.add_series(
+                {
+                    "name": [sheet, header_row, idx],
+                    "categories": [sheet, data_start, 0, data_end, 0],
+                    "values": [sheet, data_start, idx, data_end, idx],
+                }
+            )
+        chart.set_title({"name": "Cumulative Cash Flows"})
+        chart.set_x_axis({"name": "Month"})
+        chart.set_y_axis({"major_gridlines": {"visible": True}})
+        chart.set_legend({"position": "bottom"})
+        worksheet.insert_chart(cumulative_start, chart_col, chart, {"x_scale": 1.1, "y_scale": 1.1})
+        next_row = max(next_row, cumulative_start + chart_height)
 
 
 def _write_sensitivity_page(
@@ -459,20 +555,52 @@ def _write_sensitivity_page(
 ) -> None:
     sheet = "Sensitivity Analyses"
     scenario_list = list(scenarios)
-    config_df = pd.DataFrame([s.__dict__ for s in scenario_list]) if scenario_list else pd.DataFrame(columns=["name", "parameter", "delta"])
+    config_df = (
+        pd.DataFrame([s.__dict__ for s in scenario_list])
+        if scenario_list
+        else pd.DataFrame(columns=["name", "parameter", "delta"])
+    )
     next_row = _write_table(writer, sheet, config_df, "Sensitivity Analysis Configuration")
     if scenario_list:
         results = run_sensitivity(model, scenario_list)
     else:
         results = pd.DataFrame(columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"])
-    next_row = _write_table(writer, sheet, results, "Sensitivity Results", startrow=next_row)
+    next_row = _write_table(writer, sheet, results, "Simulation Results", startrow=next_row)
+
+    mc_parameter_std = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
+    mc_iterations = 200
+    mc_seed = 42
+
+    mc_config_rows = (
+        [{"Setting": "Iterations", "Value": mc_iterations}, {"Setting": "Random Seed", "Value": mc_seed}]
+        + [
+            {"Setting": f"Std Dev - {param}", "Value": std}
+            for param, std in mc_parameter_std.items()
+        ]
+    )
+    mc_config_df = pd.DataFrame(mc_config_rows)
+    next_row = _write_table(
+        writer,
+        sheet,
+        mc_config_df,
+        "Monte Carlo Simulation Configuration",
+        startrow=next_row,
+        index=False,
+    )
 
     mc_results = monte_carlo_simulation(
         model,
-        parameter_std={"Corporate tax rate": 0.01, "Investor share capital": 0.02},
-        iterations=200,
+        parameter_std=mc_parameter_std,
+        iterations=mc_iterations,
+        random_seed=mc_seed,
     )
-    next_row = _write_table(writer, sheet, mc_results.describe().T, "Monte Carlo Simulation Results", startrow=next_row)
+    next_row = _write_table(
+        writer,
+        sheet,
+        mc_results.describe().T,
+        "Monte Carlo Simulation Results",
+        startrow=next_row,
+    )
     tornado = tornado_chart_inputs(
         model,
         drivers=[("Corporate tax rate", 1.0), ("Investor share capital", 1.0), ("Owner share capital", 1.0)],
@@ -484,26 +612,186 @@ def _write_sensitivity_page(
 def _write_scenario_page(
     writer: pd.ExcelWriter,
     model: CassavaBioethanolModel,
+    base_results: Dict[str, object],
     configs: Iterable[ScenarioConfig],
 ) -> None:
     sheet = "Scenario Analysis"
+
     config_list = list(configs)
-    config_df = pd.DataFrame([{"Scenario": cfg.name, **cfg.overrides} for cfg in config_list]) if config_list else pd.DataFrame()
-    next_row = _write_table(writer, sheet, config_df, "Scenario/If Configuration")
+    config_df = (
+        pd.DataFrame([{"Scenario": cfg.name, **cfg.overrides} for cfg in config_list])
+        if config_list
+        else pd.DataFrame()
+    )
+    next_row = _write_table(writer, sheet, config_df, "Scenario/Is Configuration", index=False)
+
+    base_inputs = model.input_page.global_inputs.data.copy()
+    tool_df = base_inputs.rename(columns={"Value": "Base Value"})
+    numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
+    tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
+    tool_df["High Bound"] = np.where(numeric_values.notna(), numeric_values * 1.2, np.nan)
+    desired_order = ["Parameter", "Base Value", "Units", "Low Bound", "High Bound"]
+    tool_df = tool_df[[c for c in desired_order if c in tool_df.columns]]
+    next_row = _write_table(
+        writer,
+        sheet,
+        tool_df,
+        "Scenario Tool Configuration",
+        startrow=next_row,
+        index=False,
+    )
+
     if config_list:
         comparison = scenario_comparison(model, config_list)
     else:
         comparison = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
-    next_row = _write_table(writer, sheet, comparison, "Scenario Comparison", startrow=next_row)
+    next_row = _write_table(writer, sheet, comparison, "Scenario Comparison", startrow=next_row, index=False)
 
-    goal_seek_result = goal_seek_to_target(model, "Corporate tax rate", "Project NPV", comparison["Project NPV"].mean() if not comparison.empty else 0)
-    goal_seek_df = pd.DataFrame([goal_seek_result.__dict__])
-    _write_table(writer, sheet, goal_seek_df, "Goal Seek Results", startrow=next_row)
+    base_metrics = base_results.get("metrics", {})
+    goal_seek_parameter = "Corporate tax rate"
+    goal_seek_metric = "Project NPV"
+    target_value = (
+        comparison[goal_seek_metric].mean()
+        if not comparison.empty and goal_seek_metric in comparison
+        else float(base_metrics.get(goal_seek_metric, 0.0))
+    )
+
+    goal_seek_config = pd.DataFrame(
+        {
+            "Parameter": [goal_seek_parameter],
+            "Target Metric": [goal_seek_metric],
+            "Target Value": [target_value],
+        }
+    )
+    next_row = _write_table(
+        writer,
+        sheet,
+        goal_seek_config,
+        "Goal Seek Configuration",
+        startrow=next_row,
+        index=False,
+    )
+
+    try:
+        goal_seek_result = goal_seek_to_target(
+            model,
+            goal_seek_parameter,
+            goal_seek_metric,
+            target_value,
+        )
+        goal_seek_df = pd.DataFrame(
+            [
+                {
+                    "Target Name": goal_seek_result.target_name,
+                    "Achieved Value": goal_seek_result.achieved_value,
+                    "Tolerance": goal_seek_result.tolerance,
+                    "Iterations": goal_seek_result.iterations,
+                }
+            ]
+        )
+        goal_seek_df.insert(0, "Target Metric", goal_seek_metric)
+        goal_seek_df.insert(0, "Parameter", goal_seek_parameter)
+        goal_seek_df["Target Value"] = target_value
+    except KeyError:
+        goal_seek_df = pd.DataFrame(
+            columns=["Parameter", "Target Metric", "Target Value", "Target Name", "Achieved Value", "Tolerance", "Iterations"]
+        )
+    _write_table(writer, sheet, goal_seek_df, "Goal Seek Results", startrow=next_row, index=False)
 
 
-def _write_break_even_page(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:
+def _write_break_even_page(
+    writer: pd.ExcelWriter,
+    model: CassavaBioethanolModel,
+    results: Dict[str, object],
+) -> None:
     sheet = "Break-even"
-    break_even = results["break_even"]
-    payback = results["payback"]
-    next_row = _write_table(writer, sheet, break_even, "Break-even Analysis")
-    _write_table(writer, sheet, payback, "Payback Schedule", startrow=next_row)
+
+    production_monthly = results["production"].monthly
+    revenue_monthly = results["revenue"].monthly
+    direct_costs = results["costs"].get("Direct Costs")
+    staff_costs = results["costs"].get("Staff Costs")
+    other_costs = results["costs"].get("Other Opex")
+    revenue_inputs = model.input_page.revenue_inputs.data
+
+    if not production_monthly.empty:
+        if "Ethanol litres" in production_monthly.columns:
+            volume_series = production_monthly["Ethanol litres"]
+        else:
+            numeric_cols = production_monthly.select_dtypes(include=[np.number]).columns
+            volume_series = production_monthly[numeric_cols[0]] if len(numeric_cols) else pd.Series(dtype=float)
+    else:
+        volume_series = pd.Series(dtype=float)
+
+    total_volume = float(volume_series.sum()) if not volume_series.empty else float("nan")
+    total_revenue = float(revenue_monthly.get("Total Revenue", pd.Series(dtype=float)).sum())
+    total_direct = float(direct_costs.monthly.sum().sum()) if direct_costs else 0.0
+    fixed_total = 0.0
+    if staff_costs:
+        fixed_total += float(staff_costs.monthly.sum().sum())
+    if other_costs:
+        fixed_total += float(other_costs.monthly.sum().sum())
+
+    avg_price = (
+        total_revenue / total_volume
+        if np.isfinite(total_volume) and total_volume != 0
+        else float("nan")
+    )
+    avg_variable_cost = (
+        total_direct / total_volume
+        if np.isfinite(total_volume) and total_volume != 0
+        else float("nan")
+    )
+    contribution = (
+        avg_price - avg_variable_cost
+        if np.isfinite(avg_price) and np.isfinite(avg_variable_cost)
+        else float("nan")
+    )
+    break_even_volume = (
+        fixed_total / contribution
+        if np.isfinite(contribution) and contribution != 0
+        else float("nan")
+    )
+
+    if "Base Price" in revenue_inputs and not revenue_inputs.empty:
+        try:
+            base_price_input = float(revenue_inputs["Base Price"].iloc[0])
+        except (TypeError, ValueError):
+            base_price_input = float("nan")
+    else:
+        base_price_input = float("nan")
+
+    break_even_input = pd.DataFrame(
+        {
+            "Metric": [
+                "Base Price (input)",
+                "Average Selling Price (per unit)",
+                "Average Variable Cost (per unit)",
+                "Annual Fixed Costs",
+                "Total Production Volume",
+                "Break-even Volume",
+            ],
+            "Value": [base_price_input, avg_price, avg_variable_cost, fixed_total, total_volume, break_even_volume],
+        }
+    )
+
+    break_even_df = _reset_period_index(results["break_even"], "Month")
+    if "Month" in break_even_df.columns:
+        try:
+            break_even_df["Month"] = pd.to_datetime(break_even_df["Month"]).dt.to_period("M").astype(str)
+        except Exception:
+            break_even_df["Month"] = break_even_df["Month"].astype(str)
+    if "Break-even Month" in break_even_df.columns:
+        break_even_df["Break-even Month"] = break_even_df["Break-even Month"].astype(str)
+
+    payback_df = _reset_period_index(results["payback"], "Month")
+    if "Month" in payback_df.columns:
+        try:
+            payback_df["Month"] = pd.to_datetime(payback_df["Month"]).dt.to_period("M").astype(str)
+        except Exception:
+            payback_df["Month"] = payback_df["Month"].astype(str)
+    if "Payback Month" in payback_df.columns:
+        payback_df["Payback Month"] = payback_df["Payback Month"].astype(str)
+
+    next_row = _write_table(writer, sheet, break_even_input, "Break-Even Analysis Input", index=False)
+    next_row = _write_table(writer, sheet, break_even_df, "Break-Even Results", startrow=next_row, index=False)
+    _write_table(writer, sheet, payback_df, "Payback Schedule", startrow=next_row, index=False)
