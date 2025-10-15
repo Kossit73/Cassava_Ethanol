@@ -83,6 +83,7 @@ def export_to_excel(
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         _write_input_page(writer, model.input_page)
+        _write_financial_statements_page(writer, results)
         _write_key_metrics(writer, model, results)
         _write_financial_performance(writer, results)
         _write_financial_position(writer, results)
@@ -116,6 +117,57 @@ def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
                 worksheet.write_number(next_row, 1, page.total_initial_investment)
                 next_row += SECTION_GAP + 1
         next_row += 1
+
+
+def _write_financial_statements_page(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:
+    sheet = "Financial Statements"
+    if sheet in writer.sheets:
+        worksheet = writer.sheets[sheet]
+    else:
+        worksheet = writer.book.add_worksheet(sheet)
+        writer.sheets[sheet] = worksheet
+
+    statements = [
+        (
+            "Income Statement",
+            _reset_period_index(results["financials"].income_monthly, "Month"),
+            _reset_period_index(results["financials"].income_annual, "Year"),
+        ),
+        (
+            "Cash Flow Statement",
+            _reset_period_index(results["financials"].cashflow_monthly, "Month"),
+            _reset_period_index(results["financials"].cashflow_annual, "Year"),
+        ),
+        (
+            "Balance Sheet",
+            _reset_period_index(results["financials"].balance_monthly, "Month"),
+            _reset_period_index(results["financials"].balance_annual, "Year"),
+        ),
+    ]
+
+    heading_format = writer.book.add_format({"bold": True, "bg_color": "#F2F2F2"})
+
+    current_row = 0
+    for title, monthly, annual in statements:
+        worksheet.write(current_row, 0, title, heading_format)
+        current_row += 1
+        current_row = _write_table(
+            writer,
+            sheet,
+            monthly,
+            f"{title} (Monthly)",
+            startrow=current_row,
+            index=False,
+        )
+        current_row = _write_table(
+            writer,
+            sheet,
+            annual,
+            f"{title} (Annual)",
+            startrow=current_row,
+            index=False,
+        )
+        current_row += 1
 
 
 def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
