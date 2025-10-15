@@ -228,13 +228,14 @@ def default_input_page() -> InputLandingPage:
     monthly_index = pd.period_range("2024-01", "2024-12", freq="M")
     production_monthly = EditableTable(
         "Production Monthly",
-        ["Month", "Cassava ton", "Ethanol litres", "DDGS ton"],
+        ["Month", "Cassava ton", "Ethanol litres", "DDGS ton", "Growth %"],
         pd.DataFrame(
             {
                 "Month": monthly_index.astype(str),
                 "Cassava ton": [8_000.0] * len(monthly_index),
                 "Ethanol litres": [1_000_000.0] * len(monthly_index),
                 "DDGS ton": [3_300.0] * len(monthly_index),
+                "Growth %": [0.0] * len(monthly_index),
             }
         ),
     )

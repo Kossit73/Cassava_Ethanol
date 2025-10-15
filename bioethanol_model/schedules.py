@@ -62,7 +62,39 @@ class ProductionOutput:
 
 def compute_production_tables(production_monthly: pd.DataFrame, start_year: int, end_year: int) -> ProductionOutput:
     monthly = production_monthly.copy()
+    if monthly.empty:
+        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "DDGS ton"])
+        empty.index = pd.Index([], name="Month")
+        return ProductionOutput(empty, empty)
+
     monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str))
+    monthly = monthly.sort_values("Month").reset_index(drop=True)
+
+    growth_col = next((c for c in monthly.columns if "growth" in c.lower()), None)
+    growth_series = None
+    if growth_col:
+        growth_series = pd.to_numeric(monthly[growth_col], errors="coerce")
+    else:
+        growth_series = pd.Series(0.0, index=monthly.index)
+
+    numeric_cols = [c for c in monthly.columns if c not in {"Month", growth_col}]
+
+    for col in numeric_cols:
+        values = pd.to_numeric(monthly[col], errors="coerce").fillna(0.0)
+        adjusted = values.copy()
+        prev_rate = 0.0
+        for idx in range(1, len(adjusted)):
+            raw_rate = growth_series.iloc[idx - 1]
+            rate = prev_rate if pd.isna(raw_rate) else float(raw_rate)
+            if not pd.isna(raw_rate):
+                prev_rate = rate
+            if abs(rate) > 1e-12:
+                adjusted.iloc[idx] = adjusted.iloc[idx - 1] * (1.0 + rate)
+        monthly[col] = adjusted
+
+    if growth_col:
+        monthly = monthly.drop(columns=[growth_col])
+
     monthly = monthly.set_index("Month").sort_index()
     monthly = monthly.loc[(monthly.index.year >= start_year) & (monthly.index.year <= end_year)]
     annual = monthly.resample("Y").sum()
