@@ -15,6 +15,33 @@ from .sensitivity import SensitivityScenario, monte_carlo_simulation, run_sensit
 SECTION_GAP = 2
 
 
+def _reset_period_index(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Return a copy of *df* with its first index column renamed to *label*.
+
+    Many of the model schedules keep year or month as the index. When we
+    ``reset_index`` the resulting column name may vary (``index`` or the
+    original index name). This helper normalises that behaviour so downstream
+    selectors can always rely on the expected column label.
+    """
+
+    if df is None:
+        return pd.DataFrame(columns=[label])
+
+    reset = df.reset_index()
+    if reset.empty:
+        # Ensure the column still carries the desired heading even when empty.
+        if reset.columns:
+            reset = reset.rename(columns={reset.columns[0]: label})
+        else:
+            reset[label] = []
+        return reset
+
+    first_col = reset.columns[0]
+    if first_col != label:
+        reset = reset.rename(columns={first_col: label})
+    return reset
+
+
 def _write_table(
     writer: pd.ExcelWriter,
     sheet: str,
@@ -181,7 +208,8 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
             results["production"].annual,
         ],
         axis=1,
-    ).reset_index().rename(columns={"index": "Year"})
+    )
+    annual_ops = _reset_period_index(annual_ops, "Year")
     annual_ops_end = _write_table(
         writer,
         sheet,
@@ -284,18 +312,18 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
                 cumulative_chart_df[name] = series.values
             _write_chart_table(cumulative_chart_df, "Cumulative Cash Flows", "line")
 
-    production_df = results["production"].annual.reset_index().rename(columns={"index": "Year"})
+    production_df = _reset_period_index(results["production"].annual, "Year")
     if not production_df.empty:
         _write_chart_table(production_df, "Annual Production", "line")
 
-    cashflow_annual = results["financials"].cashflow_annual.reset_index().rename(columns={"index": "Year"})
+    cashflow_annual = _reset_period_index(results["financials"].cashflow_annual, "Year")
     cash_columns = ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"]
     cash_columns = [c for c in cash_columns if c in cashflow_annual.columns]
     if cash_columns:
         cash_df = cashflow_annual[["Year", *cash_columns]]
         _write_chart_table(cash_df, "Cash Flow Summary", "column")
 
-    revenue_df = results["revenue"].annual.reset_index().rename(columns={"index": "Year"})
+    revenue_df = _reset_period_index(results["revenue"].annual, "Year")
     if not revenue_df.empty:
         exclude = ["Total Revenue"] if "Total Revenue" in revenue_df.columns else None
         _write_chart_table(
