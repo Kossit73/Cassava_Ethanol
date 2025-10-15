@@ -73,6 +73,23 @@ def _generate_excel_bytes(
         return temp_path.read_bytes()
 
 
+def _ensure_scenario_payload(
+    scenario: str, snapshot: InputLandingPage
+) -> Tuple[CassavaBioethanolModel, Dict[str, object]]:
+    """Return (model, results) for a scenario, computing it lazily if needed."""
+
+    payloads: Dict[str, Tuple[CassavaBioethanolModel, Dict[str, object]]] = (
+        st.session_state.setdefault("scenario_payloads", {})
+    )
+    if scenario not in payloads:
+        with st.spinner(f"Running {scenario.replace('_', ' ').title()} scenario..."):
+            model = CassavaBioethanolModel(copy.deepcopy(snapshot))
+            results = model.build(scenario)
+        payloads[scenario] = (model, results)
+        st.session_state.scenario_payloads = payloads
+    return payloads[scenario]
+
+
 def _update_projection(page: InputLandingPage) -> None:
     """Render projection horizon controls within the main layout."""
 
@@ -683,52 +700,45 @@ def main() -> None:
         recalc = st.button("Recalculate model", type="primary")
     with action_cols[1]:
         scenario_index = scenario_options.index(st.session_state.selected_scenario)
-        selected_scenario = st.selectbox(
+        selected_choice = st.selectbox(
             "Scenario",
             scenario_options,
             index=scenario_index,
             key="scenario_select",
         )
 
-    if selected_scenario != st.session_state.selected_scenario:
-        st.session_state.selected_scenario = selected_scenario
-        payloads = st.session_state.get("scenario_payloads", {})
-        if selected_scenario in payloads:
-            st.session_state.model_results = payloads[selected_scenario]
-        excel_map = st.session_state.get("excel_bytes_map", {})
-        if selected_scenario in excel_map:
-            st.session_state.excel_bytes = excel_map[selected_scenario]
+    if selected_choice != st.session_state.selected_scenario:
+        st.session_state.selected_scenario = selected_choice
+        st.session_state.mc_cache = None
+        st.session_state.mc_cache_version = None
+        st.session_state.mc_cache_scenario = None
 
     if recalc or "scenario_payloads" not in st.session_state:
-        payloads: Dict[str, Tuple[CassavaBioethanolModel, Dict[str, object]]] = {}
-        excel_map: Dict[str, bytes] = {}
-        for scenario_name in scenario_options:
-            scenario_model = CassavaBioethanolModel(copy.deepcopy(input_page))
-            scenario_results = scenario_model.build(scenario_name)
-            payloads[scenario_name] = (scenario_model, scenario_results)
-            excel_map[scenario_name] = _generate_excel_bytes(
-                scenario_model, scenario_results, scenario_name
-            )
-        st.session_state.scenario_payloads = payloads
-        st.session_state.excel_bytes_map = excel_map
+        st.session_state.scenario_payloads = {}
+        st.session_state.excel_bytes_map = {}
+        st.session_state.input_snapshot = copy.deepcopy(input_page)
         st.session_state.model_version = st.session_state.get("model_version", 0) + 1
         st.session_state.mc_cache = None
         st.session_state.mc_cache_version = None
+        st.session_state.mc_cache_scenario = None
 
-    payloads = st.session_state.get("scenario_payloads")
-    if not payloads:
-        st.warning("Recalculate the model to generate scenario outputs.")
-        return
+    snapshot = st.session_state.get("input_snapshot")
+    if snapshot is None:
+        snapshot = copy.deepcopy(input_page)
+        st.session_state.input_snapshot = snapshot
 
     selected_scenario = st.session_state.selected_scenario
-    if selected_scenario not in payloads:
-        selected_scenario = scenario_options[0]
-        st.session_state.selected_scenario = selected_scenario
+    model, results = _ensure_scenario_payload(selected_scenario, snapshot)
+    st.session_state.model_results = (model, results)
 
-    st.session_state.model_results = payloads[selected_scenario]
-    st.session_state.excel_bytes = st.session_state.get("excel_bytes_map", {}).get(selected_scenario)
+    excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
+    if selected_scenario not in excel_map:
+        excel_map[selected_scenario] = _generate_excel_bytes(
+            model, results, selected_scenario
+        )
+        st.session_state.excel_bytes_map = excel_map
+    st.session_state.excel_bytes = excel_map.get(selected_scenario)
 
-    model, results = st.session_state.model_results
     model.scenario = selected_scenario
 
     with action_cols[2]:
