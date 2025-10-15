@@ -65,33 +65,21 @@ def _sidebar_key_assumptions(table: EditableTable) -> None:
 
 
 def _editable_tables(page: InputLandingPage) -> None:
-    """Render editable data tables for all model inputs."""
-    tabs = st.tabs(["Global", "CAPEX", "Revenue", "Production", "Costs", "Working Capital", "Financing", "Other Assumptions"])
-    tab_map: Dict[str, EditableTable] = page.tables()
+    """Render editable data tables grouped by the landing-page sections."""
 
-    with tabs[0]:
-        _render_table(tab_map["Global Inputs"], expanded=True)
-    with tabs[1]:
-        _render_table(tab_map["Initial Investment"], expanded=True)
-        st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
-    with tabs[2]:
-        _render_table(tab_map["Revenue Inputs"], expanded=True)
-    with tabs[3]:
-        _render_table(tab_map["Production Annual"])
-        _render_table(tab_map["Production Monthly"])
-    with tabs[4]:
-        _render_table(tab_map["Direct Costs Monthly"])
-        _render_table(tab_map["Staff Monthly"])
-        _render_table(tab_map["Other Opex Monthly"])
-    with tabs[5]:
-        _render_table(tab_map["Accounts Receivable"])
-        _render_table(tab_map["Inventory & Accounts Payable"])
-    with tabs[6]:
-        _render_table(tab_map["Loan Schedule"], expanded=True)
-        _render_table(tab_map["Tax Schedule"])
-    with tabs[7]:
-        _render_table(tab_map["Inflation Schedule"])
-        _render_table(tab_map["Risk Schedule"])
+    categories = page.grouped_tables()
+    tabs = st.tabs(list(categories.keys()))
+
+    for tab, (section, tables) in zip(tabs, categories.items()):
+        with tab:
+            if section == "Global":
+                st.subheader("Projection Horizon")
+                st.table(page.projection.to_frame())
+            for table in tables:
+                expanded = section in {"Global", "Capex", "Financial"}
+                _render_table(table, expanded=expanded)
+                if table is page.initial_investment:
+                    st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
 
 
 def _render_table(table: EditableTable, expanded: bool = False) -> None:
@@ -239,7 +227,7 @@ def main() -> None:
     _update_projection(input_page)
     _sidebar_key_assumptions(input_page.global_inputs)
 
-    st.header("Model Inputs")
+    st.header("Input Landing Page")
     _editable_tables(input_page)
 
     if st.button("Recalculate model", type="primary") or "model_results" not in st.session_state:

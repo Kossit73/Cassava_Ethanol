@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional
 
@@ -81,6 +82,58 @@ class InputLandingPage:
             "Inflation Schedule": self.inflation_schedule,
             "Risk Schedule": self.risk_schedule,
         }
+
+    def grouped_tables(self) -> "OrderedDict[str, List[EditableTable]]":
+        """Return the landing-page tables grouped under the high-level sections.
+
+        The UI and Excel exporter both rely on this method to present the
+        requested categories: Global, Capex, Production, Costs, Working
+        Capital, Financial, and Other Assumptions.
+        """
+
+        return OrderedDict(
+            [
+                ("Global", [self.global_inputs]),
+                ("Capex", [self.initial_investment]),
+                (
+                    "Production",
+                    [
+                        self.production_annual,
+                        self.production_monthly,
+                    ],
+                ),
+                (
+                    "Costs",
+                    [
+                        self.direct_costs_monthly,
+                        self.staff_costs_monthly,
+                        self.other_opex_monthly,
+                    ],
+                ),
+                (
+                    "Working Capital",
+                    [
+                        self.accounts_receivable,
+                        self.inventory_payable,
+                    ],
+                ),
+                (
+                    "Financial",
+                    [
+                        self.revenue_inputs,
+                        self.loan_schedule,
+                        self.tax_schedule,
+                    ],
+                ),
+                (
+                    "Other Assumptions",
+                    [
+                        self.inflation_schedule,
+                        self.risk_schedule,
+                    ],
+                ),
+            ]
+        )
 
     def add_row(self, table_name: str, values: Dict[str, object]) -> None:
         """Add a row to one of the landing-page tables by name."""

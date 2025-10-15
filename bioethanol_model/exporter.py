@@ -94,11 +94,28 @@ def export_to_excel(
 
 
 def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
-    sheet = "Input Landing"
+    sheet = "Input Landing Page"
+    if sheet in writer.sheets:
+        worksheet = writer.sheets[sheet]
+    else:
+        worksheet = writer.book.add_worksheet(sheet)
+        writer.sheets[sheet] = worksheet
+
     projection_df = page.projection.to_frame()
     next_row = _write_table(writer, sheet, projection_df, "Projection Horizon")
-    for title, table in page.tables().items():
-        next_row = _write_table(writer, sheet, table.data, title, startrow=next_row)
+
+    heading_format = writer.book.add_format({"bold": True, "bg_color": "#F2F2F2"})
+
+    for section, tables in page.grouped_tables().items():
+        worksheet.write(next_row, 0, section, heading_format)
+        next_row += 1
+        for table in tables:
+            next_row = _write_table(writer, sheet, table.data, table.name, startrow=next_row)
+            if table is page.initial_investment:
+                worksheet.write(next_row, 0, "Total Initial Investment")
+                worksheet.write_number(next_row, 1, page.total_initial_investment)
+                next_row += SECTION_GAP + 1
+        next_row += 1
 
 
 def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
