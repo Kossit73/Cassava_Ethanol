@@ -260,6 +260,30 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         )
         current_row = max(table_end, current_row + chart_height)
 
+    cash_monthly = results["financials"].cashflow_monthly
+    if not cash_monthly.empty:
+        month_labels = cash_monthly.index.to_period("M").astype(str)
+        cf_columns = [
+            col
+            for col in ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"]
+            if col in cash_monthly.columns
+        ]
+        if cf_columns:
+            cash_returns_df = cash_monthly[cf_columns].copy()
+            cash_returns_df.insert(0, "Month", month_labels)
+            _write_chart_table(cash_returns_df, "Cash Flow & Returns", "column")
+
+        cumulative_series: Dict[str, pd.Series] = {}
+        if "Free Cash Flow" in cash_monthly.columns:
+            cumulative_series["Cumulative Free Cash Flow"] = cash_monthly["Free Cash Flow"].cumsum()
+        if "Equity Cash Flow" in cash_monthly.columns:
+            cumulative_series["Cumulative Equity Cash Flow"] = cash_monthly["Equity Cash Flow"].cumsum()
+        if cumulative_series:
+            cumulative_chart_df = pd.DataFrame({"Month": month_labels})
+            for name, series in cumulative_series.items():
+                cumulative_chart_df[name] = series.values
+            _write_chart_table(cumulative_chart_df, "Cumulative Cash Flows", "line")
+
     production_df = results["production"].annual.reset_index().rename(columns={"index": "Year"})
     if not production_df.empty:
         _write_chart_table(production_df, "Annual Production", "line")
