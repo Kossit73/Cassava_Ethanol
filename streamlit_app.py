@@ -72,45 +72,53 @@ def _generate_excel_bytes(model: CassavaBioethanolModel) -> bytes:
 
 
 def _update_projection(page: InputLandingPage) -> None:
-    """Render projection horizon controls in the sidebar and update in place."""
+    """Render projection horizon controls within the main layout."""
 
-    with st.sidebar:
-        st.header("Projection Horizon")
-        start = st.number_input(
-            "Start Year",
-            min_value=2000,
-            max_value=2100,
-            value=int(page.projection.start_year),
-            step=1,
-        )
-        end = st.number_input(
-            "End Year",
-            min_value=start,
-            max_value=2125,
-            value=int(page.projection.end_year),
-            step=1,
-        )
-        page.projection.start_year = int(start)
-        page.projection.end_year = int(end)
+    st.subheader("Projection Horizon")
+    start_col, end_col = st.columns(2)
+    start = start_col.number_input(
+        "Start Year",
+        min_value=2000,
+        max_value=2100,
+        value=int(page.projection.start_year),
+        step=1,
+        key="projection_start_year",
+    )
+    end = end_col.number_input(
+        "End Year",
+        min_value=start,
+        max_value=2125,
+        value=int(page.projection.end_year),
+        step=1,
+        key="projection_end_year",
+    )
+    page.projection.start_year = int(start)
+    page.projection.end_year = int(end)
 
 
-def _sidebar_key_assumptions(table: EditableTable) -> None:
-    """Expose frequently tweaked assumptions with Streamlit widgets."""
+def _key_assumptions_controls(table: EditableTable) -> None:
+    """Expose frequently tweaked assumptions inside the main page."""
 
-    with st.sidebar:
-        st.header("Key Assumptions")
-        df = table.data.copy()
-        for parameter, cfg in {
-            "Corporate tax rate": dict(min_value=0.0, max_value=0.7, step=0.01),
-            "Investor share capital": dict(min_value=0.0, max_value=1.0, step=0.01),
-            "Owner share capital": dict(min_value=0.0, max_value=1.0, step=0.01),
-            "Discount rate": dict(min_value=0.0, max_value=0.5, step=0.01),
-        }.items():
-            if parameter in df["Parameter"].values:
-                idx = df.index[df["Parameter"] == parameter][0]
-                current = float(df.at[idx, "Value"])
-                df.at[idx, "Value"] = st.slider(parameter, value=current, **cfg)
-        table.data = df
+    st.subheader("Key Assumptions")
+    df = table.data.copy()
+    slider_cfg = {
+        "Corporate tax rate": dict(min_value=0.0, max_value=0.7, step=0.01),
+        "Investor share capital": dict(min_value=0.0, max_value=1.0, step=0.01),
+        "Owner share capital": dict(min_value=0.0, max_value=1.0, step=0.01),
+        "Discount rate": dict(min_value=0.0, max_value=0.5, step=0.01),
+    }
+
+    for parameter, cfg in slider_cfg.items():
+        if parameter in df["Parameter"].values:
+            idx = df.index[df["Parameter"] == parameter][0]
+            current = float(df.at[idx, "Value"])
+            df.at[idx, "Value"] = st.slider(
+                parameter,
+                value=current,
+                key=f"key_assumption_{parameter.replace(' ', '_').lower()}",
+                **cfg,
+            )
+    table.data = df
 
 
 def _editable_tables(page: InputLandingPage) -> None:
@@ -121,9 +129,6 @@ def _editable_tables(page: InputLandingPage) -> None:
 
     for tab, (section, tables) in zip(tabs, categories.items()):
         with tab:
-            if section == "Global":
-                st.subheader("Projection Horizon")
-                st.table(page.projection.to_frame())
             for table in tables:
                 expanded = section in {"Global", "Capex", "Financial"}
                 _render_table(table, expanded=expanded)
@@ -515,8 +520,6 @@ def main() -> None:
     st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs across dedicated dashboards.")
 
     input_page = _load_session_inputs()
-    _update_projection(input_page)
-    _sidebar_key_assumptions(input_page.global_inputs)
 
     action_cols = st.columns([1, 1])
     with action_cols[0]:
@@ -560,6 +563,8 @@ def main() -> None:
     with tabs[0]:
         st.subheader("Input Landing Page")
         st.info("Edit the assumptions and press 'Recalculate model' to refresh the financial outputs.")
+        _update_projection(input_page)
+        _key_assumptions_controls(input_page.global_inputs)
         _editable_tables(input_page)
 
     with tabs[1]:
