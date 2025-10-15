@@ -112,6 +112,48 @@ class CostOutput:
     annual: pd.DataFrame
 
 
+@dataclass
+class StaffSchedule:
+    positions: pd.DataFrame
+    department_summary: pd.DataFrame
+
+
+def compute_staff_schedule(staff_positions: pd.DataFrame) -> StaffSchedule:
+    """Return enriched staff position data with monthly/annual cost rollups."""
+
+    columns = ["Position", "Department", "Headcount", "Monthly Salary", "Monthly Cost", "Annual Cost"]
+    if staff_positions is None or staff_positions.empty:
+        empty_positions = pd.DataFrame(columns=columns)
+        empty_summary = pd.DataFrame(
+            columns=["Department", "Headcount", "Monthly Cost", "Annual Cost", "Average Monthly Salary"]
+        )
+        return StaffSchedule(empty_positions, empty_summary)
+
+    df = staff_positions.copy()
+    if "Position" not in df.columns:
+        df.insert(0, "Position", df.index.astype(str))
+    if "Department" not in df.columns:
+        df["Department"] = "General"
+
+    df["Headcount"] = pd.to_numeric(df.get("Headcount"), errors="coerce").fillna(0.0)
+    df["Monthly Salary"] = pd.to_numeric(df.get("Monthly Salary"), errors="coerce").fillna(0.0)
+    df["Monthly Cost"] = df["Headcount"] * df["Monthly Salary"]
+    df["Annual Cost"] = df["Monthly Cost"] * 12.0
+
+    summary = (
+        df.groupby("Department", dropna=False)[["Headcount", "Monthly Cost", "Annual Cost"]]
+        .sum()
+        .reset_index()
+    )
+    summary["Average Monthly Salary"] = summary.apply(
+        lambda row: row["Monthly Cost"] / row["Headcount"] if row["Headcount"] else 0.0,
+        axis=1,
+    )
+
+    ordered_positions = df[columns]
+    return StaffSchedule(ordered_positions, summary)
+
+
 def compute_cost_tables(
     direct_costs: pd.DataFrame,
     staff_costs: pd.DataFrame,

@@ -507,7 +507,16 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
     total_expense = income_monthly[["COGS", "Staff Costs", "Other Opex", "Depreciation", "Interest", "Tax"]]
     next_row = _write_table(writer, sheet, income_monthly, "Monthly Financial Performance")
     next_row = _write_table(writer, sheet, income_annual, "Annual Financial Performance", startrow=next_row)
-    _write_table(writer, sheet, total_expense, "Total Expense Schedule", startrow=next_row)
+    next_row = _write_table(writer, sheet, total_expense, "Total Expense Schedule", startrow=next_row)
+
+    staff_schedule = results.get("staff_schedule")
+    if staff_schedule is not None:
+        positions_df = getattr(staff_schedule, "positions", pd.DataFrame())
+        summary_df = getattr(staff_schedule, "department_summary", pd.DataFrame())
+        if isinstance(positions_df, pd.DataFrame) and not positions_df.empty:
+            next_row = _write_table(writer, sheet, positions_df, "Staff Position Schedule", startrow=next_row)
+        if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+            _write_table(writer, sheet, summary_df, "Staff Cost by Department", startrow=next_row)
 
 
 def _write_financial_position(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:

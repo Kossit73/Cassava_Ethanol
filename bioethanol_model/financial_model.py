@@ -18,6 +18,7 @@ from .schedules import (
     compute_payback,
     compute_production_tables,
     compute_revenue_schedule,
+    compute_staff_schedule,
     compute_working_capital,
 )
 from .utils import irr, npv
@@ -79,6 +80,19 @@ class CassavaBioethanolModel:
                     staff_df.loc[farm_staff, "Headcount"] = heads
                 page.staff_costs_monthly.data = staff_df
 
+        positions_df = page.staff_positions.data.copy()
+        if not positions_df.empty and "Department" in positions_df.columns:
+            farm_positions = positions_df["Department"].astype(str).str.contains("farm", case=False, na=False)
+            if farm_positions.any():
+                heads = pd.to_numeric(positions_df.loc[farm_positions, "Headcount"], errors="coerce").fillna(0.0)
+                if scenario == "BUY_ONLY":
+                    positions_df.loc[farm_positions, "Headcount"] = 0.0
+                elif scenario == "HYBRID":
+                    positions_df.loc[farm_positions, "Headcount"] = heads * farm_share
+                else:
+                    positions_df.loc[farm_positions, "Headcount"] = heads
+                page.staff_positions.data = positions_df
+
         direct_df = page.direct_costs_monthly.data.copy()
         if not direct_df.empty and "Cost Category" in direct_df.columns:
             feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
@@ -109,6 +123,37 @@ class CassavaBioethanolModel:
 
         return page
 
+    def _apply_staff_schedule(self, page: inputs.InputLandingPage):
+        """Update monthly staff costs from the staff position salary schedule."""
+
+        schedule = compute_staff_schedule(page.staff_positions.data)
+
+        staff_df = page.staff_costs_monthly.data.copy()
+        if not staff_df.empty and "Department" in staff_df.columns:
+            dept_salary = {}
+            summary = schedule.department_summary
+            if not summary.empty and "Average Monthly Salary" in summary.columns:
+                dept_salary = summary.set_index("Department")["Average Monthly Salary"].to_dict()
+
+            staff_df["Headcount"] = pd.to_numeric(staff_df["Headcount"], errors="coerce").fillna(0.0)
+            updated_costs = []
+            for _, row in staff_df.iterrows():
+                dept = row.get("Department")
+                headcount = float(row.get("Headcount", 0.0) or 0.0)
+                salary = dept_salary.get(dept)
+                if salary is None or not np.isfinite(salary):
+                    try:
+                        current_cost = float(row.get("Cost", 0.0))
+                    except (TypeError, ValueError):
+                        current_cost = 0.0
+                    updated_costs.append(current_cost)
+                else:
+                    updated_costs.append(headcount * salary)
+            staff_df["Cost"] = updated_costs
+            page.staff_costs_monthly.data = staff_df
+
+        return schedule
+
     def build(self, scenario: str | None = None) -> Dict[str, object]:
         scenario_name = (scenario or self.scenario or "FARM_ONLY").upper()
         if scenario_name not in self.SCENARIOS:
@@ -116,6 +161,8 @@ class CassavaBioethanolModel:
         self.scenario = scenario_name
 
         page = self._prepare_page_for_scenario(scenario_name)
+
+        staff_schedule = self._apply_staff_schedule(page)
 
         projection = page.projection
         depreciation = compute_depreciation_schedule(
@@ -230,4 +277,5 @@ class CassavaBioethanolModel:
             "payback": payback,
             "scenario": scenario_name,
             "input_page_snapshot": page,
+            "staff_schedule": staff_schedule,
         }

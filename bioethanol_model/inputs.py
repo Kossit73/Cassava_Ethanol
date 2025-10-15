@@ -56,6 +56,7 @@ class InputLandingPage:
     production_annual: EditableTable
     production_monthly: EditableTable
     direct_costs_monthly: EditableTable
+    staff_positions: EditableTable
     staff_costs_monthly: EditableTable
     other_opex_monthly: EditableTable
     accounts_receivable: EditableTable
@@ -73,6 +74,7 @@ class InputLandingPage:
             "Production Annual": self.production_annual,
             "Production Monthly": self.production_monthly,
             "Direct Costs Monthly": self.direct_costs_monthly,
+            "Staff Positions": self.staff_positions,
             "Staff Monthly": self.staff_costs_monthly,
             "Other Opex Monthly": self.other_opex_monthly,
             "Accounts Receivable": self.accounts_receivable,
@@ -106,6 +108,7 @@ class InputLandingPage:
                     "Costs",
                     [
                         self.direct_costs_monthly,
+                        self.staff_positions,
                         self.staff_costs_monthly,
                         self.other_opex_monthly,
                     ],
@@ -247,6 +250,20 @@ def default_input_page() -> InputLandingPage:
         ),
     )
 
+    staff_positions = EditableTable(
+        "Staff Positions",
+        ["Position", "Department", "Headcount", "Monthly Salary"],
+        pd.DataFrame(
+            [
+                {"Position": "Plant Manager", "Department": "Operations", "Headcount": 1, "Monthly Salary": 6000},
+                {"Position": "Shift Supervisors", "Department": "Operations", "Headcount": 4, "Monthly Salary": 3500},
+                {"Position": "Operators", "Department": "Operations", "Headcount": 40, "Monthly Salary": 1875},
+                {"Position": "Field Officers", "Department": "Farming", "Headcount": 20, "Monthly Salary": 900},
+                {"Position": "Farm Labour", "Department": "Farming", "Headcount": 100, "Monthly Salary": 420},
+            ]
+        ),
+    )
+
     staff_costs_monthly = EditableTable(
         "Staff Costs Monthly",
         ["Month", "Department", "Headcount", "Cost"],
@@ -357,6 +374,7 @@ def default_input_page() -> InputLandingPage:
         production_annual=production_annual,
         production_monthly=production_monthly,
         direct_costs_monthly=direct_costs_monthly,
+        staff_positions=staff_positions,
         staff_costs_monthly=staff_costs_monthly,
         other_opex_monthly=other_opex_monthly,
         accounts_receivable=accounts_receivable,

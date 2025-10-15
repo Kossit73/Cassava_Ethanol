@@ -499,6 +499,17 @@ def _render_financial_performance(results: Dict[str, object]) -> None:
         annual_expense.index.name = "Year"
         st.dataframe(annual_expense.reset_index(), use_container_width=True)
 
+    staff_schedule = results.get("staff_schedule")
+    if staff_schedule is not None:
+        positions_df = getattr(staff_schedule, "positions", pd.DataFrame())
+        summary_df = getattr(staff_schedule, "department_summary", pd.DataFrame())
+        if isinstance(positions_df, pd.DataFrame) and not positions_df.empty:
+            st.subheader("Staff Position Schedule")
+            st.dataframe(positions_df, use_container_width=True)
+        if isinstance(summary_df, pd.DataFrame) and not summary_df.empty:
+            st.subheader("Staff Cost by Department")
+            st.dataframe(summary_df, use_container_width=True)
+
 def _render_financial_position(results: Dict[str, object]) -> None:
     financials = results["financials"]
 
