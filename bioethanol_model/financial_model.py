@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict
 
+import numpy as np
 import pandas as pd
 
 from . import inputs
@@ -84,14 +85,39 @@ class CassavaBioethanolModel:
             tax_rate=tax_rate,
         )
 
+        global_inputs = self.input_page.global_inputs.data.set_index("Parameter")
+
+        def _get_global(parameter: str, default: float) -> float:
+            if parameter in global_inputs.index:
+                return float(global_inputs.loc[parameter, "Value"])
+            return default
+
+        tax_rate = _get_global("Corporate tax rate", tax_rate)
+        discount_rate = _get_global("Discount rate", 0.12)
+        investor_share = _get_global("Investor share capital", 0.5)
+        owner_share = _get_global("Owner share capital", max(0.0, 1 - investor_share))
+        total_investment = float(self.input_page.initial_investment.data["Cost"].sum())
+
         metrics = compute_key_metrics(
             financials,
-            discount_rate=float(
-                self.input_page.global_inputs.data.set_index("Parameter").get("Discount rate", pd.Series([0.12]))[0]
-            )
-            if "Discount rate" in self.input_page.global_inputs.data["Parameter"].values
-            else 0.12,
+            discount_rate=discount_rate,
+            total_investment=total_investment,
+            investor_share=investor_share,
+            owner_share=owner_share,
         )
+        metrics.update(
+            {
+                "Corporate Tax Rate": tax_rate,
+                "Investor Share": investor_share,
+                "Owner Share": owner_share,
+                "Terminal Growth Rate": _get_global("Terminal growth", 0.0),
+                "Capital Gains Tax Rate": _get_global("Capital gains tax rate", 0.0),
+                "Discount Rate": discount_rate,
+                "Total Initial Investment": total_investment,
+            }
+        )
+        if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):
+            metrics["Payback Period (years)"] = metrics["Payback Period (months)"] / 12.0
 
         break_even = compute_break_even(revenue, cost_outputs)
         payback = compute_payback(financials.cashflow_monthly)

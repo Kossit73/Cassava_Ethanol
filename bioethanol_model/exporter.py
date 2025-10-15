@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable
 
+import numpy as np
 import pandas as pd
 
 from .financial_model import CassavaBioethanolModel
@@ -14,15 +15,30 @@ from .sensitivity import SensitivityScenario, monte_carlo_simulation, run_sensit
 SECTION_GAP = 2
 
 
-def _write_table(writer: pd.ExcelWriter, sheet: str, df: pd.DataFrame, title: str, startrow: int = 0) -> int:
+def _write_table(
+    writer: pd.ExcelWriter,
+    sheet: str,
+    df: pd.DataFrame,
+    title: str,
+    startrow: int = 0,
+    startcol: int = 0,
+    *,
+    index: bool = True,
+) -> int:
     if sheet not in writer.sheets:
         worksheet = writer.book.add_worksheet(sheet)
         writer.sheets[sheet] = worksheet
     else:
         worksheet = writer.sheets[sheet]
-    worksheet.write_string(startrow, 0, title)
+    worksheet.write_string(startrow, startcol, title)
     df_to_write = df.copy()
-    df_to_write.to_excel(writer, sheet_name=sheet, startrow=startrow + 1, startcol=0)
+    df_to_write.to_excel(
+        writer,
+        sheet_name=sheet,
+        startrow=startrow + 1,
+        startcol=startcol,
+        index=index,
+    )
     return startrow + len(df_to_write.index) + SECTION_GAP + 2
 
 
@@ -40,7 +56,7 @@ def export_to_excel(
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
         _write_input_page(writer, model.input_page)
-        _write_key_metrics(writer, results)
+        _write_key_metrics(writer, model, results)
         _write_financial_performance(writer, results)
         _write_financial_position(writer, results)
         _write_cash_flow_page(writer, results)
@@ -58,46 +74,302 @@ def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
         next_row = _write_table(writer, sheet, table.data, title, startrow=next_row)
 
 
-def _write_key_metrics(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:
+def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     sheet = "Key Metrics"
-    metrics = pd.Series(results["metrics"], name="Value").to_frame()
-    _write_table(writer, sheet, metrics, "Assumptions Snapshot", startrow=0)
+    if sheet in writer.sheets:
+        worksheet = writer.sheets[sheet]
+    else:
+        worksheet = writer.book.add_worksheet(sheet)
+        writer.sheets[sheet] = worksheet
 
-    global_summary = metrics.loc[["Project NPV", "Project IRR", "Equity IRR"]].copy()
-    global_summary.rename(index={"Project NPV": "Project NPV", "Project IRR": "Project IRR", "Equity IRR": "Equity IRR"}, inplace=True)
-    _write_table(writer, sheet, global_summary, "Overview", startrow=len(metrics) + SECTION_GAP + 2)
+    metrics = results["metrics"]
+    projection = model.input_page.projection
+
+    def _get_metric(name: str, default=np.nan) -> float:
+        value = metrics.get(name, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+
+    def _annualise(rate: float) -> float:
+        try:
+            if rate is None or not np.isfinite(rate):
+                return np.nan
+            return (1 + rate) ** 12 - 1
+        except Exception:
+            return np.nan
+
+    assumptions_snapshot = pd.DataFrame(
+        {
+            "Value": [
+                projection.start_year,
+                projection.end_year,
+                projection.end_year - projection.start_year + 1,
+                _get_metric("Discount Rate"),
+                _get_metric("Terminal Growth Rate"),
+                _get_metric("Capital Gains Tax Rate"),
+                _get_metric("Total Initial Investment"),
+            ]
+        },
+        index=[
+            "Start Year",
+            "End Year",
+            "Projection Years",
+            "Discount Rate",
+            "Terminal Growth Rate",
+            "Capital Gains Tax Rate",
+            "Total Initial Investment",
+        ],
+    )
+
+    global_section = pd.DataFrame(
+        {
+            "Value": [
+                _get_metric("Corporate Tax Rate"),
+                _get_metric("Investor Share"),
+                _get_metric("Owner Share"),
+                _get_metric("Payback Period (years)"),
+                metrics.get("Payback Month", "N/A"),
+            ]
+        },
+        index=[
+            "Corporate Tax Rate",
+            "Investor Share",
+            "Owner Share",
+            "Payback Period (years)",
+            "Payback Month",
+        ],
+    )
 
     latest = pd.DataFrame(
         {
             "Latest": {
-                "Final Month Revenue": results["metrics"]["Final Month Revenue"],
-                "Final Month EBITDA": results["metrics"]["Final Month EBITDA"],
-                "Final Month Equity CF": results["metrics"]["Final Month Equity CF"],
-                "Cumulative FCF": results["metrics"]["Cumulative FCF"],
-                "Cumulative Equity CF": results["metrics"]["Cumulative Equity CF"],
+                "Final Month Revenue": _get_metric("Final Month Revenue"),
+                "Final Month EBITDA": _get_metric("Final Month EBITDA"),
+                "Final Month Equity CF": _get_metric("Final Month Equity CF"),
+                "Cumulative FCF": _get_metric("Cumulative FCF"),
+                "Cumulative Equity CF": _get_metric("Cumulative Equity CF"),
             }
         }
     )
-    _write_table(writer, sheet, latest, "Latest Drivers", startrow=metrics.shape[0] + global_summary.shape[0] + 3 * SECTION_GAP)
 
-    production_chart = results["production"].annual
-    production_chart.to_excel(writer, sheet_name=sheet, startrow=30, startcol=8)
-    worksheet = writer.sheets[sheet]
-    worksheet.write_string(29, 8, "Production Annual Summary")
-
-    revenue_mix = results["revenue"].annual
-    revenue_mix.to_excel(writer, sheet_name=sheet, startrow=30 + production_chart.shape[0] + SECTION_GAP, startcol=8)
-    worksheet.write_string(29 + production_chart.shape[0] + SECTION_GAP, 8, "Revenue Mix")
-
-    opex_mix = pd.concat(
-        {name: output.annual.sum(axis=1) for name, output in results["costs"].items()}, axis=1
+    overview = pd.DataFrame(
+        {
+            "Value": {
+                "Project NPV": _get_metric("Project NPV"),
+                "Project IRR (annual)": _annualise(_get_metric("Project IRR")),
+                "Equity IRR (annual)": _annualise(_get_metric("Equity IRR")),
+                "Investor IRR (annual)": _annualise(_get_metric("Investor IRR")),
+                "Owner IRR (annual)": _annualise(_get_metric("Owner IRR")),
+                "Payback Period (years)": _get_metric("Payback Period (years)"),
+            }
+        }
     )
-    opex_mix.to_excel(writer, sheet_name=sheet, startrow=30, startcol=0)
-    worksheet.write_string(29, 0, "Operating Cost Summary")
 
-    debt_schedule = results["loan_schedule"].schedule
-    debt_schedule.to_excel(writer, sheet_name=sheet, startrow=30 + opex_mix.shape[0] + SECTION_GAP, startcol=0)
-    worksheet.write_string(29 + opex_mix.shape[0] + SECTION_GAP, 0, "Debt Schedule Detail")
+    top_left_end = _write_table(writer, sheet, assumptions_snapshot, "Assumptions Snapshot", startrow=0, startcol=0)
+    top_mid_end = _write_table(writer, sheet, global_section, "Global Summary", startrow=0, startcol=4)
+    top_right_end = _write_table(writer, sheet, latest, "Latest Drivers", startrow=0, startcol=8)
+    top_end = max(top_left_end, top_mid_end, top_right_end)
+
+    overview_end = _write_table(writer, sheet, overview, "Overview", startrow=top_end, startcol=0)
+
+    income_annual = results["financials"].income_annual[["Revenue", "EBITDA", "Net Income"]]
+    annual_ops = pd.concat(
+        [
+            income_annual,
+            results["production"].annual,
+        ],
+        axis=1,
+    ).reset_index().rename(columns={"index": "Year"})
+    annual_ops_end = _write_table(
+        writer,
+        sheet,
+        annual_ops,
+        "Annual Operations & Production Summary",
+        startrow=overview_end,
+        startcol=0,
+        index=False,
+    )
+
+    fixed_asset = results["depreciation"].summary.set_index("Item")
+    fixed_end = _write_table(
+        writer,
+        sheet,
+        fixed_asset,
+        "Fixed Asset Summary",
+        startrow=top_end,
+        startcol=4,
+    )
+
+    current_row = max(fixed_end, annual_ops_end)
+    chart_col = 8
+    chart_height = 18
+
+    def _write_chart_table(
+        df: pd.DataFrame,
+        title: str,
+        chart_type: str,
+        *,
+        categories_col: int = 0,
+        exclude_columns: Iterable[str] | None = None,
+        subtype: str | None = None,
+        insert_kwargs: Dict[str, float] | None = None,
+    ) -> None:
+        nonlocal current_row
+        data = df.copy()
+        startcol = 0
+        table_end = _write_table(
+            writer,
+            sheet,
+            data,
+            title,
+            startrow=current_row,
+            startcol=startcol,
+            index=False,
+        )
+        header_row = current_row + 1
+        data_start = current_row + 2
+        data_end = current_row + 1 + len(data.index)
+        chart = writer.book.add_chart({"type": chart_type} if subtype is None else {"type": chart_type, "subtype": subtype})
+        cols = list(range(data.shape[1]))
+        if exclude_columns:
+            cols = [c for c in cols if data.columns[c] not in exclude_columns]
+        if len(cols) <= 1:
+            current_row = max(table_end, current_row + chart_height)
+            return
+        for col_idx in cols:
+            if col_idx == categories_col:
+                continue
+            chart.add_series(
+                {
+                    "name": [sheet, header_row, startcol + col_idx],
+                    "categories": [sheet, data_start, startcol + categories_col, data_end, startcol + categories_col],
+                    "values": [sheet, data_start, startcol + col_idx, data_end, startcol + col_idx],
+                }
+            )
+        chart.set_title({"name": title})
+        chart.set_x_axis({"name": data.columns[categories_col]})
+        chart.set_y_axis({"major_gridlines": {"visible": True}})
+        chart.set_legend({"position": "bottom"})
+        worksheet.insert_chart(
+            current_row,
+            chart_col,
+            chart,
+            insert_kwargs or {"x_scale": 1.1, "y_scale": 1.1},
+        )
+        current_row = max(table_end, current_row + chart_height)
+
+    production_df = results["production"].annual.reset_index().rename(columns={"index": "Year"})
+    if not production_df.empty:
+        _write_chart_table(production_df, "Annual Production", "line")
+
+    cashflow_annual = results["financials"].cashflow_annual.reset_index().rename(columns={"index": "Year"})
+    cash_columns = ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"]
+    cash_columns = [c for c in cash_columns if c in cashflow_annual.columns]
+    if cash_columns:
+        cash_df = cashflow_annual[["Year", *cash_columns]]
+        _write_chart_table(cash_df, "Cash Flow Summary", "column")
+
+    revenue_df = results["revenue"].annual.reset_index().rename(columns={"index": "Year"})
+    if not revenue_df.empty:
+        exclude = ["Total Revenue"] if "Total Revenue" in revenue_df.columns else None
+        _write_chart_table(
+            revenue_df,
+            "Revenue Mix",
+            "column",
+            subtype="stacked",
+            exclude_columns=exclude,
+        )
+
+    cost_totals = {
+        name: output.annual.sum(axis=1)
+        for name, output in results["costs"].items()
+    }
+    if cost_totals:
+        cost_df = pd.DataFrame(cost_totals)
+        cost_df.index.name = "Year"
+        cost_df = cost_df.reset_index()
+        _write_chart_table(cost_df, "Operating Cost Summary", "column", subtype="stacked")
+
+    cost_breakdown = pd.DataFrame(
+        {
+            "Category": list(cost_totals.keys()),
+            "Amount": [float(series.sum()) for series in cost_totals.values()],
+        }
+    ) if cost_totals else pd.DataFrame({"Category": [], "Amount": []})
+    if not cost_breakdown.empty:
+        table_end = _write_table(
+            writer,
+            sheet,
+            cost_breakdown,
+            "Cost Breakdown",
+            startrow=current_row,
+            startcol=0,
+            index=False,
+        )
+        pie = writer.book.add_chart({"type": "pie"})
+        pie.add_series(
+            {
+                "name": "Cost Breakdown",
+                "categories": [sheet, current_row + 2, 0, current_row + 1 + len(cost_breakdown.index), 0],
+                "values": [sheet, current_row + 2, 1, current_row + 1 + len(cost_breakdown.index), 1],
+            }
+        )
+        pie.set_title({"name": "Cost Breakdown"})
+        worksheet.insert_chart(current_row, chart_col, pie, {"x_scale": 1.1, "y_scale": 1.1})
+        current_row = max(table_end, current_row + chart_height)
+
+    total_investment = _get_metric("Total Initial Investment", 0.0)
+    debt_monthly = results["loan_schedule"].schedule.groupby("Month")["Closing Balance"].sum().sort_index()
+    debt_annual = (
+        debt_monthly.resample("Y").last().rename("Debt Closing Balance")
+        if not debt_monthly.empty
+        else pd.Series(dtype=float, name="Debt Closing Balance")
+    )
+    if debt_annual.empty:
+        years = [projection.start_year]
+        debt_values = [0.0]
+    else:
+        debt_annual.index = debt_annual.index.year
+        years = debt_annual.index.tolist()
+        debt_values = debt_annual.tolist()
+    capex_values = [total_investment] + [0.0] * (len(years) - 1)
+    capex_debt_df = pd.DataFrame(
+        {
+            "Year": years,
+            "Capital Expenditure": capex_values,
+            "Debt Closing Balance": debt_values,
+        }
+    )
+    if not capex_debt_df.empty:
+        _write_chart_table(capex_debt_df, "Capital Expenditure & Debt", "column")
+
+    if not debt_monthly.empty:
+        debt_schedule_df = debt_monthly.reset_index()
+        debt_schedule_df["Month"] = debt_schedule_df["Month"].dt.to_period("M").astype(str)
+        table_end = _write_table(
+            writer,
+            sheet,
+            debt_schedule_df,
+            "Debt Schedule",
+            startrow=current_row,
+            startcol=0,
+            index=False,
+        )
+        debt_chart = writer.book.add_chart({"type": "line"})
+        debt_chart.add_series(
+            {
+                "name": "Debt Balance",
+                "categories": [sheet, current_row + 2, 0, current_row + 1 + len(debt_schedule_df.index), 0],
+                "values": [sheet, current_row + 2, 1, current_row + 1 + len(debt_schedule_df.index), 1],
+            }
+        )
+        debt_chart.set_title({"name": "Debt Schedule"})
+        debt_chart.set_x_axis({"name": "Month"})
+        debt_chart.set_y_axis({"name": "Balance"})
+        worksheet.insert_chart(current_row, chart_col, debt_chart, {"x_scale": 1.1, "y_scale": 1.1})
+        current_row = max(table_end, current_row + chart_height)
 
 
 def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:

@@ -323,18 +323,50 @@ def compute_financial_statements(
 def compute_key_metrics(
     financials: FinancialStatements,
     discount_rate: float,
+    total_investment: float,
+    investor_share: float,
+    owner_share: float,
 ) -> Dict[str, float]:
-    cash_flows = [0.0] + financials.cashflow_monthly["Free Cash Flow"].tolist()
-    equity_cf = [0.0] + financials.cashflow_monthly["Equity Cash Flow"].tolist()
+    free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
+    equity_cash_flow = financials.cashflow_monthly["Equity Cash Flow"].astype(float)
+
+    project_cashflows = [-total_investment] + free_cash_flow.tolist()
+    equity_cashflows = [-total_investment] + equity_cash_flow.tolist()
+    investor_cashflows = [-total_investment * investor_share] + (equity_cash_flow * investor_share).tolist()
+    owner_cashflows = [-total_investment * owner_share] + (equity_cash_flow * owner_share).tolist()
+
+    project_npv = npv(discount_rate / 12, project_cashflows)
+    project_irr = irr(project_cashflows)
+    equity_irr = irr(equity_cashflows)
+    investor_irr = irr(investor_cashflows)
+    owner_irr = irr(owner_cashflows)
+
+    cumulative_project = np.cumsum(project_cashflows)
+    payback_months = float("nan")
+    payback_label = None
+    if np.any(cumulative_project[1:] >= 0):
+        crossing = int(np.argmax(cumulative_project[1:] >= 0)) + 1
+        prev_cum = cumulative_project[crossing - 1]
+        period_cf = project_cashflows[crossing]
+        fraction = (-prev_cum / period_cf) if period_cf != 0 else 0.0
+        payback_months = crossing - 1 + fraction
+        if crossing - 1 < len(financials.cashflow_monthly.index):
+            payback_date = financials.cashflow_monthly.index[crossing - 1]
+            payback_label = payback_date.strftime("%Y-%m")
+
     metrics = {
-        "Project NPV": npv(discount_rate / 12, cash_flows),
-        "Project IRR": irr(cash_flows),
-        "Equity IRR": irr(equity_cf),
-        "Cumulative FCF": float(np.cumsum(financials.cashflow_monthly["Free Cash Flow"]).iloc[-1]),
-        "Cumulative Equity CF": float(np.cumsum(financials.cashflow_monthly["Equity Cash Flow"]).iloc[-1]),
+        "Project NPV": project_npv,
+        "Project IRR": project_irr,
+        "Equity IRR": equity_irr,
+        "Investor IRR": investor_irr,
+        "Owner IRR": owner_irr,
+        "Cumulative FCF": float(np.cumsum(free_cash_flow).iloc[-1]),
+        "Cumulative Equity CF": float(np.cumsum(equity_cash_flow).iloc[-1]),
         "Final Month Revenue": float(financials.income_monthly["Revenue"].iloc[-1]),
         "Final Month EBITDA": float(financials.income_monthly["EBITDA"].iloc[-1]),
-        "Final Month Equity CF": float(financials.cashflow_monthly["Equity Cash Flow"].iloc[-1]),
+        "Final Month Equity CF": float(equity_cash_flow.iloc[-1]),
+        "Payback Period (months)": payback_months,
+        "Payback Month": payback_label,
     }
     return metrics
 
