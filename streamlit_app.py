@@ -115,6 +115,21 @@ def _update_projection(page: InputLandingPage) -> None:
     page.projection.end_year = int(end)
 
 
+def _sync_projection_from_session(page: InputLandingPage) -> None:
+    """Ensure the landing-page projection matches the latest widget state."""
+
+    start_key = "projection_start_year"
+    end_key = "projection_end_year"
+    start = int(st.session_state.get(start_key, page.projection.start_year))
+    end = int(st.session_state.get(end_key, page.projection.end_year))
+    if end < start:
+        end = start
+    page.projection.start_year = start
+    page.projection.end_year = end
+    st.session_state[start_key] = start
+    st.session_state[end_key] = end
+
+
 def _key_assumptions_controls(table: EditableTable) -> None:
     """Expose frequently tweaked assumptions inside the main page."""
 
@@ -691,6 +706,7 @@ def main() -> None:
     st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs across dedicated dashboards.")
 
     input_page = _load_session_inputs()
+    _sync_projection_from_session(input_page)
     scenario_options = list(CassavaBioethanolModel.SCENARIOS)
     if "selected_scenario" not in st.session_state:
         st.session_state.selected_scenario = scenario_options[0]
@@ -713,7 +729,22 @@ def main() -> None:
         st.session_state.mc_cache_version = None
         st.session_state.mc_cache_scenario = None
 
-    if recalc or "scenario_payloads" not in st.session_state:
+    snapshot = st.session_state.get("input_snapshot")
+    snapshot_projection = None
+    if snapshot is not None:
+        snapshot_projection = (
+            int(snapshot.projection.start_year),
+            int(snapshot.projection.end_year),
+        )
+    current_projection = (
+        int(input_page.projection.start_year),
+        int(input_page.projection.end_year),
+    )
+    projection_changed = (
+        snapshot_projection is not None and snapshot_projection != current_projection
+    )
+
+    if recalc or projection_changed or "scenario_payloads" not in st.session_state:
         st.session_state.scenario_payloads = {}
         st.session_state.excel_bytes_map = {}
         st.session_state.input_snapshot = copy.deepcopy(input_page)

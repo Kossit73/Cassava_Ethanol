@@ -67,7 +67,7 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         empty.index = pd.Index([], name="Month")
         return ProductionOutput(empty, empty)
 
-    monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str))
+    monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str)).dt.to_period("M").dt.to_timestamp()
     monthly = monthly.sort_values("Month").reset_index(drop=True)
 
     growth_col = next((c for c in monthly.columns if "growth" in c.lower()), None)
@@ -96,7 +96,9 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         monthly = monthly.drop(columns=[growth_col])
 
     monthly = monthly.set_index("Month").sort_index()
-    monthly = monthly.loc[(monthly.index.year >= start_year) & (monthly.index.year <= end_year)]
+    months = year_month_range(start_year, end_year)
+    monthly = monthly.reindex(months)
+    monthly = monthly.ffill().fillna(0.0)
     annual = monthly.resample("Y").sum()
     annual.index = annual.index.year
     return ProductionOutput(monthly, annual)
@@ -203,12 +205,17 @@ def compute_cost_tables(
     staff_costs: pd.DataFrame,
     other_opex: pd.DataFrame,
     inflation_schedule: pd.DataFrame,
+    start_year: int,
+    end_year: int,
 ) -> Dict[str, CostOutput]:
+    months = year_month_range(start_year, end_year)
+
     def _prepare(df: pd.DataFrame, value_column: str = "Amount") -> pd.DataFrame:
         copy = df.copy()
-        copy["Month"] = pd.to_datetime(copy["Month"].astype(str))
+        copy["Month"] = pd.to_datetime(copy["Month"].astype(str)).dt.to_period("M").dt.to_timestamp()
         pivot = copy.pivot_table(index="Month", columns=df.columns[1], values=value_column, aggfunc="sum", fill_value=0)
-        pivot = pivot.sort_index()
+        pivot = pivot.sort_index().reindex(months)
+        pivot = pivot.ffill().fillna(0.0)
         return pivot
 
     direct = _prepare(direct_costs)

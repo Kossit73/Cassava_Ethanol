@@ -188,6 +188,8 @@ class CassavaBioethanolModel:
             page.staff_costs_monthly.data,
             page.other_opex_monthly.data,
             page.inflation_schedule.data,
+            projection.start_year,
+            projection.end_year,
         )
 
         loan_schedule = compute_loan_schedule(
