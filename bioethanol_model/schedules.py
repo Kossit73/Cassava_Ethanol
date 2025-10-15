@@ -63,7 +63,7 @@ class ProductionOutput:
 def compute_production_tables(production_monthly: pd.DataFrame, start_year: int, end_year: int) -> ProductionOutput:
     monthly = production_monthly.copy()
     if monthly.empty:
-        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "DDGS ton"])
+        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "Animal Feed ton"])
         empty.index = pd.Index([], name="Month")
         return ProductionOutput(empty, empty)
 
@@ -121,8 +121,20 @@ def compute_revenue_schedule(production: ProductionOutput, revenue_inputs: pd.Da
 
     monthly_revenue = pd.DataFrame(index=monthly.index)
     for product, (base_price, escalation) in prices.items():
-        volume_col = "Ethanol litres" if "ethanol" in product.lower() else monthly.columns[0]
-        volumes = monthly.get("Ethanol litres", monthly.iloc[:, 0])
+        product_lower = product.lower()
+        if "ethanol" in product_lower:
+            volume_col = "Ethanol litres"
+        elif any(keyword in product_lower for keyword in ("feed", "anfeed")):
+            volume_col = "Animal Feed ton"
+        elif "cassava" in product_lower:
+            volume_col = "Cassava ton"
+        else:
+            volume_col = monthly.columns[0]
+
+        if volume_col in monthly.columns:
+            volumes = pd.to_numeric(monthly[volume_col], errors="coerce").fillna(0.0)
+        else:
+            volumes = pd.Series(0.0, index=monthly.index)
         price_series = []
         for ts in monthly.index:
             years_from_start = ts.year - monthly.index[0].year

@@ -208,18 +208,18 @@ def default_input_page() -> InputLandingPage:
         pd.DataFrame(
             [
                 {"Product": "Fuel Ethanol", "Base Price": 0.70, "Escalation": 0.02, "Units": "USD/L"},
-                {"Product": "By-product DDGS", "Base Price": 120.0, "Escalation": 0.015, "Units": "USD/ton"},
+                {"Product": "Animal Feed (AnFeed)", "Base Price": 120.0, "Escalation": 0.015, "Units": "USD/ton"},
             ]
         ),
     )
 
     production_annual = EditableTable(
         "Production Annual",
-        ["Year", "Cassava ton", "Ethanol litres", "DDGS ton"],
+        ["Year", "Cassava ton", "Ethanol litres", "Animal Feed ton"],
         pd.DataFrame(
             [
-                {"Year": 2024, "Cassava ton": 95_000, "Ethanol litres": 11_000_000, "DDGS ton": 40_000},
-                {"Year": 2025, "Cassava ton": 100_000, "Ethanol litres": 12_000_000, "DDGS ton": 43_000},
+                {"Year": 2024, "Cassava ton": 95_000, "Ethanol litres": 11_875_000, "Animal Feed ton": 23_750},
+                {"Year": 2025, "Cassava ton": 100_000, "Ethanol litres": 12_500_000, "Animal Feed ton": 25_000},
             ]
         ),
     )
@@ -228,13 +228,13 @@ def default_input_page() -> InputLandingPage:
     monthly_index = pd.period_range("2024-01", "2024-12", freq="M")
     production_monthly = EditableTable(
         "Production Monthly",
-        ["Month", "Cassava ton", "Ethanol litres", "DDGS ton", "Growth %"],
+        ["Month", "Cassava ton", "Ethanol litres", "Animal Feed ton", "Growth %"],
         pd.DataFrame(
             {
                 "Month": monthly_index.astype(str),
                 "Cassava ton": [8_000.0] * len(monthly_index),
                 "Ethanol litres": [1_000_000.0] * len(monthly_index),
-                "DDGS ton": [3_300.0] * len(monthly_index),
+                "Animal Feed ton": [2_000.0] * len(monthly_index),
                 "Growth %": [0.0] * len(monthly_index),
             }
         ),
