@@ -15,7 +15,12 @@ from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
 from bioethanol_model.inputs import EditableTable, InputLandingPage, default_input_page
 from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
-from bioethanol_model.schedules import compute_production_tables, compute_staff_schedule
+from bioethanol_model.schedules import (
+    ANIMAL_FEED_TON_PER_TON,
+    ETHANOL_LITRES_PER_TON,
+    compute_production_tables,
+    compute_staff_schedule,
+)
 from bioethanol_model.sensitivity import (
     SensitivityScenario,
     monte_carlo_simulation,
@@ -695,6 +700,8 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
 
     derived_columns = DERIVED_COLUMN_MAP.get(table_name, set())
 
+    derived_metrics: Tuple[float, float] | None = None
+
     for column in table.columns:
         current_value = df.at[row_idx, column]
         widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
@@ -787,6 +794,35 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
             df.at[row_idx, column] = new_value
             if str(new_value) != str(text_value):
                 updated = True
+
+    if table_name == "Production Monthly" and "Cassava ton" in df.columns:
+        cassava_raw = df.at[row_idx, "Cassava ton"]
+        cassava_val = pd.to_numeric(pd.Series([cassava_raw]), errors="coerce").iloc[0]
+        if pd.notna(cassava_val):
+            ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
+            feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
+            if "Ethanol litres" in df.columns:
+                df.at[row_idx, "Ethanol litres"] = ethanol_val
+            if "Animal Feed ton" in df.columns:
+                df.at[row_idx, "Animal Feed ton"] = feed_val
+            derived_metrics = (ethanol_val, feed_val)
+
+    if table_name == "Production Monthly":
+        if derived_metrics is not None:
+            ethanol_val, feed_val = derived_metrics
+            metric_cols = st.columns(2)
+            metric_cols[0].metric(
+                "Calculated Ethanol (litres)",
+                f"{ethanol_val:,.0f}",
+            )
+            metric_cols[1].metric(
+                "Calculated Animal Feed (ton)",
+                f"{feed_val:,.3f}",
+            )
+        else:
+            st.info(
+                "Enter a cassava tonnage to calculate the ethanol and animal feed outputs for this row."
+            )
 
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
     if updated:
