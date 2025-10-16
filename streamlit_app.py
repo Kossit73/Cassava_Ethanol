@@ -901,6 +901,17 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
                     help="Calculated automatically from other inputs.",
                 )
 
+        if table.name == "Production Monthly":
+            st.caption(
+                "Edit **Cassava ton** (and optional Growth %) for any month. The model will automatically recompute the matching "
+                "ethanol litres and animal-feed tonnage and roll the results into the annual production table."
+            )
+        elif table.name == "Production Annual":
+            st.caption(
+                "These annual totals are derived from the monthly production schedule. Update the monthly table to change the "
+                "values shown here."
+            )
+
         if cache_key not in st.session_state:
             st.session_state[cache_key] = table.data.copy()
 

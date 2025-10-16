@@ -33,3 +33,14 @@ streamlit run streamlit_app.py
 ```
 
 The web app lets you edit all landing-page tables, recalculates the integrated statements on demand, and provides an instant Excel download that mirrors the command line export.
+
+### Editing the production schedules
+
+The **Production Monthly** table on the Input Landing Page is the source of truth for the cassava processing plan. To adjust production and have the changes flow through to the **Production Annual** roll-up:
+
+1. Open the Streamlit app and navigate to the *Input Landing Page* tab.
+2. Use either the "Modify Default Inputs & Figures" panel or the "Production Monthly" table expander to edit the **Cassava ton** values (and optional monthly growth % and start month).
+3. The model immediately derives the matching ethanol litres and animal-feed tonnage using the backend conversion factors (200 L and 0.275 t per cassava ton respectively).
+4. As soon as the monthly figures are updated, the production engine recomputes the compounded series across the projection horizon and refreshes the **Production Annual** table, which aggregates the updated monthly data by fiscal year.
+
+There is no need to edit the annual table manually—the monthly entries drive both the annual totals and every downstream schedule (revenue, feedstock costs, statements, sensitivities, and exports).
