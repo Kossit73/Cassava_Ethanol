@@ -243,7 +243,6 @@ class CassavaBioethanolModel:
         metrics = compute_key_metrics(
             financials,
             discount_rate=discount_rate,
-            total_investment=total_investment,
             investor_share=investor_share,
             owner_share=owner_share,
         )

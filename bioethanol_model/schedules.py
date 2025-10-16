@@ -14,11 +14,13 @@ class DepreciationOutput:
     monthly: pd.DataFrame
     annual: pd.DataFrame
     summary: pd.DataFrame
+    capex: pd.Series
 
 
 def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: int, end_year: int) -> DepreciationOutput:
     months = year_month_range(start_year, end_year)
     records = []
+    capex_records = []
     for _, row in initial_investment.iterrows():
         life_years = row.get("Life (years)") or row.get("Life") or 10
         rate = row.get("Depreciation Rate")
@@ -28,7 +30,9 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
         else:
             annual_dep = cost * float(rate)
         monthly_dep = annual_dep / 12.0
-        start_month = pd.Period(row.get("Start Month", f"{start_year}-01"), freq="M").to_timestamp()
+        start_month_value = row.get("Start Month", f"{start_year}-01")
+        start_month = pd.Period(start_month_value, freq="M").to_timestamp()
+        capex_records.append({"Month": start_month, "Item": row["Item"], "Capex": cost})
         for month in months:
             dep = monthly_dep if month >= start_month else 0.0
             records.append({"Month": month, "Item": row["Item"], "Depreciation": dep})
@@ -39,6 +43,12 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
         .sort_index()
     )
     monthly_df["Total Depreciation"] = monthly_df.sum(axis=1)
+
+    capex_df = pd.DataFrame(capex_records)
+    if capex_df.empty:
+        capex_series = pd.Series(0.0, index=months)
+    else:
+        capex_series = capex_df.groupby("Month")["Capex"].sum().reindex(months, fill_value=0.0)
 
     annual_df = monthly_df.resample("Y").sum()
     annual_df.index = annual_df.index.year
@@ -51,7 +61,7 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
     summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
     summary["Accumulated Depreciation (Year %d)" % end_year] = summary["Annual Depreciation"] * (end_year - start_year + 1)
     summary["Net Book Value"] = summary["Cost"] - summary["Accumulated Depreciation (Year %d)" % end_year]
-    return DepreciationOutput(monthly_df, annual_df, summary)
+    return DepreciationOutput(monthly_df, annual_df, summary, capex_series)
 
 
 @dataclass
@@ -272,9 +282,21 @@ def compute_loan_schedule(
 
     if loan_inputs is None or loan_inputs.empty:
         empty_schedule = pd.DataFrame(
-            columns=["Loan", "Month", "Opening Balance", "Interest", "Principal", "Closing Balance", "Payment"]
+            columns=[
+                "Loan",
+                "Month",
+                "Draw",
+                "Opening Balance",
+                "Interest",
+                "Principal",
+                "Closing Balance",
+                "Payment",
+            ]
         )
-        return LoanScheduleOutput(empty_schedule, pd.DataFrame(columns=["Interest", "Principal", "Payment"]))
+        return LoanScheduleOutput(
+            empty_schedule,
+            pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"]),
+        )
 
     amount_columns = ["Loan Amount", "Amount", "Drawdown"]
 
@@ -304,40 +326,58 @@ def compute_loan_schedule(
         grace_months = max(grace_years, 0) * 12
         repay_months = max(tenor_months - grace_months, 0)
 
-        if amortization.lower().startswith("ann"):
-            if repay_months > 0:
-                if monthly_rate == 0:
-                    payment = amount / repay_months
-                else:
-                    factor = (monthly_rate * (1 + monthly_rate) ** repay_months) / ((1 + monthly_rate) ** repay_months - 1)
-                    payment = amount * factor
-            else:
-                payment = 0.0
-        else:
-            payment = amount / repay_months if repay_months > 0 else 0.0
-
-        balance = amount
+        draw_month_value = loan.get("Start Month") or months[0]
+        draw_month = pd.Period(draw_month_value, freq="M").to_timestamp()
+        drawn = False
         payments_made = 0
-        for i, month in enumerate(months):
-            opening_balance = balance
-            if i < grace_months:
-                interest = opening_balance * monthly_rate
-                principal = 0.0
-            elif payments_made < repay_months and opening_balance > 0:
-                interest = opening_balance * monthly_rate
-                principal = max(0.0, payment - interest)
-                principal = min(principal, opening_balance)
-                balance = max(0.0, opening_balance - principal)
-                payments_made += 1
+        balance = 0.0
+        annuity_payment = 0.0
+        if amortization.lower().startswith("ann") and repay_months > 0:
+            if monthly_rate == 0:
+                annuity_payment = amount / repay_months
             else:
-                interest = 0.0
-                principal = 0.0
-                balance = opening_balance
+                factor = (monthly_rate * (1 + monthly_rate) ** repay_months) / (
+                    (1 + monthly_rate) ** repay_months - 1
+                )
+                annuity_payment = amount * factor
+        elif repay_months > 0:
+            annuity_payment = amount / repay_months
+
+        for month in months:
+            draw = 0.0
+            if not drawn and month >= draw_month:
+                draw = amount
+                balance += draw
+                drawn = True
+
+            opening_balance = balance
+            interest = 0.0
+            principal = 0.0
+            payment = 0.0
+
+            if drawn:
+                months_since_draw = (month.year - draw_month.year) * 12 + (month.month - draw_month.month)
+                if months_since_draw < grace_months:
+                    interest = opening_balance * monthly_rate
+                elif payments_made < repay_months and opening_balance > 0:
+                    interest = opening_balance * monthly_rate
+                    payment = annuity_payment
+                    if amortization.lower().startswith("ann"):
+                        principal = max(0.0, payment - interest)
+                    else:
+                        principal = annuity_payment
+                        payment = interest + principal
+                    principal = min(principal, opening_balance)
+                    balance = max(0.0, opening_balance - principal)
+                    payments_made += 1
+                else:
+                    balance = opening_balance
 
             schedule_rows.append(
                 {
-                    "Loan": loan.get("Loan", f"Loan {i}") or f"Loan {i}",
+                    "Loan": loan.get("Loan") or "Loan",
                     "Month": month,
+                    "Draw": draw,
                     "Opening Balance": opening_balance,
                     "Interest": interest,
                     "Principal": principal,
@@ -348,9 +388,9 @@ def compute_loan_schedule(
 
     schedule = pd.DataFrame(schedule_rows)
     if schedule.empty:
-        summary = pd.DataFrame(columns=["Interest", "Principal", "Payment"])
+        summary = pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"])
     else:
-        summary = schedule.groupby("Loan").agg({"Interest": "sum", "Principal": "sum", "Payment": "sum"})
+        summary = schedule.groupby("Loan").agg({"Draw": "sum", "Interest": "sum", "Principal": "sum", "Payment": "sum"})
     return LoanScheduleOutput(schedule, summary)
 
 
@@ -415,6 +455,17 @@ def compute_financial_statements(
     other = cost_outputs["Other Opex"].monthly.sum(axis=1)
     interest = loan_schedule.schedule.pivot_table(index="Month", values="Interest", aggfunc="sum")
     interest = interest.reindex(monthly.index, fill_value=0.0)["Interest"]
+    if "Draw" in loan_schedule.schedule.columns:
+        debt_draws = (
+            loan_schedule.schedule.pivot_table(index="Month", values="Draw", aggfunc="sum")
+            .reindex(monthly.index, fill_value=0.0)["Draw"]
+        )
+    else:
+        debt_draws = pd.Series(0.0, index=monthly.index)
+    principal = loan_schedule.schedule.pivot_table(index="Month", values="Principal", aggfunc="sum")
+    principal = principal.reindex(monthly.index, fill_value=0.0)["Principal"]
+    debt_service = principal + interest
+    capex = depreciation.capex.reindex(monthly.index, fill_value=0.0)
 
     income_monthly = pd.DataFrame(index=monthly.index)
     income_monthly["Revenue"] = monthly["Total Revenue"]
@@ -434,29 +485,40 @@ def compute_financial_statements(
 
     wc = working_capital.monthly["Net Working Capital"]
     delta_wc = wc.diff().fillna(wc)
-    principal = loan_schedule.schedule.pivot_table(index="Month", values="Principal", aggfunc="sum")
-    principal = principal.reindex(monthly.index, fill_value=0.0)["Principal"]
 
     cashflow_monthly = pd.DataFrame(index=monthly.index)
     cashflow_monthly["Net Income"] = income_monthly["Net Income"]
     cashflow_monthly["Depreciation"] = dep
     cashflow_monthly["Operating Cash Flow"] = income_monthly["Net Income"] + dep - delta_wc
-    cashflow_monthly["Free Cash Flow"] = cashflow_monthly["Operating Cash Flow"] - principal
-    cashflow_monthly["Equity Cash Flow"] = cashflow_monthly["Free Cash Flow"] - loan_schedule.schedule.pivot_table(
-        index="Month", values="Payment", aggfunc="sum"
-    ).reindex(monthly.index, fill_value=0.0)["Payment"]
+    cashflow_monthly["Capex"] = capex
+    cashflow_monthly["Investing Cash Flow"] = -capex
+    cashflow_monthly["Free Cash Flow"] = cashflow_monthly["Operating Cash Flow"] - capex
+    cashflow_monthly["Debt Draws"] = debt_draws
+    cashflow_monthly["Debt Service"] = debt_service
+    cashflow_monthly["Financing Cash Flow"] = debt_draws - debt_service
+    cashflow_monthly["Equity Cash Flow"] = cashflow_monthly["Free Cash Flow"] + cashflow_monthly["Financing Cash Flow"]
+    cashflow_monthly["Net Cash Flow"] = (
+        cashflow_monthly["Operating Cash Flow"]
+        + cashflow_monthly["Investing Cash Flow"]
+        + cashflow_monthly["Financing Cash Flow"]
+    )
 
     cashflow_annual = cashflow_monthly.resample("Y").sum()
     cashflow_annual.index = cashflow_annual.index.year
 
     balance_monthly = pd.DataFrame(index=monthly.index)
-    balance_monthly["Cash"] = cashflow_monthly["Operating Cash Flow"].cumsum()
-    balance_monthly["Net PP&E"] = depreciation.summary.set_index("Item")["Net Book Value"].sum()
+    balance_monthly["Cash"] = cashflow_monthly["Net Cash Flow"].cumsum()
+    gross_ppe = capex.cumsum()
+    accumulated_dep = dep.cumsum()
+    balance_monthly["Net PP&E"] = gross_ppe - accumulated_dep
     balance_monthly["Working Capital"] = wc
-    balance_monthly["Debt"] = loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum").reindex(
-        monthly.index, fill_value=0.0
-    )["Closing Balance"]
-    balance_monthly["Equity"] = balance_monthly[["Cash", "Net PP&E", "Working Capital"]].sum(axis=1) - balance_monthly["Debt"]
+    balance_monthly["Debt"] = (
+        loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum")
+        .reindex(monthly.index, fill_value=0.0)["Closing Balance"]
+    )
+    balance_monthly["Equity"] = (
+        balance_monthly[["Cash", "Net PP&E", "Working Capital"]].sum(axis=1) - balance_monthly["Debt"]
+    )
 
     balance_annual = balance_monthly.resample("Y").last()
     balance_annual.index = balance_annual.index.year
@@ -474,17 +536,16 @@ def compute_financial_statements(
 def compute_key_metrics(
     financials: FinancialStatements,
     discount_rate: float,
-    total_investment: float,
     investor_share: float,
     owner_share: float,
 ) -> Dict[str, float]:
     free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
     equity_cash_flow = financials.cashflow_monthly["Equity Cash Flow"].astype(float)
 
-    project_cashflows = [-total_investment] + free_cash_flow.tolist()
-    equity_cashflows = [-total_investment] + equity_cash_flow.tolist()
-    investor_cashflows = [-total_investment * investor_share] + (equity_cash_flow * investor_share).tolist()
-    owner_cashflows = [-total_investment * owner_share] + (equity_cash_flow * owner_share).tolist()
+    project_cashflows = [0.0] + free_cash_flow.tolist()
+    equity_cashflows = [0.0] + equity_cash_flow.tolist()
+    investor_cashflows = [0.0] + (equity_cash_flow * investor_share).tolist()
+    owner_cashflows = [0.0] + (equity_cash_flow * owner_share).tolist()
 
     project_npv = npv(discount_rate / 12, project_cashflows)
     project_irr = irr(project_cashflows)

@@ -369,7 +369,13 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         month_labels = cash_monthly.index.to_period("M").astype(str)
         cf_columns = [
             col
-            for col in ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"]
+            for col in [
+                "Operating Cash Flow",
+                "Investing Cash Flow",
+                "Financing Cash Flow",
+                "Free Cash Flow",
+                "Equity Cash Flow",
+            ]
             if col in cash_monthly.columns
         ]
         if cf_columns:
@@ -393,7 +399,13 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         _write_chart_table(production_df, "Annual Production", "line")
 
     cashflow_annual = _reset_period_index(results["financials"].cashflow_annual, "Year")
-    cash_columns = ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"]
+    cash_columns = [
+        "Operating Cash Flow",
+        "Investing Cash Flow",
+        "Financing Cash Flow",
+        "Free Cash Flow",
+        "Equity Cash Flow",
+    ]
     cash_columns = [c for c in cash_columns if c in cashflow_annual.columns]
     if cash_columns:
         cash_df = cashflow_annual[["Year", *cash_columns]]

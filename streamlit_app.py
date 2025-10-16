@@ -578,7 +578,17 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         st.dataframe(annual_summary.reset_index(), use_container_width=True)
 
     st.markdown("### Cash Flow & Returns")
-    cash_columns = [c for c in ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"] if c in financials.cashflow_monthly.columns]
+    cash_columns = [
+        c
+        for c in [
+            "Operating Cash Flow",
+            "Investing Cash Flow",
+            "Financing Cash Flow",
+            "Free Cash Flow",
+            "Equity Cash Flow",
+        ]
+        if c in financials.cashflow_monthly.columns
+    ]
     if cash_columns:
         st.line_chart(financials.cashflow_monthly[cash_columns])
         cumulative_df = financials.cashflow_monthly[cash_columns].cumsum()
@@ -709,7 +719,17 @@ def _render_cash_flow_page(results: Dict[str, object]) -> None:
     st.dataframe(cash_annual.reset_index(), use_container_width=True)
 
     st.subheader("Cash Flow and Returns Charts")
-    cash_columns = [c for c in ["Operating Cash Flow", "Free Cash Flow", "Equity Cash Flow"] if c in cash_monthly.columns]
+    cash_columns = [
+        c
+        for c in [
+            "Operating Cash Flow",
+            "Investing Cash Flow",
+            "Financing Cash Flow",
+            "Free Cash Flow",
+            "Equity Cash Flow",
+        ]
+        if c in cash_monthly.columns
+    ]
     if cash_columns:
         st.line_chart(cash_monthly[cash_columns])
 
