@@ -92,7 +92,14 @@ def tornado_chart_inputs(
             rows.append({"Parameter": param, "Direction": "Down" if direction == -1 else "Up", "NPV": result["metrics"]["Project NPV"]})
         table.data.loc[table.data["Parameter"] == param, "Value"] = base_value
     df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=["Parameter", "Down", "Up", "Impact", "Base"])
+
     pivot = df.pivot(index="Parameter", columns="Direction", values="NPV")
+    for column in ("Down", "Up"):
+        if column not in pivot.columns:
+            pivot[column] = pd.NA
+
     pivot["Impact"] = pivot["Up"] - pivot["Down"]
     pivot["Base"] = base
     return pivot.reset_index()
