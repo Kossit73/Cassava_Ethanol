@@ -118,7 +118,7 @@ def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
         worksheet.write(next_row, 0, section, heading_format)
         next_row += 1
         for table in tables:
-            next_row = _write_table(writer, sheet, table.data, table.name, startrow=next_row)
+            next_row = _write_table(writer, sheet, table.model_frame, table.name, startrow=next_row)
             if table is page.initial_investment:
                 worksheet.write(next_row, 0, "Total Initial Investment")
                 worksheet.write_number(next_row, 1, page.total_initial_investment)
@@ -736,7 +736,7 @@ def _write_scenario_page(
     next_row = _write_table(writer, sheet, config_df, "Scenario/Is Configuration", index=False)
 
     base_page = copy.deepcopy(base_results.get("input_page_snapshot", model.input_page))
-    base_inputs = base_page.global_inputs.data.copy()
+    base_inputs = base_page.global_inputs.model_frame
     tool_df = base_inputs.rename(columns={"Value": "Base Value"})
     numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
     tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
@@ -829,7 +829,7 @@ def _write_break_even_page(
     direct_costs = results["costs"].get("Direct Costs")
     staff_costs = results["costs"].get("Staff Costs")
     other_costs = results["costs"].get("Other Opex")
-    revenue_inputs = model.input_page.revenue_inputs.data
+    revenue_inputs = model.input_page.revenue_inputs.model_frame
 
     if not production_monthly.empty:
         if "Ethanol litres" in production_monthly.columns:

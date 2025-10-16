@@ -22,6 +22,8 @@ def run_sensitivity(model: CassavaBioethanolModel, scenarios: Iterable[Sensitivi
     rows = []
     for scenario in scenarios:
         table = model.input_page.global_inputs
+        if table.placeholder:
+            continue
         if scenario.parameter not in table.data["Parameter"].values:
             continue
         original = table.data.set_index("Parameter").loc[scenario.parameter, "Value"]
@@ -48,6 +50,8 @@ def monte_carlo_simulation(
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_seed)
     table = model.input_page.global_inputs
+    if table.placeholder:
+        return pd.DataFrame()
     params = table.data.set_index("Parameter")["Value"].to_dict()
     rows = []
     for _ in range(iterations):
@@ -77,6 +81,8 @@ def tornado_chart_inputs(
     base = model.build()["metrics"]["Project NPV"]
     for param, pct in drivers:
         table = model.input_page.global_inputs
+        if table.placeholder:
+            continue
         if param not in table.data["Parameter"].values:
             continue
         base_value = table.data.set_index("Parameter").loc[param, "Value"]

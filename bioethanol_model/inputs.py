@@ -14,26 +14,80 @@ class EditableTable:
     name: str
     columns: List[str]
     data: pd.DataFrame = field(default_factory=pd.DataFrame)
+    placeholder: bool = False
 
     def __post_init__(self) -> None:
-        if self.data.empty:
-            self.data = pd.DataFrame(columns=self.columns)
-        else:
-            self.data = self.data[self.columns]
+        self._set_data(self.data)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _coerce_dataframe(self, df: pd.DataFrame | None) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame(columns=self.columns)
+        coerced = df.copy()
+        for column in self.columns:
+            if column not in coerced.columns:
+                coerced[column] = None
+        return coerced[self.columns]
+
+    def _set_data(self, df: pd.DataFrame | None) -> None:
+        self.data = self._coerce_dataframe(df)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_data(self, df: pd.DataFrame | None, *, mark_user_input: bool | None = None) -> None:
+        """Replace the table contents with *df* and update the placeholder flag.
+
+        Parameters
+        ----------
+        df:
+            The dataframe to store. Columns not present in ``self.columns`` are
+            ignored; missing columns are added with ``None`` values.
+        mark_user_input:
+            When ``True`` the table is flagged as containing user-provided data
+            (placeholders are disabled). ``False`` keeps the existing
+            placeholder flag, and ``None`` leaves the flag unchanged.
+        """
+
+        self._set_data(df)
+        if mark_user_input is True:
+            self.placeholder = False
+        elif mark_user_input is False:
+            self.placeholder = self.placeholder
+
+    def mark_placeholder(self, value: bool) -> None:
+        self.placeholder = bool(value)
+
+    @property
+    def model_frame(self) -> pd.DataFrame:
+        """Return the dataframe used for calculations (empty when placeholder)."""
+
+        if self.placeholder:
+            return pd.DataFrame(columns=self.columns)
+        return self.data.copy()
 
     def add_row(self, values: Dict[str, object]) -> None:
         missing = [c for c in self.columns if c not in values]
         if missing:
             raise ValueError(f"Missing values for columns: {missing}")
         self.data = pd.concat([self.data, pd.DataFrame([values])], ignore_index=True)
+        self.placeholder = False
 
     def remove_row(self, index: int) -> None:
         if index not in self.data.index:
             raise KeyError(f"Row {index} not found in {self.name}")
         self.data = self.data.drop(index).reset_index(drop=True)
+        self.placeholder = False
 
     def to_dict(self) -> Dict[str, object]:
-        return {"name": self.name, "columns": self.columns, "data": self.data.copy()}
+        return {
+            "name": self.name,
+            "columns": self.columns,
+            "data": self.data.copy(),
+            "placeholder": self.placeholder,
+        }
 
 
 @dataclass
@@ -195,7 +249,8 @@ class InputLandingPage:
     def total_initial_investment(self) -> float:
         """Return the aggregated initial investment cost across all items."""
 
-        return float(self.initial_investment.data.get("Cost", pd.Series(dtype=float)).sum())
+        data = self.initial_investment.model_frame
+        return float(data.get("Cost", pd.Series(dtype=float)).sum()) if not data.empty else 0.0
 
 
 @dataclass
@@ -223,6 +278,7 @@ def default_input_page() -> InputLandingPage:
                 {"Parameter": "Hybrid farm share", "Value": 0.5, "Units": "%"},
             ]
         ),
+        placeholder=True,
     )
 
     initial_investment = EditableTable(
@@ -237,6 +293,7 @@ def default_input_page() -> InputLandingPage:
                 {"Item": "EPC & Others", "Cost": 5_000_000, "Life (years)": 8, "Depreciation Rate": None, "Start Month": "2024-01"},
             ]
         ),
+        placeholder=True,
     )
 
     revenue_inputs = EditableTable(
@@ -248,6 +305,7 @@ def default_input_page() -> InputLandingPage:
                 {"Product": "Animal Feed (AnFeed)", "Base Price": 120.0, "Escalation": 0.015, "Units": "USD/ton"},
             ]
         ),
+        placeholder=True,
     )
 
     production_annual = EditableTable(
@@ -259,6 +317,7 @@ def default_input_page() -> InputLandingPage:
                 {"Year": 2025, "Cassava ton": 100_000, "Ethanol litres": 12_500_000, "Animal Feed ton": 25_000},
             ]
         ),
+        placeholder=True,
     )
 
     # Monthly production will be spread evenly by default
@@ -275,6 +334,7 @@ def default_input_page() -> InputLandingPage:
                 "Growth %": [0.0] * len(monthly_index),
             }
         ),
+        placeholder=True,
     )
 
     direct_costs_monthly = EditableTable(
@@ -286,6 +346,7 @@ def default_input_page() -> InputLandingPage:
                 {"Month": "2024-01", "Cost Category": "Enzymes & Chemicals", "Amount": 120_000},
             ]
         ),
+        placeholder=True,
     )
 
     staff_positions = EditableTable(
@@ -300,6 +361,7 @@ def default_input_page() -> InputLandingPage:
                 {"Position": "Farm Labour", "Department": "Farming", "Headcount": 100, "Monthly Salary": 420},
             ]
         ),
+        placeholder=True,
     )
 
     staff_costs_monthly = EditableTable(
@@ -311,6 +373,7 @@ def default_input_page() -> InputLandingPage:
                 {"Month": "2024-01", "Department": "Farming", "Headcount": 120, "Cost": 60_000},
             ]
         ),
+        placeholder=True,
     )
 
     other_opex_monthly = EditableTable(
@@ -326,6 +389,7 @@ def default_input_page() -> InputLandingPage:
                 {"Month": "2024-01", "Category": "Energy Cost", "Amount": 150_000},
             ]
         ),
+        placeholder=True,
     )
 
     accounts_receivable = EditableTable(
@@ -338,6 +402,7 @@ def default_input_page() -> InputLandingPage:
                 {"Metric": "Other assets percent of revenue", "Value": 0.02, "Units": "%"},
             ]
         ),
+        placeholder=True,
     )
 
     inventory_payable = EditableTable(
@@ -349,6 +414,7 @@ def default_input_page() -> InputLandingPage:
                 {"Metric": "Payables days", "Value": 40, "Units": "days"},
             ]
         ),
+        placeholder=True,
     )
 
     loan_schedule = EditableTable(
@@ -377,6 +443,7 @@ def default_input_page() -> InputLandingPage:
                 }
             ]
         ),
+        placeholder=True,
     )
 
     tax_schedule = EditableTable(
@@ -388,6 +455,7 @@ def default_input_page() -> InputLandingPage:
                 {"Item": "VAT", "Base Rate": 0.07, "Timing": "Monthly", "Notes": "Input credit offset within 60 days"},
             ]
         ),
+        placeholder=True,
     )
 
     inflation_schedule = EditableTable(
@@ -400,6 +468,7 @@ def default_input_page() -> InputLandingPage:
                 {"Year": 2026, "CPI": 0.03, "FX Index": 1.05, "Tariff Escalation": 0.015},
             ]
         ),
+        placeholder=True,
     )
 
     risk_schedule = EditableTable(
@@ -412,6 +481,7 @@ def default_input_page() -> InputLandingPage:
                 {"Risk": "Construction delay", "Probability": 0.15, "Impact": "High", "Mitigation": "EPC guarantees"},
             ]
         ),
+        placeholder=True,
     )
 
     return InputLandingPage(

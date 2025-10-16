@@ -442,7 +442,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
 
     updated = False
     if not new_monthly.equals(current_monthly):
-        page.production_monthly.data = new_monthly
+        page.production_monthly.set_data(new_monthly, mark_user_input=False)
         updated = True
 
     st.session_state["production_compound_cache"] = new_monthly.copy()
@@ -462,7 +462,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             current_annual[col] = pd.to_numeric(current_annual[col], errors="coerce").round(6)
 
     if not new_annual.equals(current_annual):
-        page.production_annual.data = new_annual
+        page.production_annual.set_data(new_annual, mark_user_input=False)
         updated = True
 
     if updated:
@@ -498,7 +498,7 @@ def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
             updated_costs.append(float(row.get("Headcount", 0.0)) * float(salary))
 
     staff_df["Cost"] = updated_costs
-    page.staff_costs_monthly.data = staff_df
+    page.staff_costs_monthly.set_data(staff_df, mark_user_input=False)
 
 
 def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
@@ -570,7 +570,7 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
         updated_amounts.append(tons * cost_per_ton)
 
     direct_df["Amount"] = updated_amounts
-    page.direct_costs_monthly.data = direct_df
+    page.direct_costs_monthly.set_data(direct_df, mark_user_input=False)
 
 
 def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
@@ -587,6 +587,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     st.subheader("Key Assumptions")
     original_df = table.data.copy()
     df = table.data.copy()
+    updated = False
     slider_cfg = {
         "Corporate tax rate": dict(min_value=0.0, max_value=0.7, step=0.01),
         "Investor share capital": dict(min_value=0.0, max_value=1.0, step=0.01),
@@ -622,8 +623,9 @@ def _key_assumptions_controls(table: EditableTable) -> None:
             st.session_state[value_key] = float(current_value)
             df.at[idx, "Value"] = float(current_value)
             if not np.isclose(original_value, float(current_value)):
+                updated = True
                 _mark_inputs_dirty()
-    table.data = df
+    table.set_data(df, mark_user_input=updated)
     if not df.equals(original_df):
         _update_table_editor_state(table)
 
@@ -865,7 +867,7 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
 
         if not new_data.equals(table.data):
             data_changed = True
-        table.data = new_data
+        table.set_data(new_data, mark_user_input=data_changed)
 
         if data_changed or not table.data.equals(original_data):
             _mark_inputs_dirty()
@@ -1033,7 +1035,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         st.dataframe(cost_annual.reset_index(), use_container_width=True)
 
     st.markdown("### Capital Expenditure & Debt")
-    capex_df = model.input_page.initial_investment.data.copy()
+    capex_df = model.input_page.initial_investment.model_frame
     if not capex_df.empty:
         st.bar_chart(capex_df.set_index("Item")["Cost"])
         st.dataframe(capex_df, use_container_width=True)
@@ -1209,7 +1211,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     st.dataframe(scenario_df, use_container_width=True)
 
     st.subheader("Scenario Tool Configuration")
-    tool_df = model.input_page.global_inputs.data.rename(columns={"Value": "Base Value"}).copy()
+    tool_df = model.input_page.global_inputs.model_frame.rename(columns={"Value": "Base Value"}).copy()
     numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
     tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
     tool_df["High Bound"] = np.where(numeric_values.notna(), numeric_values * 1.2, np.nan)
