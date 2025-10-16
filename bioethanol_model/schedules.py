@@ -74,7 +74,13 @@ class ProductionOutput:
     annual: pd.DataFrame
 
 
-def compute_production_tables(production_monthly: pd.DataFrame, start_year: int, end_year: int) -> ProductionOutput:
+def compute_production_tables(
+    production_monthly: pd.DataFrame,
+    start_year: int,
+    end_year: int,
+    *,
+    planning_start: pd.Timestamp | str | pd.Period | None = None,
+) -> ProductionOutput:
     """Return compounded cassava volumes and derived ethanol/feed outputs."""
 
     monthly = production_monthly.copy()
@@ -107,6 +113,16 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         empty.index = pd.Index([], name="Month")
         return ProductionOutput(empty, empty)
 
+    if planning_start is not None:
+        if isinstance(planning_start, str):
+            planning_start_ts = pd.Period(planning_start, freq="M").to_timestamp()
+        elif isinstance(planning_start, pd.Period):
+            planning_start_ts = planning_start.to_timestamp()
+        else:
+            planning_start_ts = pd.Timestamp(planning_start)
+    else:
+        planning_start_ts = None
+
     cassava_input = pd.to_numeric(monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce")
     if isinstance(cassava_input.index, pd.PeriodIndex):
         cassava_input.index = cassava_input.index.to_timestamp()
@@ -126,10 +142,18 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         for idx, val in cassava_input.items()
     }
 
+    if planning_start_ts is not None:
+        base_lookup = {month: val for month, val in base_lookup.items() if month >= planning_start_ts}
+        growth_lookup = {month: val for month, val in growth_lookup.items() if month >= planning_start_ts}
+
     cassava_values = []
     prev_value: float | None = None
     current_growth = 0.0
     for month in months:
+        if planning_start_ts is not None and month < planning_start_ts:
+            cassava_values.append(0.0)
+            prev_value = None
+            continue
         if month in growth_lookup:
             new_growth = growth_lookup[month]
             if pd.notna(new_growth):
@@ -179,7 +203,13 @@ class RevenueOutput:
     annual: pd.DataFrame
 
 
-def compute_revenue_schedule(production: ProductionOutput, revenue_inputs: pd.DataFrame, inflation_schedule: pd.DataFrame) -> RevenueOutput:
+def compute_revenue_schedule(
+    production: ProductionOutput,
+    revenue_inputs: pd.DataFrame,
+    inflation_schedule: pd.DataFrame,
+    *,
+    planning_start: pd.Timestamp | str | pd.Period | None = None,
+) -> RevenueOutput:
     monthly = production.monthly.copy()
     prices = {}
     for _, row in revenue_inputs.iterrows():
@@ -189,6 +219,16 @@ def compute_revenue_schedule(production: ProductionOutput, revenue_inputs: pd.Da
         prices[product] = (base_price, escalation)
 
     inflation = inflation_schedule.set_index("Year")["CPI"].to_dict()
+
+    if planning_start is not None:
+        if isinstance(planning_start, str):
+            planning_start_ts = pd.Period(planning_start, freq="M").to_timestamp()
+        elif isinstance(planning_start, pd.Period):
+            planning_start_ts = planning_start.to_timestamp()
+        else:
+            planning_start_ts = pd.Timestamp(planning_start)
+    else:
+        planning_start_ts = monthly.index[0] if len(monthly.index) else None
 
     monthly_revenue = pd.DataFrame(index=monthly.index)
     for product, (base_price, escalation) in prices.items():
@@ -208,7 +248,13 @@ def compute_revenue_schedule(production: ProductionOutput, revenue_inputs: pd.Da
             volumes = pd.Series(0.0, index=monthly.index)
         price_series = []
         for ts in monthly.index:
-            years_from_start = ts.year - monthly.index[0].year
+            if planning_start_ts is not None:
+                months_since_start = (ts.year - planning_start_ts.year) * 12 + (ts.month - planning_start_ts.month)
+                months_since_start = max(0, months_since_start)
+            else:
+                base_ts = monthly.index[0]
+                months_since_start = (ts.year - base_ts.year) * 12 + (ts.month - base_ts.month)
+            years_from_start = months_since_start / 12.0
             price = base_price * ((1 + escalation) ** years_from_start)
             cpi = inflation.get(ts.year, 0.0)
             price *= (1 + cpi)

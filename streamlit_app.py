@@ -134,6 +134,20 @@ def _update_projection(page: InputLandingPage) -> None:
     page.projection.start_year = int(start)
     page.projection.end_year = int(end)
 
+    month_options = pd.period_range(f"{int(start):04d}-01", f"{int(end):04d}-12", freq="M")
+    month_labels = [p.strftime("%Y-%m") for p in month_options]
+    default_plan = page.projection.planning_start or month_labels[0]
+    if default_plan not in month_labels:
+        default_plan = month_labels[0]
+    planning_selection = st.selectbox(
+        "Planning Start Month",
+        options=month_labels,
+        index=month_labels.index(default_plan) if default_plan in month_labels else 0,
+        key="projection_planning_start",
+    )
+    page.projection.planning_start = planning_selection
+    page.projection.clamp_planning_start()
+
 
 def _shift_month_column(table: EditableTable, year_delta: int) -> bool:
     """Shift a table's ``Month`` column by *year_delta* years.
@@ -173,9 +187,11 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
 
     start_key = "projection_start_year"
     end_key = "projection_end_year"
+    planning_key = "projection_planning_start"
 
     previous_start = int(page.projection.start_year)
     previous_end = int(page.projection.end_year)
+    previous_plan = str(page.projection.planning_start)
 
     start = int(st.session_state.get(start_key, previous_start))
     end = int(st.session_state.get(end_key, previous_end))
@@ -186,6 +202,14 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     page.projection.end_year = end
     st.session_state[start_key] = start
     st.session_state[end_key] = end
+
+    month_options = pd.period_range(f"{start:04d}-01", f"{end:04d}-12", freq="M").strftime("%Y-%m").tolist()
+    plan_value = str(st.session_state.get(planning_key, previous_plan))
+    if plan_value not in month_options and month_options:
+        plan_value = month_options[0]
+    page.projection.planning_start = plan_value
+    page.projection.clamp_planning_start()
+    st.session_state[planning_key] = page.projection.planning_start
 
     year_delta = start - previous_start
     tables_to_shift = [
@@ -199,7 +223,12 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
         if _shift_month_column(tbl, year_delta):
             any_shifted = True
 
-    if any_shifted or start != previous_start or end != previous_end:
+    if (
+        any_shifted
+        or start != previous_start
+        or end != previous_end
+        or page.projection.planning_start != previous_plan
+    ):
         _mark_inputs_dirty()
 
 
@@ -293,6 +322,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         seed_df,
         page.projection.start_year,
         page.projection.end_year,
+        planning_start=page.projection.planning_start_timestamp,
     )
 
     monthly = production.monthly.copy()
@@ -423,6 +453,7 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
         page.production_monthly.data,
         page.projection.start_year,
         page.projection.end_year,
+        planning_start=page.projection.planning_start_timestamp,
     )
     cassava_series = pd.to_numeric(
         production.monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce"
@@ -1200,10 +1231,12 @@ def main() -> None:
         snapshot_projection = (
             int(snapshot.projection.start_year),
             int(snapshot.projection.end_year),
+            str(snapshot.projection.planning_start),
         )
     current_projection = (
         int(input_page.projection.start_year),
         int(input_page.projection.end_year),
+        str(input_page.projection.planning_start),
     )
     projection_changed = snapshot_projection is not None and snapshot_projection != current_projection
     inputs_dirty = st.session_state.get("inputs_dirty", False)

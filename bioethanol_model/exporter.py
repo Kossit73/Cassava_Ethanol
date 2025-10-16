@@ -208,6 +208,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
             "Value": [
                 projection.start_year,
                 projection.end_year,
+                projection.planning_start,
                 projection.end_year - projection.start_year + 1,
                 _get_metric("Discount Rate"),
                 _get_metric("Terminal Growth Rate"),
@@ -218,6 +219,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         index=[
             "Start Year",
             "End Year",
+            "Planning Start Month",
             "Projection Years",
             "Discount Rate",
             "Terminal Growth Rate",

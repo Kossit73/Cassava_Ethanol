@@ -171,16 +171,20 @@ class CassavaBioethanolModel:
             projection.end_year,
         )
 
+        planning_start = projection.planning_start_timestamp
+
         production = compute_production_tables(
             page.production_monthly.data,
             projection.start_year,
             projection.end_year,
+            planning_start=planning_start,
         )
 
         revenue = compute_revenue_schedule(
             production,
             page.revenue_inputs.data,
             page.inflation_schedule.data,
+            planning_start=planning_start,
         )
 
         cost_outputs = compute_cost_tables(
@@ -256,6 +260,7 @@ class CassavaBioethanolModel:
                 "Discount Rate": discount_rate,
                 "Total Initial Investment": total_investment,
                 "Scenario": scenario_name,
+                "Planning Start Month": page.projection.planning_start,
             }
         )
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):

@@ -40,10 +40,47 @@ class EditableTable:
 class ProjectionHorizon:
     start_year: int
     end_year: int
+    planning_start: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.planning_start:
+            self.planning_start = f"{self.start_year:04d}-01"
+        self.clamp_planning_start()
+
+    def clamp_planning_start(self) -> None:
+        """Ensure the planning start month stays within the projection horizon."""
+
+        try:
+            plan_period = pd.Period(self.planning_start, freq="M")
+        except Exception:  # pragma: no cover - defensive guard
+            plan_period = pd.Period(f"{self.start_year:04d}-01", freq="M")
+
+        start_period = pd.Period(f"{self.start_year:04d}-01", freq="M")
+        end_period = pd.Period(f"{self.end_year:04d}-12", freq="M")
+
+        if plan_period < start_period:
+            plan_period = start_period
+        if plan_period > end_period:
+            plan_period = end_period
+
+        self.planning_start = plan_period.strftime("%Y-%m")
+
+    @property
+    def planning_start_period(self) -> pd.Period:
+        return pd.Period(self.planning_start, freq="M")
+
+    @property
+    def planning_start_timestamp(self) -> pd.Timestamp:
+        return self.planning_start_period.to_timestamp()
 
     def to_frame(self) -> pd.DataFrame:
         return pd.DataFrame(
-            {"Start Year": [self.start_year], "End Year": [self.end_year], "Years": [self.end_year - self.start_year + 1]}
+            {
+                "Start Year": [self.start_year],
+                "End Year": [self.end_year],
+                "Planning Start": [self.planning_start],
+                "Years": [self.end_year - self.start_year + 1],
+            }
         )
 
 
@@ -169,7 +206,7 @@ class ScenarioAssumption:
 
 
 def default_input_page() -> InputLandingPage:
-    projection = ProjectionHorizon(2024, 2034)
+    projection = ProjectionHorizon(2024, 2034, "2024-01")
 
     global_inputs = EditableTable(
         "Global Inputs",
