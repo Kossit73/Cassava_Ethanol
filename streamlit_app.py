@@ -271,6 +271,23 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     except Exception:  # pragma: no cover - defensive parsing guard
         return
 
+    previous_cache = st.session_state.get("production_compound_cache")
+    previous_series = None
+    if (
+        isinstance(previous_cache, pd.DataFrame)
+        and not previous_cache.empty
+        and "Month" in previous_cache.columns
+        and "Cassava ton" in previous_cache.columns
+    ):
+        try:
+            prev_index = pd.PeriodIndex(previous_cache["Month"], freq="M")
+            previous_series = pd.Series(
+                pd.to_numeric(previous_cache["Cassava ton"], errors="coerce"),
+                index=prev_index,
+            )
+        except Exception:  # pragma: no cover - defensive parsing guard
+            previous_series = None
+
     numeric_columns = [
         col for col in ("Cassava ton", "Ethanol litres", "Animal Feed ton") if col in df.columns
     ]
@@ -356,6 +373,15 @@ def _auto_compound_production(page: InputLandingPage) -> None:
 
     manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
 
+    if previous_series is not None and "Cassava ton" in df.columns:
+        cassava_current = pd.to_numeric(df["Cassava ton"], errors="coerce")
+        for period, value in zip(month_index, cassava_current):
+            if not np.isfinite(value):
+                continue
+            previous_value = previous_series.get(period)
+            if previous_value is None or not np.isclose(previous_value, float(value), atol=1e-9):
+                manual_periods.add(period)
+
     seed_df = df.copy()
     for col in manual_columns:
         mask = ~month_index.isin(manual_periods)
@@ -404,6 +430,8 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     if not new_monthly.equals(current_monthly):
         page.production_monthly.data = new_monthly
         updated = True
+
+    st.session_state["production_compound_cache"] = new_monthly.copy()
 
     annual = production.annual.copy()
     annual.index.name = "Year"
