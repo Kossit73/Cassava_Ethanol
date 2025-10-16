@@ -132,6 +132,7 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         compound_monthly[col] = values
 
     compound_monthly = compound_monthly.sort_index()
+    compound_monthly.index.name = "Month"
     monthly = compound_monthly
     annual = monthly.resample("Y").sum()
     annual.index = annual.index.year
