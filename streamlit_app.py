@@ -267,8 +267,24 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         growth_values = pd.Series(index=month_index, dtype=float)
 
     manual_periods = set()
+    planning_period: pd.Period | None = None
+    if getattr(page.projection, "planning_start", None):
+        try:
+            planning_period = pd.Period(page.projection.planning_start, freq="M")
+        except Exception:  # pragma: no cover - defensive parsing guard
+            planning_period = None
+
     if len(month_index) > 0:
-        manual_periods.add(month_index[0])
+        first_period = month_index[0]
+        if planning_period is not None:
+            # Anchor the cascade to the first period on or after the planning
+            # start month so pre-planning rows don't hold on to stale manual
+            # values.
+            for candidate in month_index:
+                if candidate >= planning_period:
+                    first_period = candidate
+                    break
+        manual_periods.add(first_period)
 
     if not growth_values.empty:
         # Treat the first row as the anchor growth rate. Any subsequent entries
@@ -308,6 +324,8 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             if abs(numeric_val - base_growth) < tolerance:
                 growth_values.at[idx] = np.nan
         manual_periods.add(base_period)
+        if planning_period is not None and base_period < planning_period:
+            manual_periods.discard(base_period)
 
     manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
 
