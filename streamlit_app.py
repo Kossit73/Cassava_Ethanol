@@ -236,10 +236,31 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         growth_values.iloc[0] = base_growth
         tolerance = 1e-9
         for idx in growth_values.index[1:]:
-            val = growth_values.at[idx]
-            if pd.isna(val):
+            raw_val = growth_values.at[idx]
+            if isinstance(raw_val, (pd.Series, np.ndarray, list, tuple)):
+                if len(raw_val) == 0:
+                    val = np.nan
+                else:
+                    val = raw_val[0]
+            else:
+                val = raw_val
+
+            try:
+                is_missing = pd.isna(val)
+            except ValueError:
+                # pandas can raise when the scalar resolution is ambiguous;
+                # treat it as missing so the cascade can overwrite it.
+                is_missing = True
+
+            if is_missing:
                 continue
-            if abs(float(val) - base_growth) < tolerance:
+
+            try:
+                numeric_val = float(val)
+            except (TypeError, ValueError):
+                continue
+
+            if abs(numeric_val - base_growth) < tolerance:
                 growth_values.at[idx] = np.nan
         manual_periods.add(base_period)
 
