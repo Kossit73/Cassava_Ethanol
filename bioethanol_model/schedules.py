@@ -134,9 +134,11 @@ def compute_production_tables(
 
     months = year_month_range(start_year, end_year)
     if months.empty:
-        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "Animal Feed ton"])
-        empty.index = pd.Index([], name="Month")
-        return ProductionOutput(empty, empty)
+        empty_index = pd.DatetimeIndex([], name="Month")
+        empty_cols = ["Cassava ton", "Ethanol litres", "Animal Feed ton"]
+        empty_monthly = pd.DataFrame(columns=empty_cols, index=empty_index)
+        empty_annual = pd.DataFrame(columns=empty_cols)
+        return ProductionOutput(empty_monthly, empty_annual)
 
     if planning_start is not None:
         if isinstance(planning_start, str):
@@ -236,6 +238,10 @@ def compute_revenue_schedule(
     planning_start: pd.Timestamp | str | pd.Period | None = None,
 ) -> RevenueOutput:
     monthly = production.monthly.copy()
+    if not isinstance(monthly.index, pd.DatetimeIndex):
+        monthly.index = pd.to_datetime(monthly.index, errors="coerce")
+        monthly = monthly[~monthly.index.isna()]
+        monthly.index.name = "Month"
     prices = {}
     for _, row in revenue_inputs.iterrows():
         product = row["Product"]
@@ -287,8 +293,16 @@ def compute_revenue_schedule(
         monthly_revenue[f"{product} revenue"] = volumes.values * np.array(price_series)
     monthly_revenue["Total Revenue"] = monthly_revenue.sum(axis=1)
 
-    annual = monthly_revenue.resample("Y").sum()
-    annual.index = annual.index.year
+    if not isinstance(monthly_revenue.index, pd.DatetimeIndex):
+        monthly_revenue.index = pd.to_datetime(monthly_revenue.index, errors="coerce")
+        monthly_revenue = monthly_revenue[~monthly_revenue.index.isna()]
+        monthly_revenue.index.name = "Month"
+
+    if monthly_revenue.empty:
+        annual = pd.DataFrame(columns=monthly_revenue.columns)
+    else:
+        annual = monthly_revenue.resample("Y").sum()
+        annual.index = annual.index.year
     return RevenueOutput(monthly_revenue, annual)
 
 
