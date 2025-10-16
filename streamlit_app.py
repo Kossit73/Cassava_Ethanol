@@ -76,6 +76,25 @@ def _mark_inputs_dirty() -> None:
     st.session_state.inputs_dirty = True
 
 
+def _sync_table_editors(page: InputLandingPage) -> None:
+    """Apply pending edits from Streamlit's data editors to the backing tables."""
+
+    for table in page.tables().values():
+        key = f"table_editor_{table.name.lower().replace(' ', '_')}"
+        if key not in st.session_state:
+            continue
+
+        editor_value = st.session_state[key]
+        if isinstance(editor_value, pd.DataFrame):
+            candidate = editor_value.reindex(columns=table.columns).copy()
+        else:
+            candidate = pd.DataFrame(editor_value, columns=table.columns)
+
+        if not candidate.equals(table.data):
+            table.data = candidate
+            _mark_inputs_dirty()
+
+
 def _current_model_version() -> int:
     return int(st.session_state.get(MODEL_VERSION_KEY, 0))
 
@@ -1317,6 +1336,7 @@ def main() -> None:
         _update_projection(input_page)
         _key_assumptions_controls(input_page.global_inputs)
         _modify_default_inputs(input_page)
+        _sync_table_editors(input_page)
         _apply_dependent_updates(input_page, selected_scenario)
         _editable_tables(input_page)
 
