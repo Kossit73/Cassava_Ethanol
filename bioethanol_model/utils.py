@@ -50,16 +50,31 @@ def irr(
     if not (has_pos and has_neg):
         return float("nan")
 
+    def _safe_power(base: float, exponent: int) -> float:
+        """Return base**exponent while avoiding under/overflow zeros."""
+
+        value = (base) ** exponent
+        if value == 0.0:
+            # Clamp to the smallest normal float so divisions remain finite.
+            return np.copysign(np.finfo(float).tiny, base)
+        if not np.isfinite(value):
+            # Extremely large values saturate at the maximum float magnitude.
+            return np.copysign(np.finfo(float).max, value)
+        return value
+
     def _npv(rate: float) -> float:
         # Keep the rate slightly above -100% to avoid division by zero.
         rate = max(rate, -0.999999)
-        return sum(cf / ((1 + rate) ** i) for i, cf in enumerate(cashflows))
+        base = 1 + rate
+        return sum(cf / _safe_power(base, i) for i, cf in enumerate(cashflows))
 
     def _npv_derivative(rate: float) -> float:
         rate = max(rate, -0.999999)
+        base = 1 + rate
         d_val = 0.0
         for i, cf in enumerate(cashflows[1:], start=1):
-            d_val += -i * cf / ((1 + rate) ** (i + 1))
+            denom = _safe_power(base, i + 1)
+            d_val += -i * cf / denom
         return d_val
 
     rate = guess
