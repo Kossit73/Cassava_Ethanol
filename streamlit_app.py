@@ -13,7 +13,12 @@ import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
-from bioethanol_model.inputs import EditableTable, InputLandingPage, default_input_page
+from bioethanol_model.inputs import (
+    EditableTable,
+    InputLandingPage,
+    ProjectionHorizon,
+    default_input_page,
+)
 from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
 from bioethanol_model.schedules import (
     ANIMAL_FEED_TON_PER_TON,
@@ -659,6 +664,155 @@ def _numeric_step(value: float) -> float:
     return round(10 ** exponent, 6)
 
 
+def _display_production_metrics(derived_metrics: Tuple[float, float] | None) -> None:
+    """Render helper metrics for production table edits."""
+
+    if derived_metrics is None:
+        st.info(
+            "Enter a cassava tonnage to calculate the ethanol and animal feed outputs for this row."
+        )
+        return
+
+    ethanol_val, feed_val = derived_metrics
+    metric_cols = st.columns(2)
+    metric_cols[0].metric(
+        "Calculated Ethanol (litres)",
+        f"{ethanol_val:,.0f}",
+    )
+    metric_cols[1].metric(
+        "Calculated Animal Feed (ton)",
+        f"{feed_val:,.3f}",
+    )
+
+
+def _row_editor_form(
+    table: EditableTable,
+    row_idx: int,
+    projection: ProjectionHorizon,
+    *,
+    widget_prefix: str,
+) -> Tuple[pd.DataFrame, bool, Tuple[float, float] | None]:
+    """Shared routine to edit a single row within a landing-page table."""
+
+    df = table.data.copy()
+    if df.empty or row_idx not in df.index:
+        return df, False, None
+
+    original_row = df.loc[row_idx].copy()
+
+    month_range = pd.period_range(
+        f"{int(projection.start_year):04d}-01",
+        f"{int(projection.end_year):04d}-12",
+        freq="M",
+    )
+    month_options = [p.strftime("%Y-%m") for p in month_range]
+
+    derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
+    derived_metrics: Tuple[float, float] | None = None
+    updated = False
+
+    for column in table.columns:
+        current_value = df.at[row_idx, column]
+        widget_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}".replace(" ", "_").lower()
+
+        if column in derived_columns:
+            display_value = ""
+            if current_value is not None and not (isinstance(current_value, float) and pd.isna(current_value)):
+                if isinstance(current_value, (int, float, np.floating, np.integer)):
+                    display_value = f"{float(current_value):,.6f}".rstrip("0").rstrip(".")
+                else:
+                    display_value = str(current_value)
+            st.text_input(
+                column,
+                value=display_value,
+                key=widget_key,
+                disabled=True,
+                help="This value is calculated automatically from other inputs.",
+            )
+            continue
+
+        if "month" in column.lower():
+            current_str = (
+                None
+                if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
+                else str(current_value)
+            )
+
+            option_list = ["Not set"] + month_options
+            if current_str and current_str not in option_list:
+                option_list.insert(1, current_str)
+
+            default_index = 0
+            if current_str and current_str in option_list:
+                default_index = option_list.index(current_str)
+
+            selection = st.selectbox(
+                column,
+                options=option_list,
+                index=default_index,
+                key=widget_key,
+            )
+
+            new_value = None if selection == "Not set" else selection
+            df.at[row_idx, column] = new_value
+            if current_str != new_value:
+                updated = True
+            continue
+
+        numeric_series = pd.to_numeric(df[column], errors="coerce")
+        is_numeric = pd.api.types.is_numeric_dtype(df[column]) or numeric_series.notna().any()
+
+        if is_numeric:
+            if row_idx in numeric_series.index:
+                base_value = numeric_series.loc[row_idx]
+            else:
+                base_value = numeric_series.iloc[0] if not numeric_series.empty else 0.0
+            if pd.isna(base_value):
+                base_value = 0.0
+            original_value = float(base_value)
+            step = float(_numeric_step(base_value))
+            number_format = "%.0f" if step >= 1 else "%.4f"
+            new_value = st.number_input(
+                column,
+                value=float(base_value),
+                step=step,
+                format=number_format,
+                key=widget_key,
+            )
+            if pd.api.types.is_integer_dtype(df[column]):
+                new_value = int(round(new_value))
+            df.at[row_idx, column] = new_value
+            if not np.isclose(original_value, float(new_value)):
+                updated = True
+        else:
+            text_value = "" if current_value is None or pd.isna(current_value) else str(current_value)
+            new_value = st.text_input(
+                column,
+                value=text_value,
+                key=widget_key,
+            )
+            df.at[row_idx, column] = new_value
+            if str(new_value) != str(text_value):
+                updated = True
+
+    if table.name == "Production Monthly" and "Cassava ton" in df.columns:
+        cassava_raw = df.at[row_idx, "Cassava ton"]
+        cassava_val = pd.to_numeric(pd.Series([cassava_raw]), errors="coerce").iloc[0]
+        if pd.notna(cassava_val):
+            ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
+            feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
+            if "Ethanol litres" in df.columns:
+                df.at[row_idx, "Ethanol litres"] = ethanol_val
+            if "Animal Feed ton" in df.columns:
+                df.at[row_idx, "Animal Feed ton"] = feed_val
+            derived_metrics = (ethanol_val, feed_val)
+
+    if not df.loc[row_idx].equals(original_row):
+        updated = True
+
+    return df, updated, derived_metrics
+
+
 def _modify_default_inputs(page: InputLandingPage) -> None:
     """Allow users to tweak any default input/figure via focused controls."""
 
@@ -701,148 +855,23 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     )
 
     st.markdown("Adjust the values for the selected row:")
-    updated = False
 
-    month_range = pd.period_range(
-        f"{int(page.projection.start_year):04d}-01",
-        f"{int(page.projection.end_year):04d}-12",
-        freq="M",
+    df_updated, updated, derived_metrics = _row_editor_form(
+        table,
+        row_idx,
+        page.projection,
+        widget_prefix="default_edit",
     )
-    month_options = [p.strftime("%Y-%m") for p in month_range]
 
-    derived_columns = DERIVED_COLUMN_MAP.get(table_name, set())
-
-    derived_metrics: Tuple[float, float] | None = None
-
-    for column in table.columns:
-        current_value = df.at[row_idx, column]
-        widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
-
-        if column in derived_columns:
-            display_value = ""
-            if current_value is not None and not (isinstance(current_value, float) and pd.isna(current_value)):
-                if isinstance(current_value, (int, float, np.floating, np.integer)):
-                    display_value = f"{float(current_value):,.6f}".rstrip("0").rstrip(".")
-                else:
-                    display_value = str(current_value)
-            st.text_input(
-                column,
-                value=display_value,
-                key=widget_key,
-                disabled=True,
-                help="This value is calculated automatically from other inputs.",
-            )
-            continue
-
-        if "month" in column.lower():
-            current_str = (
-                None
-                if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
-                else str(current_value)
-            )
-
-            option_list = ["Not set"] + month_options
-            if current_str and current_str not in option_list:
-                option_list.insert(1, current_str)
-
-            default_index = 0
-            if current_str and current_str in option_list:
-                default_index = option_list.index(current_str)
-
-            selection = st.selectbox(
-                column,
-                options=option_list,
-                index=default_index,
-                key=widget_key,
-            )
-
-            if selection == "Not set":
-                new_value = None
-            else:
-                new_value = selection
-
-            df.at[row_idx, column] = new_value
-            if current_str != new_value:
-                updated = True
-            continue
-
-        numeric_series = pd.to_numeric(df[column], errors="coerce")
-        is_numeric = pd.api.types.is_numeric_dtype(df[column]) or numeric_series.notna().any()
-
-        if is_numeric:
-            if row_idx in numeric_series.index:
-                base_value = numeric_series.loc[row_idx]
-            else:
-                base_value = numeric_series.iloc[0] if not numeric_series.empty else 0.0
-            if pd.isna(base_value):
-                base_value = 0.0
-            original_value = float(base_value)
-            # Streamlit number_input requires all numeric arguments to share the
-            # same underlying type (ints vs floats). ``_numeric_step`` can
-            # return an integer when the magnitude is large, so coerce the
-            # step to ``float`` to avoid "mixed numeric types" errors when the
-            # value is a float.
-            step = float(_numeric_step(base_value))
-            number_format = "%.0f" if step >= 1 else "%.4f"
-            new_value = st.number_input(
-                column,
-                value=float(base_value),
-                step=step,
-                format=number_format,
-                key=widget_key,
-            )
-            if pd.api.types.is_integer_dtype(df[column]):
-                new_value = int(round(new_value))
-            df.at[row_idx, column] = new_value
-            if not np.isclose(original_value, float(new_value)):
-                updated = True
-        else:
-            text_value = "" if current_value is None or pd.isna(current_value) else str(current_value)
-            new_value = st.text_input(
-                column,
-                value=text_value,
-                key=widget_key,
-            )
-            df.at[row_idx, column] = new_value
-            if str(new_value) != str(text_value):
-                updated = True
-
-    if table_name == "Production Monthly" and "Cassava ton" in df.columns:
-        cassava_raw = df.at[row_idx, "Cassava ton"]
-        cassava_val = pd.to_numeric(pd.Series([cassava_raw]), errors="coerce").iloc[0]
-        if pd.notna(cassava_val):
-            ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
-            feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
-            if "Ethanol litres" in df.columns:
-                df.at[row_idx, "Ethanol litres"] = ethanol_val
-            if "Animal Feed ton" in df.columns:
-                df.at[row_idx, "Animal Feed ton"] = feed_val
-            derived_metrics = (ethanol_val, feed_val)
-
-    if table_name == "Production Monthly":
-        if derived_metrics is not None:
-            ethanol_val, feed_val = derived_metrics
-            metric_cols = st.columns(2)
-            metric_cols[0].metric(
-                "Calculated Ethanol (litres)",
-                f"{ethanol_val:,.0f}",
-            )
-            metric_cols[1].metric(
-                "Calculated Animal Feed (ton)",
-                f"{feed_val:,.3f}",
-            )
-        else:
-            st.info(
-                "Enter a cassava tonnage to calculate the ethanol and animal feed outputs for this row."
-            )
+    if table.name == "Production Monthly":
+        _display_production_metrics(derived_metrics)
 
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
     if updated:
-        table.set_data(df, mark_user_input=True)
+        table.set_data(df_updated, mark_user_input=True)
         _mark_inputs_dirty()
         _update_table_editor_state(table)
     else:
-        table.set_data(df, mark_user_input=None)
         # Ensure the focused editor stays aligned even when only formatting changes occur.
         _update_table_editor_state(table)
 
@@ -857,12 +886,12 @@ def _editable_tables(page: InputLandingPage) -> None:
         with tab:
             for table in tables:
                 expanded = section in {"Global", "Capex", "Financial"}
-                _render_table(table, expanded=expanded)
+                _render_table(page, table, expanded=expanded)
                 if table is page.initial_investment:
                     st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
 
 
-def _render_table(table: EditableTable, expanded: bool = False) -> None:
+def _render_table(page: InputLandingPage, table: EditableTable, expanded: bool = False) -> None:
     """Show a Streamlit data editor for a specific table."""
 
     safe_key = table.name.replace(' ', '_').lower()
@@ -934,6 +963,34 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
 
         if data_changed or not table.data.equals(original_data):
             _mark_inputs_dirty()
+
+        if table.name == "Production Monthly" and not table.data.empty:
+            st.markdown("#### Edit individual months")
+            edit_state_key = f"quick_edit_row_{safe_key}"
+            for idx, row in table.data.iterrows():
+                label = row.get("Start Month") or row.get("Month") or f"Row {idx + 1}"
+                cols = st.columns([1, 4])
+                if cols[0].button("Edit", key=f"prod_month_edit_btn_{idx}"):
+                    st.session_state[edit_state_key] = int(idx)
+                cols[1].write(str(label))
+
+            selected_idx = st.session_state.get(edit_state_key)
+            if selected_idx in table.data.index:
+                st.markdown("---")
+                st.markdown(f"Editing row **{selected_idx + 1}**")
+                updated_df, row_updated, derived_metrics = _row_editor_form(
+                    table,
+                    int(selected_idx),
+                    page.projection,
+                    widget_prefix="quick_edit",
+                )
+                _display_production_metrics(derived_metrics)
+                if row_updated:
+                    table.set_data(updated_df, mark_user_input=True)
+                    _mark_inputs_dirty()
+                    _update_table_editor_state(table)
+                else:
+                    _update_table_editor_state(table)
 
 def _annualise(rate: float | None) -> float | None:
     if rate is None or pd.isna(rate):
