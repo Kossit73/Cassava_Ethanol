@@ -919,6 +919,7 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
         if not new_data.equals(table.data):
             data_changed = True
         table.set_data(new_data, mark_user_input=data_changed)
+        _update_table_editor_state(table)
 
         if data_changed or not table.data.equals(original_data):
             _mark_inputs_dirty()
