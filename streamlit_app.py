@@ -1326,6 +1326,19 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     st.subheader("Goal Seek Results")
     goal_seek_parameter = "Corporate tax rate"
     goal_seek_metric = "Project NPV"
+    goal_message: str | None = None
+    empty_goal_df = pd.DataFrame(
+        columns=[
+            "Parameter",
+            "Target Metric",
+            "Target Value",
+            "Target Name",
+            "Achieved Value",
+            "Tolerance",
+            "Iterations",
+        ]
+    )
+
     try:
         target_value = float(results["metrics"].get(goal_seek_metric, 0.0))
         goal_model = _scenario_model()
@@ -1344,7 +1357,15 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
             ]
         )
     except KeyError:
-        goal_df = pd.DataFrame(columns=["Parameter", "Target Metric", "Target Value", "Target Name", "Achieved Value", "Tolerance", "Iterations"])
+        goal_df = empty_goal_df
+        goal_message = "The selected goal seek parameter is not available in the current global inputs."
+    except ValueError as exc:
+        goal_df = empty_goal_df
+        goal_message = str(exc)
+
+    if goal_message:
+        st.info(goal_message)
+
     st.dataframe(goal_df, use_container_width=True)
 
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
