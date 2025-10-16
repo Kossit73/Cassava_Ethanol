@@ -269,24 +269,15 @@ def _key_assumptions_controls(table: EditableTable) -> None:
             max_value = float(cfg["max_value"])
             step = float(cfg["step"])
 
+            current_default = (
+                float(df.at[idx, "Value"]) if pd.notna(df.at[idx, "Value"]) else min_value
+            )
             if value_key not in st.session_state:
-                st.session_state[value_key] = float(df.at[idx, "Value"])
+                st.session_state[value_key] = current_default
 
-            original_value = float(df.at[idx, "Value"]) if pd.notna(df.at[idx, "Value"]) else 0.0
+            original_value = current_default
 
-            minus_col, value_col, plus_col = st.columns([1, 4, 1])
-            with minus_col:
-                if st.button("➖", key=f"{state_key}_minus"):
-                    st.session_state[value_key] = max(
-                        min_value, st.session_state[value_key] - step
-                    )
-            with plus_col:
-                if st.button("➕", key=f"{state_key}_plus"):
-                    st.session_state[value_key] = min(
-                        max_value, st.session_state[value_key] + step
-                    )
-
-            current_value = value_col.number_input(
+            current_value = st.number_input(
                 parameter,
                 min_value=min_value,
                 max_value=max_value,
