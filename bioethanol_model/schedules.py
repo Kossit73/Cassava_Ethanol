@@ -23,6 +23,31 @@ class DepreciationOutput:
 
 def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: int, end_year: int) -> DepreciationOutput:
     months = year_month_range(start_year, end_year)
+
+    # When the landing-page CAPEX table is still populated with placeholder
+    # values ``initial_investment`` can be empty.  The downstream pivot would
+    # otherwise raise ``KeyError`` because the required ``Month`` column is
+    # missing.  Short-circuit with zero schedules so the rest of the model can
+    # continue to build using the user-provided tables only.
+    if initial_investment is None or initial_investment.empty:
+        empty_monthly = pd.DataFrame(index=months)
+        empty_monthly.index.name = "Month"
+        empty_monthly["Total Depreciation"] = 0.0
+        empty_annual = empty_monthly.resample("Y").sum()
+        empty_annual.index = empty_annual.index.year
+        empty_summary = pd.DataFrame(columns=[
+            "Item",
+            "Cost",
+            "Life (years)",
+            "Depreciation Rate",
+            "Annual Depreciation",
+            "Monthly Depreciation",
+            f"Accumulated Depreciation (Year {end_year})",
+            "Net Book Value",
+        ])
+        capex_series = pd.Series(0.0, index=months, name="Capex")
+        return DepreciationOutput(empty_monthly, empty_annual, empty_summary, capex_series)
+
     records = []
     capex_records = []
     for _, row in initial_investment.iterrows():
