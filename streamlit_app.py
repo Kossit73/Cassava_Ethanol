@@ -658,13 +658,14 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         key="default_table_select",
     )
     table = tables[table_name]
+    df = table.data.copy()
 
-    if table.data.empty:
+    if df.empty:
         st.info("The selected table has no rows to modify. Use the table editor below to add data.")
         return
 
     id_column = table.columns[0] if table.columns else None
-    row_indices = list(table.data.index)
+    row_indices = list(df.index)
 
     def _format_row(idx: int) -> str:
         if id_column and id_column in table.data.columns:
@@ -695,7 +696,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     derived_columns = DERIVED_COLUMN_MAP.get(table_name, set())
 
     for column in table.columns:
-        current_value = table.data.at[row_idx, column]
+        current_value = df.at[row_idx, column]
         widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
 
         if column in derived_columns:
@@ -741,13 +742,13 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
             else:
                 new_value = selection
 
-            table.data.at[row_idx, column] = new_value
+            df.at[row_idx, column] = new_value
             if current_str != new_value:
                 updated = True
             continue
 
-        numeric_series = pd.to_numeric(table.data[column], errors="coerce")
-        is_numeric = pd.api.types.is_numeric_dtype(table.data[column]) or numeric_series.notna().any()
+        numeric_series = pd.to_numeric(df[column], errors="coerce")
+        is_numeric = pd.api.types.is_numeric_dtype(df[column]) or numeric_series.notna().any()
 
         if is_numeric:
             if row_idx in numeric_series.index:
@@ -771,9 +772,9 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 format=number_format,
                 key=widget_key,
             )
-            if pd.api.types.is_integer_dtype(table.data[column]):
+            if pd.api.types.is_integer_dtype(df[column]):
                 new_value = int(round(new_value))
-            table.data.at[row_idx, column] = new_value
+            df.at[row_idx, column] = new_value
             if not np.isclose(original_value, float(new_value)):
                 updated = True
         else:
@@ -783,15 +784,17 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 value=text_value,
                 key=widget_key,
             )
-            table.data.at[row_idx, column] = new_value
+            df.at[row_idx, column] = new_value
             if str(new_value) != str(text_value):
                 updated = True
 
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
     if updated:
+        table.set_data(df, mark_user_input=True)
         _mark_inputs_dirty()
         _update_table_editor_state(table)
     else:
+        table.set_data(df, mark_user_input=None)
         # Ensure the focused editor stays aligned even when only formatting changes occur.
         _update_table_editor_state(table)
 
