@@ -26,6 +26,11 @@ from bioethanol_model.sensitivity import (
 
 st.set_page_config(page_title="Cassava Bioethanol Model", layout="wide")
 
+MODEL_VERSION_KEY = "model_version"
+MC_CACHE_KEY = "mc_cache_store"
+SENSITIVITY_CACHE_KEY = "sensitivity_cache"
+SCENARIO_CACHE_KEY = "scenario_cache"
+
 DEFAULT_SENSITIVITY_SCENARIOS: List[SensitivityScenario] = [
     SensitivityScenario("Corporate tax +1pp", "Corporate tax rate", 0.01),
     SensitivityScenario("Corporate tax -1pp", "Corporate tax rate", -0.01),
@@ -61,6 +66,14 @@ def _mark_inputs_dirty() -> None:
     """Flag the session so financial outputs are refreshed on the next run."""
 
     st.session_state.inputs_dirty = True
+
+
+def _current_model_version() -> int:
+    return int(st.session_state.get(MODEL_VERSION_KEY, 0))
+
+
+def _bump_model_version() -> None:
+    st.session_state[MODEL_VERSION_KEY] = _current_model_version() + 1
 
 
 def _build_model_snapshot(page: InputLandingPage) -> tuple[CassavaBioethanolModel, Dict[str, object]]:
@@ -948,12 +961,39 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
         return clone
 
     analysis_model = _scenario_model()
-    if DEFAULT_SENSITIVITY_SCENARIOS:
-        sensitivity_results = run_sensitivity(analysis_model, DEFAULT_SENSITIVITY_SCENARIOS)
+    cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(SENSITIVITY_CACHE_KEY, {})
+    cached_entry = cache.get(model.scenario)
+    run_requested = st.button(
+        "Run Sensitivity Analysis",
+        key=f"run_sensitivity_{model.scenario.lower()}",
+    )
+
+    if run_requested or not cached_entry or cached_entry.get("version") != _current_model_version():
+        if DEFAULT_SENSITIVITY_SCENARIOS:
+            with st.spinner("Running sensitivity cases..."):
+                sensitivity_results = run_sensitivity(analysis_model, DEFAULT_SENSITIVITY_SCENARIOS)
+        else:
+            sensitivity_results = pd.DataFrame(
+                columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"]
+            )
+        cache[model.scenario] = {
+            "version": _current_model_version(),
+            "results": sensitivity_results,
+        }
+        st.session_state[SENSITIVITY_CACHE_KEY] = cache
+        cached_entry = cache[model.scenario]
+    elif cached_entry is None:
+        sensitivity_results = pd.DataFrame(
+            columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"]
+        )
     else:
-        sensitivity_results = pd.DataFrame(columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"])
+        sensitivity_results = cached_entry.get("results", pd.DataFrame())
+
     st.subheader("Simulation Results")
-    st.dataframe(sensitivity_results, use_container_width=True)
+    if sensitivity_results.empty:
+        st.info("Click 'Run Sensitivity Analysis' to generate comparison results.")
+    else:
+        st.dataframe(sensitivity_results, use_container_width=True)
 
     st.subheader("Monte Carlo Simulation Configuration")
     mc_rows = (
@@ -989,12 +1029,34 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         return clone
 
     comparison_model = _scenario_model()
-    if DEFAULT_SCENARIO_CONFIGS:
-        comparison_df = scenario_comparison(comparison_model, DEFAULT_SCENARIO_CONFIGS)
+    scenario_cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(SCENARIO_CACHE_KEY, {})
+    cached_entry = scenario_cache.get(model.scenario)
+    comparison_button = st.button(
+        "Run Scenario Comparison",
+        key=f"run_scenario_cmp_{model.scenario.lower()}",
+    )
+
+    if comparison_button or not cached_entry or cached_entry.get("version") != _current_model_version():
+        if DEFAULT_SCENARIO_CONFIGS:
+            with st.spinner("Evaluating scenario overrides..."):
+                comparison_df = scenario_comparison(comparison_model, DEFAULT_SCENARIO_CONFIGS)
+        else:
+            comparison_df = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
+        scenario_cache[model.scenario] = {
+            "version": _current_model_version(),
+            "comparison": comparison_df,
+        }
+        st.session_state[SCENARIO_CACHE_KEY] = scenario_cache
+        cached_entry = scenario_cache[model.scenario]
     else:
-        comparison_df = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
+        comparison_df = (
+            cached_entry.get("comparison") if cached_entry else pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
+        )
     st.subheader("Scenario Comparison")
-    st.dataframe(comparison_df, use_container_width=True)
+    if comparison_df.empty:
+        st.info("Click 'Run Scenario Comparison' to evaluate the configured overrides.")
+    else:
+        st.dataframe(comparison_df, use_container_width=True)
 
     st.subheader("Goal Seek Results")
     goal_seek_parameter = "Corporate tax rate"
@@ -1021,41 +1083,55 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     st.dataframe(goal_df, use_container_width=True)
 
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
-    current_version = st.session_state.get("model_version")
-    cache_version = st.session_state.get("mc_cache_version")
-    cache_scenario = st.session_state.get("mc_cache_scenario")
-    current_scenario = model.scenario
-    base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
-    if (
-        st.session_state.get("mc_cache") is None
-        or cache_version != current_version
-        or cache_scenario != current_scenario
-    ):
-        mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
-        mc_model.scenario = current_scenario
-        st.session_state.mc_cache = monte_carlo_simulation(
-            mc_model,
-            parameter_std=MONTE_CARLO_STD,
-            iterations=MONTE_CARLO_ITERATIONS,
-            random_seed=MONTE_CARLO_SEED,
-        )
-        st.session_state.mc_cache_version = current_version
-        st.session_state.mc_cache_scenario = current_scenario
-    mc_results = st.session_state.get("mc_cache", pd.DataFrame())
+    st.subheader("Monte Carlo Simulation")
 
-    st.subheader("Monte Carlo Simulation Results")
-    if mc_results.empty:
-        st.info("Monte Carlo results are not available. Adjust the configuration or recalculate the model.")
+    current_version = _current_model_version()
+    current_scenario = model.scenario
+    cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(MC_CACHE_KEY, {})
+    cached_entry = cache.get(current_scenario)
+
+    run_requested = st.button(
+        "Run Monte Carlo Simulation",
+        key=f"mc_run_{current_scenario.lower()}",
+    )
+
+    if run_requested or not cached_entry or cached_entry.get("version") != current_version:
+        if run_requested:
+            base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+            with st.spinner("Running Monte Carlo simulation..."):
+                mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
+                mc_model.scenario = current_scenario
+                mc_results = monte_carlo_simulation(
+                    mc_model,
+                    parameter_std=MONTE_CARLO_STD,
+                    iterations=MONTE_CARLO_ITERATIONS,
+                    random_seed=MONTE_CARLO_SEED,
+                )
+            cache[current_scenario] = {"version": current_version, "results": mc_results}
+            st.session_state[MC_CACHE_KEY] = cache
+            cached_entry = cache[current_scenario]
+        else:
+            st.info("Click 'Run Monte Carlo Simulation' to generate results for this scenario.")
+            return
+
+    if not cached_entry or cached_entry.get("results") is None:
+        st.info("Monte Carlo results are not available. Click the run button to generate them.")
         return
 
+    mc_results = cached_entry["results"]
+    if mc_results.empty:
+        st.info("Monte Carlo results are not available for the current configuration.")
+        return
+
+    st.subheader("Summary Statistics")
     summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T
     st.dataframe(summary, use_container_width=True)
 
     st.subheader("NPV Distribution (sorted path)")
     st.line_chart(mc_results["Project NPV"].sort_values().reset_index(drop=True))
 
-    st.subheader("IRR Distribution (sorted path)")
     if "Project IRR" in mc_results:
+        st.subheader("IRR Distribution (sorted path)")
         st.line_chart(mc_results["Project IRR"].sort_values().reset_index(drop=True))
 
 def main() -> None:
@@ -1085,9 +1161,12 @@ def main() -> None:
         st.session_state.selected_scenario = selected_choice
         st.session_state.scenario_payloads = {}
         st.session_state.excel_bytes_map = {}
-        st.session_state.mc_cache = None
-        st.session_state.mc_cache_version = None
-        st.session_state.mc_cache_scenario = None
+        st.session_state[MC_CACHE_KEY] = {}
+        st.session_state.pop("mc_cache", None)
+        st.session_state.pop("mc_cache_version", None)
+        st.session_state.pop("mc_cache_scenario", None)
+        st.session_state[SENSITIVITY_CACHE_KEY] = {}
+        st.session_state[SCENARIO_CACHE_KEY] = {}
 
     selected_scenario = st.session_state.selected_scenario
 
@@ -1138,10 +1217,13 @@ def main() -> None:
         st.session_state.scenario_payloads = {}
         st.session_state.excel_bytes_map = {}
         st.session_state.input_snapshot = copy.deepcopy(input_page)
-        st.session_state.model_version = st.session_state.get("model_version", 0) + 1
-        st.session_state.mc_cache = None
-        st.session_state.mc_cache_version = None
-        st.session_state.mc_cache_scenario = None
+        _bump_model_version()
+        st.session_state[MC_CACHE_KEY] = {}
+        st.session_state.pop("mc_cache", None)
+        st.session_state.pop("mc_cache_version", None)
+        st.session_state.pop("mc_cache_scenario", None)
+        st.session_state[SENSITIVITY_CACHE_KEY] = {}
+        st.session_state[SCENARIO_CACHE_KEY] = {}
         st.session_state.inputs_dirty = False
 
     snapshot = st.session_state.get("input_snapshot")
@@ -1153,17 +1235,17 @@ def main() -> None:
     st.session_state.model_results = (model, results)
 
     excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-    if selected_scenario not in excel_map:
-        excel_map[selected_scenario] = _generate_excel_bytes(
-            model, results, selected_scenario
-        )
-        st.session_state.excel_bytes_map = excel_map
-    st.session_state.excel_bytes = excel_map.get(selected_scenario)
+    excel_bytes = excel_map.get(selected_scenario)
 
     model.scenario = selected_scenario
 
     with download_container:
-        excel_bytes = st.session_state.get("excel_bytes")
+        if not excel_bytes:
+            if st.button("Prepare Excel Model", key=f"prepare_excel_{selected_scenario.lower()}"):
+                with st.spinner("Preparing Excel workbook..."):
+                    excel_bytes = _generate_excel_bytes(model, results, selected_scenario)
+                excel_map[selected_scenario] = excel_bytes
+                st.session_state.excel_bytes_map = excel_map
         if excel_bytes:
             st.download_button(
                 "Download Excel Model",
@@ -1171,6 +1253,15 @@ def main() -> None:
                 file_name="Cassava_Bioethanol_Financial_Model.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+            if st.button(
+                "Clear Prepared Excel",
+                key=f"clear_excel_{selected_scenario.lower()}",
+            ):
+                excel_map.pop(selected_scenario, None)
+                st.session_state.excel_bytes_map = excel_map
+                excel_bytes = None
+        if not excel_bytes:
+            st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
 
     with tabs[1]:
         _render_key_metrics(model, results)
