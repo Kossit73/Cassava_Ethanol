@@ -310,11 +310,23 @@ def default_input_page() -> InputLandingPage:
 
     production_annual = EditableTable(
         "Production Annual",
-        ["Year", "Cassava ton", "Ethanol litres", "Animal Feed ton"],
+        ["Year", "Start Month", "Cassava ton", "Ethanol litres", "Animal Feed ton"],
         pd.DataFrame(
             [
-                {"Year": 2024, "Cassava ton": 95_000, "Ethanol litres": 11_875_000, "Animal Feed ton": 23_750},
-                {"Year": 2025, "Cassava ton": 100_000, "Ethanol litres": 12_500_000, "Animal Feed ton": 25_000},
+                {
+                    "Year": 2024,
+                    "Start Month": "2024-01",
+                    "Cassava ton": 95_000,
+                    "Ethanol litres": 11_875_000,
+                    "Animal Feed ton": 23_750,
+                },
+                {
+                    "Year": 2025,
+                    "Start Month": "2025-01",
+                    "Cassava ton": 100_000,
+                    "Ethanol litres": 12_500_000,
+                    "Animal Feed ton": 25_000,
+                },
             ]
         ),
         placeholder=True,
@@ -324,10 +336,10 @@ def default_input_page() -> InputLandingPage:
     monthly_index = pd.period_range("2024-01", "2024-12", freq="M")
     production_monthly = EditableTable(
         "Production Monthly",
-        ["Month", "Cassava ton", "Ethanol litres", "Animal Feed ton", "Growth %"],
+        ["Start Month", "Cassava ton", "Ethanol litres", "Animal Feed ton", "Growth %"],
         pd.DataFrame(
             {
-                "Month": monthly_index.astype(str),
+                "Start Month": monthly_index.astype(str),
                 "Cassava ton": [8_000.0] * len(monthly_index),
                 "Ethanol litres": [1_000_000.0] * len(monthly_index),
                 "Animal Feed ton": [2_000.0] * len(monthly_index),

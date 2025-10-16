@@ -99,9 +99,15 @@ class CassavaBioethanolModel:
             if feed_mask.any():
                 prod_df = page.production_monthly.model_frame
                 tons = pd.Series(dtype=float)
-                if not prod_df.empty and {"Month", "Cassava ton"}.issubset(prod_df.columns):
-                    prod_df["Month"] = prod_df["Month"].astype(str)
-                    tons = pd.to_numeric(prod_df.set_index("Month")["Cassava ton"], errors="coerce")
+                month_col = None
+                if not prod_df.empty:
+                    if "Month" in prod_df.columns:
+                        month_col = "Month"
+                    elif "Start Month" in prod_df.columns:
+                        month_col = "Start Month"
+                if month_col and "Cassava ton" in prod_df.columns:
+                    prod_df[month_col] = prod_df[month_col].astype(str)
+                    tons = pd.to_numeric(prod_df.set_index(month_col)["Cassava ton"], errors="coerce")
                 default_ton = float(tons.mean()) if not tons.dropna().empty else 0.0
 
                 def _tons(month: str) -> float:

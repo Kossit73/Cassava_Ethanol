@@ -344,9 +344,15 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         if len(cols) <= 1:
             current_row = max(table_end, current_row + chart_height)
             return
-        for col_idx in cols:
-            if col_idx == categories_col:
-                continue
+        numeric_cols = [
+            col_idx
+            for col_idx in cols
+            if col_idx != categories_col and np.issubdtype(data.iloc[:, col_idx].dtype, np.number)
+        ]
+        if not numeric_cols:
+            current_row = max(table_end, current_row + chart_height)
+            return
+        for col_idx in numeric_cols:
             chart.add_series(
                 {
                     "name": [sheet, header_row, startcol + col_idx],

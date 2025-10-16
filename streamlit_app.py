@@ -128,6 +128,15 @@ def _bump_model_version() -> None:
     st.session_state[MODEL_VERSION_KEY] = _current_model_version() + 1
 
 
+def _get_month_column(df: pd.DataFrame) -> str | None:
+    """Return the preferred month column present in *df* (if any)."""
+
+    for column in ("Start Month", "Month"):
+        if column in df.columns:
+            return column
+    return None
+
+
 def _build_model_snapshot(page: InputLandingPage) -> tuple[CassavaBioethanolModel, Dict[str, object]]:
     """Create a model/result pair from a deep copy of the landing-page inputs."""
 
@@ -211,26 +220,23 @@ def _shift_month_column(table: EditableTable, year_delta: int) -> bool:
     Returns ``True`` when an update was applied.
     """
 
-    if (
-        year_delta == 0
-        or table.data.empty
-        or "Month" not in table.data.columns
-    ):
+    month_col = _get_month_column(table.data)
+    if year_delta == 0 or table.data.empty or month_col is None:
         return False
 
     try:
-        periods = pd.PeriodIndex(table.data["Month"].astype(str), freq="M")
+        periods = pd.PeriodIndex(table.data[month_col].astype(str), freq="M")
     except Exception:  # pragma: no cover - defensive parsing guard
         return False
 
     shifted = periods + year_delta * 12
     new_values = shifted.astype(str)
-    current_values = table.data["Month"].astype(str).reset_index(drop=True)
+    current_values = table.data[month_col].astype(str).reset_index(drop=True)
 
     if current_values.equals(pd.Series(new_values)):
         return False
 
-    table.data.loc[:, "Month"] = new_values
+    table.data.loc[:, month_col] = new_values
     return True
 
 
@@ -288,30 +294,33 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     """Cascade monthly production volumes using the growth assumptions."""
 
     df = page.production_monthly.data.copy()
-    if df.empty or "Month" not in df.columns:
+    month_col = _get_month_column(df)
+    if df.empty or month_col is None:
         return
 
-    try:
-        month_index = pd.PeriodIndex(df["Month"].astype(str), freq="M")
-    except Exception:  # pragma: no cover - defensive parsing guard
+    month_series = pd.to_datetime(df[month_col].astype(str), errors="coerce")
+    valid_mask = month_series.notna()
+    if not valid_mask.any():
         return
+
+    df = df.loc[valid_mask].reset_index(drop=True)
+    month_periods = month_series[valid_mask].dt.to_period("M")
+    df.loc[:, month_col] = month_periods.astype(str)
+    month_index = month_periods
 
     previous_cache = st.session_state.get("production_compound_cache")
     previous_series = None
-    if (
-        isinstance(previous_cache, pd.DataFrame)
-        and not previous_cache.empty
-        and "Month" in previous_cache.columns
-        and "Cassava ton" in previous_cache.columns
-    ):
-        try:
-            prev_index = pd.PeriodIndex(previous_cache["Month"], freq="M")
-            previous_series = pd.Series(
-                pd.to_numeric(previous_cache["Cassava ton"], errors="coerce"),
-                index=prev_index,
-            )
-        except Exception:  # pragma: no cover - defensive parsing guard
-            previous_series = None
+    if isinstance(previous_cache, pd.DataFrame) and not previous_cache.empty:
+        prev_month_col = _get_month_column(previous_cache)
+        if prev_month_col and "Cassava ton" in previous_cache.columns:
+            try:
+                prev_index = pd.PeriodIndex(previous_cache[prev_month_col].astype(str), freq="M")
+                previous_series = pd.Series(
+                    pd.to_numeric(previous_cache["Cassava ton"], errors="coerce"),
+                    index=prev_index,
+                )
+            except Exception:  # pragma: no cover - defensive parsing guard
+                previous_series = None
 
     numeric_columns = [
         col for col in ("Cassava ton", "Ethanol litres", "Animal Feed ton") if col in df.columns
@@ -427,6 +436,9 @@ def _auto_compound_production(page: InputLandingPage) -> None:
 
     monthly_reset = monthly.reset_index()
     monthly_reset["Month"] = monthly_reset["Month"].dt.to_period("M").astype(str)
+    if month_col != "Month":
+        monthly_reset[month_col] = monthly_reset["Month"]
+        monthly_reset = monthly_reset.drop(columns=["Month"])
     if growth_col:
         display_growth = growth_values.copy()
         if isinstance(display_growth.index, pd.PeriodIndex):
@@ -1017,7 +1029,11 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     st.markdown("### Annual Operations & Production")
     production_annual = production.annual.copy()
     if not production_annual.empty:
-        st.bar_chart(production_annual)
+        chart_data = production_annual.select_dtypes(include=[np.number])
+        if not chart_data.empty:
+            st.bar_chart(chart_data)
+        else:
+            st.info("No numeric production data available for charting.")
     else:
         st.info("No production data available for the selected horizon.")
 

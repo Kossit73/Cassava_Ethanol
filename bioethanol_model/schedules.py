@@ -114,11 +114,23 @@ def compute_production_tables(
         empty.index = pd.Index([], name="Month")
         return ProductionOutput(empty, empty)
 
+    month_col = "Month"
     if "Month" not in monthly.columns:
-        raise KeyError("Production Monthly table must include a 'Month' column")
+        if "Start Month" in monthly.columns:
+            month_col = "Start Month"
+        else:
+            raise KeyError("Production Monthly table must include a 'Month' or 'Start Month' column")
 
-    monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str), errors="coerce").dt.to_period("M").dt.to_timestamp()
+    month_values = pd.to_datetime(monthly[month_col].astype(str), errors="coerce")
+    monthly["Month"] = month_values.dt.to_period("M").dt.to_timestamp()
     monthly = monthly.dropna(subset=["Month"]).sort_values("Month").reset_index(drop=True)
+    if month_col != "Month" and month_col in monthly.columns:
+        monthly = monthly.drop(columns=[month_col])
+
+    if monthly.empty:
+        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "Animal Feed ton"])
+        empty.index = pd.Index([], name="Month")
+        return ProductionOutput(empty, empty)
 
     growth_col = next((c for c in monthly.columns if "growth" in c.lower()), None)
     growth_series = pd.Series(dtype=float)
@@ -221,6 +233,18 @@ def compute_production_tables(
 
     annual = compound_monthly.resample("Y").sum()
     annual.index = annual.index.year
+
+    start_lookup: Dict[int, str | None] = {}
+    for year, group in compound_monthly.groupby(compound_monthly.index.year):
+        positive = group[group["Cassava ton"] > 0]
+        if not positive.empty:
+            start_lookup[year] = positive.index[0].to_period("M").strftime("%Y-%m")
+        else:
+            start_lookup[year] = None
+
+    annual["Start Month"] = annual.index.map(start_lookup.get)
+    ordered_cols = ["Start Month"] + [col for col in annual.columns if col != "Start Month"]
+    annual = annual[ordered_cols]
     return ProductionOutput(compound_monthly, annual)
 
 
