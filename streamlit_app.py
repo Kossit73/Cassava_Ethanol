@@ -98,20 +98,26 @@ def _sync_table_editors(page: InputLandingPage) -> None:
 
     for table in page.tables().values():
         key = _table_editor_state_key(table)
+        widget_key = _table_widget_key(table)
         table_copy = table.data.copy()
         if key not in st.session_state:
             st.session_state[key] = table_copy
-            continue
+        else:
+            editor_value = st.session_state[key]
+            if not isinstance(editor_value, pd.DataFrame) or not editor_value.equals(table_copy):
+                st.session_state[key] = table_copy
 
-        editor_value = st.session_state[key]
-        if not isinstance(editor_value, pd.DataFrame) or not editor_value.equals(table_copy):
-            st.session_state[key] = table_copy
+        widget_value = st.session_state.get(widget_key)
+        if not isinstance(widget_value, pd.DataFrame) or not widget_value.equals(table_copy):
+            st.session_state[widget_key] = table_copy
 
 
 def _update_table_editor_state(table: EditableTable) -> None:
     """Force the Streamlit data editor to reflect *table*'s current values."""
 
-    st.session_state[_table_editor_state_key(table)] = table.data.copy()
+    df_copy = table.data.copy()
+    st.session_state[_table_editor_state_key(table)] = df_copy
+    st.session_state[_table_widget_key(table)] = df_copy
 
 
 def _current_model_version() -> int:
