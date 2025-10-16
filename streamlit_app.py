@@ -31,6 +31,14 @@ MC_CACHE_KEY = "mc_cache_store"
 SENSITIVITY_CACHE_KEY = "sensitivity_cache"
 SCENARIO_CACHE_KEY = "scenario_cache"
 
+# Columns that are derived from other inputs and should not be editable via the
+# "Modify Default Inputs & Figures" pane or the general data editor. The map is
+# keyed by landing-page table name to keep the behaviour scoped and explicit.
+DERIVED_COLUMN_MAP = {
+    "Production Monthly": {"Ethanol litres", "Animal Feed ton"},
+    "Production Annual": {"Ethanol litres", "Animal Feed ton"},
+}
+
 DEFAULT_SENSITIVITY_SCENARIOS: List[SensitivityScenario] = [
     SensitivityScenario("Corporate tax +1pp", "Corporate tax rate", 0.01),
     SensitivityScenario("Corporate tax -1pp", "Corporate tax rate", -0.01),
@@ -621,9 +629,27 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     )
     month_options = [p.strftime("%Y-%m") for p in month_range]
 
+    derived_columns = DERIVED_COLUMN_MAP.get(table_name, set())
+
     for column in table.columns:
         current_value = table.data.at[row_idx, column]
         widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
+
+        if column in derived_columns:
+            display_value = ""
+            if current_value is not None and not (isinstance(current_value, float) and pd.isna(current_value)):
+                if isinstance(current_value, (int, float, np.floating, np.integer)):
+                    display_value = f"{float(current_value):,.6f}".rstrip("0").rstrip(".")
+                else:
+                    display_value = str(current_value)
+            st.text_input(
+                column,
+                value=display_value,
+                key=widget_key,
+                disabled=True,
+                help="This value is calculated automatically from other inputs.",
+            )
+            continue
 
         if "month" in column.lower():
             current_str = (
@@ -745,11 +771,22 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
         else:
             controls[1].markdown("&nbsp;")
 
+        derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
+        column_config = {}
+        for col in derived_columns:
+            if col in table.columns:
+                column_config[col] = st.column_config.NumberColumn(
+                    label=col,
+                    disabled=True,
+                    help="Calculated automatically from other inputs.",
+                )
+
         edited = st.data_editor(
             table.data,
             num_rows="dynamic",
             use_container_width=True,
             key=safe_key,
+            column_config=column_config or None,
         )
         if isinstance(edited, pd.DataFrame):
             new_data = edited[table.columns].copy()
