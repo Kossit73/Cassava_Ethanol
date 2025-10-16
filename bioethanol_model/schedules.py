@@ -9,6 +9,10 @@ import pandas as pd
 from .utils import annual_periods, irr, npv, year_month_range
 
 
+ETHANOL_LITRES_PER_TON = 200.0
+ANIMAL_FEED_TON_PER_TON = 0.275
+
+
 @dataclass
 class DepreciationOutput:
     monthly: pd.DataFrame
@@ -71,72 +75,102 @@ class ProductionOutput:
 
 
 def compute_production_tables(production_monthly: pd.DataFrame, start_year: int, end_year: int) -> ProductionOutput:
+    """Return compounded cassava volumes and derived ethanol/feed outputs."""
+
     monthly = production_monthly.copy()
     if monthly.empty:
         empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "Animal Feed ton"])
         empty.index = pd.Index([], name="Month")
         return ProductionOutput(empty, empty)
 
-    monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str)).dt.to_period("M").dt.to_timestamp()
-    monthly = monthly.sort_values("Month").reset_index(drop=True)
+    if "Month" not in monthly.columns:
+        raise KeyError("Production Monthly table must include a 'Month' column")
+
+    monthly["Month"] = pd.to_datetime(monthly["Month"].astype(str), errors="coerce").dt.to_period("M").dt.to_timestamp()
+    monthly = monthly.dropna(subset=["Month"]).sort_values("Month").reset_index(drop=True)
 
     growth_col = next((c for c in monthly.columns if "growth" in c.lower()), None)
     growth_series = pd.Series(dtype=float)
     if growth_col and growth_col in monthly.columns:
         growth_series = pd.to_numeric(monthly[growth_col], errors="coerce")
+        growth_series.index = pd.PeriodIndex(monthly["Month"], freq="M")
+        if not growth_series.index.is_unique:
+            growth_series = growth_series[~growth_series.index.duplicated(keep="last")]
 
     monthly = monthly.set_index("Month")
     if growth_col and growth_col in monthly.columns:
         monthly = monthly.drop(columns=[growth_col])
 
-    numeric_cols = [c for c in monthly.columns if c != growth_col]
     months = year_month_range(start_year, end_year)
-    compound_monthly = pd.DataFrame(index=months)
+    if months.empty:
+        empty = pd.DataFrame(columns=["Cassava ton", "Ethanol litres", "Animal Feed ton"])
+        empty.index = pd.Index([], name="Month")
+        return ProductionOutput(empty, empty)
 
-    # Pre-compute dictionaries for quick lookup.
+    cassava_input = pd.to_numeric(monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce")
+    if isinstance(cassava_input.index, pd.PeriodIndex):
+        cassava_input.index = cassava_input.index.to_timestamp()
+    cassava_input = cassava_input.dropna()
+    if not cassava_input.index.is_unique:
+        cassava_input = cassava_input[~cassava_input.index.duplicated(keep="last")]
+
     growth_lookup: Dict[pd.Timestamp, float] = {}
     if not growth_series.empty:
         growth_lookup = {
-            idx if isinstance(idx, pd.Timestamp) else pd.Timestamp(idx): float(val)
+            (idx.to_timestamp() if isinstance(idx, pd.Period) else pd.Timestamp(idx)): float(val)
             for idx, val in growth_series.dropna().items()
         }
 
-    for col in numeric_cols:
-        base_series = pd.to_numeric(monthly.get(col, pd.Series(dtype=float)), errors="coerce")
-        base_lookup = {
-            idx if isinstance(idx, pd.Timestamp) else pd.Timestamp(idx): float(val)
-            for idx, val in base_series.dropna().items()
+    base_lookup: Dict[pd.Timestamp, float] = {
+        (idx if isinstance(idx, pd.Timestamp) else pd.Timestamp(idx)): float(val)
+        for idx, val in cassava_input.items()
+    }
+
+    cassava_values = []
+    prev_value: float | None = None
+    current_growth = 0.0
+    for month in months:
+        if month in growth_lookup:
+            new_growth = growth_lookup[month]
+            if pd.notna(new_growth):
+                current_growth = float(new_growth)
+        explicit = base_lookup.get(month)
+        if explicit is not None:
+            value = explicit
+        elif prev_value is not None:
+            value = prev_value * (1.0 + current_growth / 12.0)
+        else:
+            value = 0.0
+
+        cassava_values.append(value)
+        if np.isfinite(value):
+            prev_value = float(value)
+
+    cassava_series = pd.Series(cassava_values, index=months, name="Cassava ton")
+    ethanol_series = cassava_series * ETHANOL_LITRES_PER_TON
+    animal_feed_series = cassava_series * ANIMAL_FEED_TON_PER_TON
+
+    compound_monthly = pd.DataFrame(
+        {
+            "Cassava ton": cassava_series,
+            "Ethanol litres": ethanol_series,
+            "Animal Feed ton": animal_feed_series,
         }
-
-        values = []
-        prev_value = None
-        current_growth = 0.0
-        for month in months:
-            if month in growth_lookup:
-                new_growth = growth_lookup[month]
-                if pd.notna(new_growth):
-                    current_growth = float(new_growth)
-            month_value = base_lookup.get(month)
-            if month_value is not None:
-                value = month_value
-            elif prev_value is not None:
-                monthly_factor = 1.0 + current_growth / 12.0
-                value = prev_value * monthly_factor
-            else:
-                value = 0.0
-
-            values.append(value)
-            if np.isfinite(value):
-                prev_value = float(value)
-
-        compound_monthly[col] = values
-
-    compound_monthly = compound_monthly.sort_index()
+    )
     compound_monthly.index.name = "Month"
-    monthly = compound_monthly
-    annual = monthly.resample("Y").sum()
+
+    # Preserve any auxiliary columns (e.g., notes) by forward-filling the
+    # user-provided values over the compounded month index.
+    auxiliary_cols = [col for col in monthly.columns if col not in compound_monthly.columns]
+    for col in auxiliary_cols:
+        col_series = monthly[col]
+        if isinstance(col_series.index, pd.PeriodIndex):
+            col_series.index = col_series.index.to_timestamp()
+        compound_monthly[col] = col_series.reindex(months).ffill()
+
+    annual = compound_monthly.resample("Y").sum()
     annual.index = annual.index.year
-    return ProductionOutput(monthly, annual)
+    return ProductionOutput(compound_monthly, annual)
 
 
 @dataclass

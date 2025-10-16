@@ -205,8 +205,11 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     numeric_columns = [
         col for col in ("Cassava ton", "Ethanol litres", "Animal Feed ton") if col in df.columns
     ]
+    manual_columns = [col for col in ("Cassava ton",) if col in df.columns]
     if not numeric_columns:
         return
+    if not manual_columns:
+        manual_columns = numeric_columns[:1]
 
     growth_col = next((c for c in df.columns if "growth" in c.lower()), None)
     growth_values = pd.Series(dtype=float)
@@ -267,7 +270,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
 
     seed_df = df.copy()
-    for col in numeric_columns:
+    for col in manual_columns:
         mask = ~month_index.isin(manual_periods)
         seed_df.loc[mask, col] = np.nan
     if growth_col:
