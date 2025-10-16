@@ -595,9 +595,49 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
 
     st.markdown("Adjust the values for the selected row:")
     updated = False
+
+    month_range = pd.period_range(
+        f"{int(page.projection.start_year):04d}-01",
+        f"{int(page.projection.end_year):04d}-12",
+        freq="M",
+    )
+    month_options = [p.strftime("%Y-%m") for p in month_range]
+
     for column in table.columns:
         current_value = table.data.at[row_idx, column]
         widget_key = f"default_edit_{table_name}_{row_idx}_{column}".replace(" ", "_").lower()
+
+        if "month" in column.lower():
+            current_str = (
+                None
+                if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
+                else str(current_value)
+            )
+
+            option_list = ["Not set"] + month_options
+            if current_str and current_str not in option_list:
+                option_list.insert(1, current_str)
+
+            default_index = 0
+            if current_str and current_str in option_list:
+                default_index = option_list.index(current_str)
+
+            selection = st.selectbox(
+                column,
+                options=option_list,
+                index=default_index,
+                key=widget_key,
+            )
+
+            if selection == "Not set":
+                new_value = None
+            else:
+                new_value = selection
+
+            table.data.at[row_idx, column] = new_value
+            if current_str != new_value:
+                updated = True
+            continue
 
         numeric_series = pd.to_numeric(table.data[column], errors="coerce")
         is_numeric = pd.api.types.is_numeric_dtype(table.data[column]) or numeric_series.notna().any()
