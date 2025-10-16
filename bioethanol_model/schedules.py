@@ -575,17 +575,35 @@ def compute_financial_statements(
     direct = cost_outputs["Direct Costs"].monthly.sum(axis=1)
     staff = cost_outputs["Staff Costs"].monthly.sum(axis=1)
     other = cost_outputs["Other Opex"].monthly.sum(axis=1)
-    interest = loan_schedule.schedule.pivot_table(index="Month", values="Interest", aggfunc="sum")
-    interest = interest.reindex(monthly.index, fill_value=0.0)["Interest"]
-    if "Draw" in loan_schedule.schedule.columns:
-        debt_draws = (
-            loan_schedule.schedule.pivot_table(index="Month", values="Draw", aggfunc="sum")
-            .reindex(monthly.index, fill_value=0.0)["Draw"]
-        )
-    else:
+    schedule_df = loan_schedule.schedule
+    if schedule_df.empty:
+        interest = pd.Series(0.0, index=monthly.index)
         debt_draws = pd.Series(0.0, index=monthly.index)
-    principal = loan_schedule.schedule.pivot_table(index="Month", values="Principal", aggfunc="sum")
-    principal = principal.reindex(monthly.index, fill_value=0.0)["Principal"]
+        principal = pd.Series(0.0, index=monthly.index)
+        closing_balance = pd.Series(0.0, index=monthly.index)
+    else:
+        schedule_df = schedule_df.copy()
+        if not isinstance(schedule_df.index, pd.DatetimeIndex):
+            schedule_df = schedule_df.set_index("Month")
+        interest = (
+            schedule_df.groupby(level=0)["Interest"].sum()
+            .reindex(monthly.index, fill_value=0.0)
+        )
+        if "Draw" in schedule_df.columns:
+            debt_draws = (
+                schedule_df.groupby(level=0)["Draw"].sum()
+                .reindex(monthly.index, fill_value=0.0)
+            )
+        else:
+            debt_draws = pd.Series(0.0, index=monthly.index)
+        principal = (
+            schedule_df.groupby(level=0)["Principal"].sum()
+            .reindex(monthly.index, fill_value=0.0)
+        )
+        closing_balance = (
+            schedule_df.groupby(level=0)["Closing Balance"].sum()
+            .reindex(monthly.index, fill_value=0.0)
+        )
     debt_service = principal + interest
     capex = depreciation.capex.reindex(monthly.index, fill_value=0.0)
 
@@ -634,10 +652,7 @@ def compute_financial_statements(
     accumulated_dep = dep.cumsum()
     balance_monthly["Net PP&E"] = gross_ppe - accumulated_dep
     balance_monthly["Working Capital"] = wc
-    balance_monthly["Debt"] = (
-        loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum")
-        .reindex(monthly.index, fill_value=0.0)["Closing Balance"]
-    )
+    balance_monthly["Debt"] = closing_balance
     balance_monthly["Equity"] = (
         balance_monthly[["Cash", "Net PP&E", "Working Capital"]].sum(axis=1) - balance_monthly["Debt"]
     )
