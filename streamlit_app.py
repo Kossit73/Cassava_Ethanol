@@ -190,6 +190,105 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
         _mark_inputs_dirty()
 
 
+def _auto_compound_production(page: InputLandingPage) -> None:
+    """Cascade monthly production volumes using the growth assumptions."""
+
+    df = page.production_monthly.data.copy()
+    if df.empty or "Month" not in df.columns:
+        return
+
+    try:
+        month_index = pd.PeriodIndex(df["Month"].astype(str), freq="M")
+    except Exception:  # pragma: no cover - defensive parsing guard
+        return
+
+    numeric_columns = [
+        col for col in ("Cassava ton", "Ethanol litres", "Animal Feed ton") if col in df.columns
+    ]
+    if not numeric_columns:
+        return
+
+    growth_col = next((c for c in df.columns if "growth" in c.lower()), None)
+    growth_values = pd.Series(dtype=float)
+    if growth_col:
+        growth_values = pd.to_numeric(df[growth_col], errors="coerce")
+        growth_values.index = month_index
+        if not growth_values.dropna().empty and growth_values.nunique(dropna=False) <= 1:
+            base_growth = float(growth_values.dropna().iloc[0]) if not growth_values.dropna().empty else 0.0
+            growth_values = pd.Series(
+                [base_growth] + [np.nan] * (len(growth_values) - 1), index=month_index
+            )
+    else:
+        growth_values = pd.Series(index=month_index, dtype=float)
+
+    manual_periods = {month_index.min()}
+    manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
+
+    seed_df = df.copy()
+    for col in numeric_columns:
+        mask = ~month_index.isin(manual_periods)
+        seed_df.loc[mask, col] = np.nan
+    if growth_col:
+        seed_df[growth_col] = growth_values.values
+
+    production = compute_production_tables(
+        seed_df,
+        page.projection.start_year,
+        page.projection.end_year,
+    )
+
+    monthly = production.monthly.copy()
+    if monthly.empty:
+        return
+
+    monthly_reset = monthly.reset_index()
+    monthly_reset["Month"] = monthly_reset["Month"].dt.to_period("M").astype(str)
+    if growth_col:
+        display_growth = growth_values.reindex(monthly.index).ffill()
+        monthly_reset[growth_col] = display_growth.values
+
+    monthly_order = [col for col in df.columns if col in monthly_reset.columns]
+    new_monthly = monthly_reset[monthly_order].copy()
+    for col in numeric_columns:
+        if col in new_monthly.columns:
+            new_monthly[col] = pd.to_numeric(new_monthly[col], errors="coerce").round(6)
+    if growth_col and growth_col in new_monthly.columns:
+        new_monthly[growth_col] = pd.to_numeric(new_monthly[growth_col], errors="coerce")
+
+    current_monthly = df[monthly_order].copy()
+    for col in numeric_columns:
+        if col in current_monthly.columns:
+            current_monthly[col] = pd.to_numeric(current_monthly[col], errors="coerce").round(6)
+    if growth_col and growth_col in current_monthly.columns:
+        current_monthly[growth_col] = pd.to_numeric(current_monthly[growth_col], errors="coerce")
+
+    updated = False
+    if not new_monthly.equals(current_monthly):
+        page.production_monthly.data = new_monthly
+        updated = True
+
+    annual = production.annual.copy()
+    annual.index.name = "Year"
+    annual_reset = annual.reset_index()
+    annual_order = [col for col in page.production_annual.data.columns if col in annual_reset.columns]
+    new_annual = annual_reset[annual_order].copy()
+    for col in annual_order:
+        if col != "Year" and col in new_annual.columns:
+            new_annual[col] = pd.to_numeric(new_annual[col], errors="coerce").round(6)
+
+    current_annual = page.production_annual.data[annual_order].copy()
+    for col in annual_order:
+        if col != "Year" and col in current_annual.columns:
+            current_annual[col] = pd.to_numeric(current_annual[col], errors="coerce").round(6)
+
+    if not new_annual.equals(current_annual):
+        page.production_annual.data = new_annual
+        updated = True
+
+    if updated:
+        _mark_inputs_dirty()
+
+
 def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
     """Keep the monthly staff cost table aligned with position salaries."""
 
@@ -296,6 +395,7 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
 def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
     """Ensure derived landing-page tables stay synchronised with inputs."""
 
+    _auto_compound_production(page)
     _update_staff_costs_from_positions(page)
     _update_feedstock_costs(page, scenario)
 

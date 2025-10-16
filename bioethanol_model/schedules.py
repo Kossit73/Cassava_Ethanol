@@ -112,20 +112,22 @@ def compute_production_tables(production_monthly: pd.DataFrame, start_year: int,
         prev_value = None
         current_growth = 0.0
         for month in months:
+            if month in growth_lookup:
+                new_growth = growth_lookup[month]
+                if pd.notna(new_growth):
+                    current_growth = float(new_growth)
             month_value = base_lookup.get(month)
             if month_value is not None:
                 value = month_value
-                prev_value = month_value
             elif prev_value is not None:
-                value = prev_value * (1.0 + current_growth)
-                prev_value = value
+                monthly_factor = 1.0 + current_growth / 12.0
+                value = prev_value * monthly_factor
             else:
                 value = 0.0
 
             values.append(value)
-
-            if month in growth_lookup:
-                current_growth = growth_lookup[month]
+            if np.isfinite(value):
+                prev_value = float(value)
 
         compound_monthly[col] = values
 
