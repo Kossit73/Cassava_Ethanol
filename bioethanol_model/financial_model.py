@@ -196,7 +196,6 @@ class CassavaBioethanolModel:
             page.loan_schedule.data,
             projection.start_year,
             projection.end_year,
-            page.initial_investment.data["Cost"].sum(),
         )
 
         receivables = page.accounts_receivable.data.set_index("Metric")

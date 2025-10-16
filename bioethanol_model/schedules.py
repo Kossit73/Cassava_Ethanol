@@ -266,55 +266,91 @@ def compute_loan_schedule(
     loan_inputs: pd.DataFrame,
     start_year: int,
     end_year: int,
-    capex_total: float,
 ) -> LoanScheduleOutput:
     months = year_month_range(start_year, end_year)
     schedule_rows = []
+
+    if loan_inputs is None or loan_inputs.empty:
+        empty_schedule = pd.DataFrame(
+            columns=["Loan", "Month", "Opening Balance", "Interest", "Principal", "Closing Balance", "Payment"]
+        )
+        return LoanScheduleOutput(empty_schedule, pd.DataFrame(columns=["Interest", "Principal", "Payment"]))
+
+    amount_columns = ["Loan Amount", "Amount", "Drawdown"]
+
     for _, loan in loan_inputs.iterrows():
-        balance = loan.get("Drawdown", capex_total * 0.6)
+        amount = None
+        for column in amount_columns:
+            if column in loan.index:
+                try:
+                    value = float(loan.get(column))
+                except (TypeError, ValueError):
+                    value = float("nan")
+                if np.isfinite(value) and value > 0:
+                    amount = value
+                    break
+        if amount is None:
+            continue
+
         tenor_years = int(loan.get("Tenor Years", 8))
         grace_years = int(loan.get("Grace Years", 1))
-        rate = float(loan.get("Interest Rate", 0.08))
-        amortization = loan.get("Amortization", "Annuity")
+        try:
+            rate = float(loan.get("Interest Rate", 0.08))
+        except (TypeError, ValueError):
+            rate = 0.0
+        amortization = str(loan.get("Amortization", "Annuity") or "Annuity")
         monthly_rate = rate / 12.0
-        tenor_months = tenor_years * 12
-        grace_months = grace_years * 12
+        tenor_months = max(tenor_years, 0) * 12
+        grace_months = max(grace_years, 0) * 12
         repay_months = max(tenor_months - grace_months, 0)
+
         if amortization.lower().startswith("ann"):
             if repay_months > 0:
                 if monthly_rate == 0:
-                    payment = balance / repay_months
+                    payment = amount / repay_months
                 else:
                     factor = (monthly_rate * (1 + monthly_rate) ** repay_months) / ((1 + monthly_rate) ** repay_months - 1)
-                    payment = balance * factor
+                    payment = amount * factor
             else:
                 payment = 0.0
         else:
-            repay_months = tenor_months - grace_months
-            payment = balance / repay_months if repay_months > 0 else 0.0
-        bal = balance
+            payment = amount / repay_months if repay_months > 0 else 0.0
+
+        balance = amount
+        payments_made = 0
         for i, month in enumerate(months):
+            opening_balance = balance
             if i < grace_months:
-                interest = bal * monthly_rate
+                interest = opening_balance * monthly_rate
                 principal = 0.0
-            else:
-                interest = bal * monthly_rate
+            elif payments_made < repay_months and opening_balance > 0:
+                interest = opening_balance * monthly_rate
                 principal = max(0.0, payment - interest)
-                bal = max(0.0, bal - principal)
+                principal = min(principal, opening_balance)
+                balance = max(0.0, opening_balance - principal)
+                payments_made += 1
+            else:
+                interest = 0.0
+                principal = 0.0
+                balance = opening_balance
+
             schedule_rows.append(
                 {
-                    "Loan": loan["Loan"],
+                    "Loan": loan.get("Loan", f"Loan {i}") or f"Loan {i}",
                     "Month": month,
-                    "Opening Balance": bal + principal,
+                    "Opening Balance": opening_balance,
                     "Interest": interest,
                     "Principal": principal,
-                    "Closing Balance": bal,
+                    "Closing Balance": balance,
                     "Payment": interest + principal,
                 }
             )
 
     schedule = pd.DataFrame(schedule_rows)
-    summary = schedule.groupby("Loan").agg({"Interest": "sum", "Principal": "sum", "Payment": "sum"})
+    if schedule.empty:
+        summary = pd.DataFrame(columns=["Interest", "Principal", "Payment"])
+    else:
+        summary = schedule.groupby("Loan").agg({"Interest": "sum", "Principal": "sum", "Payment": "sum"})
     return LoanScheduleOutput(schedule, summary)
 
 

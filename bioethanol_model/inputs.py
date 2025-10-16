@@ -316,12 +316,22 @@ def default_input_page() -> InputLandingPage:
 
     loan_schedule = EditableTable(
         "Loan Schedule",
-        ["Loan", "Type", "Base Interest", "Interest Rate", "Tenor Years", "Grace Years", "Amortization"],
+        [
+            "Loan",
+            "Type",
+            "Loan Amount",
+            "Base Interest",
+            "Interest Rate",
+            "Tenor Years",
+            "Grace Years",
+            "Amortization",
+        ],
         pd.DataFrame(
             [
                 {
                     "Loan": "Senior Debt",
                     "Type": "Term Loan",
+                    "Loan Amount": 24_000_000,
                     "Base Interest": "SOFR",
                     "Interest Rate": 0.075,
                     "Tenor Years": 8,

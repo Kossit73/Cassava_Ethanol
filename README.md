@@ -4,6 +4,7 @@ This repository contains a Python-based toolkit that assembles a complete Cassav
 
 ## Features
 - Structured **Input Landing Page** capturing projection horizon, global inputs, CAPEX, depreciation schedules, revenue, production, opex, working capital, financing, taxation, inflation, and risk registers.
+- Initial investment items now represent the combined owner and investor equity contributions, while the loan schedule accepts explicit loan amounts for each facility so debt balances follow the values you enter rather than being inferred from CAPEX totals.
 - Automated **financial statements** (monthly and annual income statement, balance sheet, cash flow statement) with supporting schedules for depreciation, working capital, and debt amortisation.
 - **Key metrics dashboard** reporting project NPV/IRR, equity returns, cumulative cash flows, cost breakdowns, production outlook, and debt metrics.
 - Built-in **sensitivity, scenario, goal-seek, and Monte Carlo** utilities for rapid downside/upside diagnostics.
