@@ -76,10 +76,16 @@ def _mark_inputs_dirty() -> None:
     st.session_state.inputs_dirty = True
 
 
-def _table_editor_state_key(table: EditableTable) -> str:
-    """Return the session-state key used by the data editor for *table*."""
+def _table_widget_key(table: EditableTable) -> str:
+    """Return the Streamlit widget key for the data editor bound to *table*."""
 
-    return f"table_{table.name.replace(' ', '_').lower()}"
+    return f"table_editor_{table.name.replace(' ', '_').lower()}"
+
+
+def _table_editor_state_key(table: EditableTable) -> str:
+    """Return the session-state cache key used to mirror the table data."""
+
+    return f"table_cache_{table.name.replace(' ', '_').lower()}"
 
 
 def _sync_table_editors(page: InputLandingPage) -> None:
@@ -806,7 +812,9 @@ def _editable_tables(page: InputLandingPage) -> None:
 def _render_table(table: EditableTable, expanded: bool = False) -> None:
     """Show a Streamlit data editor for a specific table."""
 
-    safe_key = f"table_{table.name.replace(' ', '_').lower()}"
+    safe_key = table.name.replace(' ', '_').lower()
+    widget_key = _table_widget_key(table)
+    cache_key = _table_editor_state_key(table)
     with st.expander(table.name, expanded=expanded):
         original_data = table.data.copy()
         data_changed = False
@@ -840,11 +848,14 @@ def _render_table(table: EditableTable, expanded: bool = False) -> None:
                     help="Calculated automatically from other inputs.",
                 )
 
+        if cache_key not in st.session_state:
+            st.session_state[cache_key] = table.data.copy()
+
         edited = st.data_editor(
             table.data,
             num_rows="dynamic",
             use_container_width=True,
-            key=safe_key,
+            key=widget_key,
             column_config=column_config or None,
         )
         if isinstance(edited, pd.DataFrame):
