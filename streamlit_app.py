@@ -286,7 +286,12 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     monthly_reset = monthly.reset_index()
     monthly_reset["Month"] = monthly_reset["Month"].dt.to_period("M").astype(str)
     if growth_col:
-        display_growth = growth_values.reindex(monthly.index).ffill()
+        display_growth = growth_values.copy()
+        if isinstance(display_growth.index, pd.PeriodIndex):
+            display_growth.index = display_growth.index.to_timestamp()
+        if not display_growth.index.is_unique:
+            display_growth = display_growth[~display_growth.index.duplicated(keep="last")]
+        display_growth = display_growth.reindex(monthly.index).ffill()
         monthly_reset[growth_col] = display_growth.values
 
     monthly_order = [col for col in df.columns if col in monthly_reset.columns]
