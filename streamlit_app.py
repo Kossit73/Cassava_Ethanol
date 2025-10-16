@@ -221,7 +221,28 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     else:
         growth_values = pd.Series(index=month_index, dtype=float)
 
-    manual_periods = {month_index.min()}
+    manual_periods = set()
+    if len(month_index) > 0:
+        manual_periods.add(month_index[0])
+
+    if not growth_values.empty:
+        # Treat the first row as the anchor growth rate. Any subsequent entries
+        # that simply repeat this base value are considered placeholders and can
+        # be overridden by the compounded series. If a user enters a different
+        # growth figure for a later month we keep it so that a new cascade can
+        # start from that point.
+        base_period = growth_values.index[0]
+        base_growth = float(growth_values.iloc[0]) if pd.notna(growth_values.iloc[0]) else 0.0
+        growth_values.iloc[0] = base_growth
+        tolerance = 1e-9
+        for idx in growth_values.index[1:]:
+            val = growth_values.at[idx]
+            if pd.isna(val):
+                continue
+            if abs(float(val) - base_growth) < tolerance:
+                growth_values.at[idx] = np.nan
+        manual_periods.add(base_period)
+
     manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
 
     seed_df = df.copy()
