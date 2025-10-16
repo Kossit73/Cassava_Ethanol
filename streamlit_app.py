@@ -76,23 +76,31 @@ def _mark_inputs_dirty() -> None:
     st.session_state.inputs_dirty = True
 
 
+def _table_editor_state_key(table: EditableTable) -> str:
+    """Return the session-state key used by the data editor for *table*."""
+
+    return f"table_{table.name.replace(' ', '_').lower()}"
+
+
 def _sync_table_editors(page: InputLandingPage) -> None:
-    """Apply pending edits from Streamlit's data editors to the backing tables."""
+    """Keep Streamlit's editor state aligned with the latest table data."""
 
     for table in page.tables().values():
-        key = f"table_editor_{table.name.lower().replace(' ', '_')}"
+        key = _table_editor_state_key(table)
+        table_copy = table.data.copy()
         if key not in st.session_state:
+            st.session_state[key] = table_copy
             continue
 
         editor_value = st.session_state[key]
-        if isinstance(editor_value, pd.DataFrame):
-            candidate = editor_value.reindex(columns=table.columns).copy()
-        else:
-            candidate = pd.DataFrame(editor_value, columns=table.columns)
+        if not isinstance(editor_value, pd.DataFrame) or not editor_value.equals(table_copy):
+            st.session_state[key] = table_copy
 
-        if not candidate.equals(table.data):
-            table.data = candidate
-            _mark_inputs_dirty()
+
+def _update_table_editor_state(table: EditableTable) -> None:
+    """Force the Streamlit data editor to reflect *table*'s current values."""
+
+    st.session_state[_table_editor_state_key(table)] = table.data.copy()
 
 
 def _current_model_version() -> int:
@@ -611,7 +619,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
                 _mark_inputs_dirty()
     table.data = df
     if not df.equals(original_df):
-        table.data = df
+        _update_table_editor_state(table)
 
 
 def _numeric_step(value: float) -> float:
@@ -774,6 +782,10 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
     if updated:
         _mark_inputs_dirty()
+        _update_table_editor_state(table)
+    else:
+        # Ensure the focused editor stays aligned even when only formatting changes occur.
+        _update_table_editor_state(table)
 
 
 def _editable_tables(page: InputLandingPage) -> None:
