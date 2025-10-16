@@ -51,9 +51,22 @@ def irr(
         return float("nan")
 
     def _safe_power(base: float, exponent: int) -> float:
-        """Return base**exponent while avoiding under/overflow zeros."""
+        """Return ``base**exponent`` while avoiding invalid or extreme values."""
 
-        value = (base) ** exponent
+        if exponent == 0:
+            return 1.0
+        if base <= 0:
+            # ``base`` can dip below zero when the solver explores rates < -100%,
+            # which would otherwise yield complex numbers.  Treat these cases as
+            # extremely large denominators so the contribution effectively drops
+            # out of the sum and the solver falls back to bisection.
+            return float("inf")
+
+        try:
+            value = base**exponent
+        except OverflowError:
+            return np.copysign(np.finfo(float).max, base)
+
         if value == 0.0:
             # Clamp to the smallest normal float so divisions remain finite.
             return np.copysign(np.finfo(float).tiny, base)
