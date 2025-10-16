@@ -122,19 +122,72 @@ def _update_projection(page: InputLandingPage) -> None:
     page.projection.end_year = int(end)
 
 
+def _shift_month_column(table: EditableTable, year_delta: int) -> bool:
+    """Shift a table's ``Month`` column by *year_delta* years.
+
+    When the projection horizon changes we want the editable landing-page
+    tables (production, staff costs, other opex) to reflect the new start
+    year.  Shifting by the delta preserves the relative spacing and keeps any
+    duplicate months (e.g. multiple departments in the same month) intact.
+    Returns ``True`` when an update was applied.
+    """
+
+    if (
+        year_delta == 0
+        or table.data.empty
+        or "Month" not in table.data.columns
+    ):
+        return False
+
+    try:
+        periods = pd.PeriodIndex(table.data["Month"].astype(str), freq="M")
+    except Exception:  # pragma: no cover - defensive parsing guard
+        return False
+
+    shifted = periods + year_delta * 12
+    new_values = shifted.astype(str)
+    current_values = table.data["Month"].astype(str).reset_index(drop=True)
+
+    if current_values.equals(pd.Series(new_values)):
+        return False
+
+    table.data.loc[:, "Month"] = new_values
+    return True
+
+
 def _sync_projection_from_session(page: InputLandingPage) -> None:
     """Ensure the landing-page projection matches the latest widget state."""
 
     start_key = "projection_start_year"
     end_key = "projection_end_year"
-    start = int(st.session_state.get(start_key, page.projection.start_year))
-    end = int(st.session_state.get(end_key, page.projection.end_year))
+
+    previous_start = int(page.projection.start_year)
+    previous_end = int(page.projection.end_year)
+
+    start = int(st.session_state.get(start_key, previous_start))
+    end = int(st.session_state.get(end_key, previous_end))
     if end < start:
         end = start
+
     page.projection.start_year = start
     page.projection.end_year = end
     st.session_state[start_key] = start
     st.session_state[end_key] = end
+
+    year_delta = start - previous_start
+    tables_to_shift = [
+        page.production_monthly,
+        page.staff_costs_monthly,
+        page.other_opex_monthly,
+    ]
+
+    any_shifted = False
+    for tbl in tables_to_shift:
+        if _shift_month_column(tbl, year_delta):
+            any_shifted = True
+
+    if any_shifted or start != previous_start or end != previous_end:
+        _mark_inputs_dirty()
 
 
 def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
