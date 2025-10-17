@@ -847,6 +847,16 @@ def compute_key_metrics(
     free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
     equity_cash_flow = financials.cashflow_monthly["Equity Cash Flow"].astype(float)
 
+    def _cumulative_total(series: pd.Series) -> float:
+        if series.empty:
+            return 0.0
+        return float(series.cumsum().iloc[-1])
+
+    def _final_value(series: pd.Series) -> float:
+        if series.empty:
+            return 0.0
+        return float(series.iloc[-1])
+
     project_cashflows = [0.0] + free_cash_flow.tolist()
     equity_cashflows = [0.0] + equity_cash_flow.tolist()
     investor_cashflows = [0.0] + (equity_cash_flow * investor_share).tolist()
@@ -877,11 +887,11 @@ def compute_key_metrics(
         "Equity IRR": equity_irr,
         "Investor IRR": investor_irr,
         "Owner IRR": owner_irr,
-        "Cumulative FCF": float(np.cumsum(free_cash_flow).iloc[-1]),
-        "Cumulative Equity CF": float(np.cumsum(equity_cash_flow).iloc[-1]),
-        "Final Month Revenue": float(financials.income_monthly["Revenue"].iloc[-1]),
-        "Final Month EBITDA": float(financials.income_monthly["EBITDA"].iloc[-1]),
-        "Final Month Equity CF": float(equity_cash_flow.iloc[-1]),
+        "Cumulative FCF": _cumulative_total(free_cash_flow),
+        "Cumulative Equity CF": _cumulative_total(equity_cash_flow),
+        "Final Month Revenue": _final_value(financials.income_monthly["Revenue"]),
+        "Final Month EBITDA": _final_value(financials.income_monthly["EBITDA"]),
+        "Final Month Equity CF": _final_value(equity_cash_flow),
         "Payback Period (months)": payback_months,
         "Payback Month": payback_label,
     }
