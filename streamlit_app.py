@@ -650,15 +650,32 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         aligned_prev = previous_series.reindex(month_index)
         for period, value in cassava_current.items():
             prev_val = aligned_prev.get(period)
-            if pd.isna(value):
-                if prev_val is not None and pd.notna(prev_val):
+
+            if isinstance(prev_val, (pd.Series, np.ndarray, list, tuple)):
+                prev_series = pd.Series(prev_val).dropna()
+                prev_val = prev_series.iloc[0] if not prev_series.empty else np.nan
+
+            try:
+                current_missing = pd.isna(value)
+            except ValueError:
+                current_missing = True
+
+            try:
+                prev_missing = pd.isna(prev_val)
+            except ValueError:
+                prev_missing = True
+
+            if current_missing:
+                if not prev_missing:
                     changed_periods.add(period)
                 continue
+
             try:
                 numeric_val = float(value)
             except (TypeError, ValueError):
                 continue
-            if prev_val is None or pd.isna(prev_val) or not np.isclose(prev_val, numeric_val, atol=1e-9):
+
+            if prev_missing or not np.isfinite(prev_val) or not np.isclose(float(prev_val), numeric_val, atol=1e-9):
                 changed_periods.add(period)
 
     baseline_changed = False
