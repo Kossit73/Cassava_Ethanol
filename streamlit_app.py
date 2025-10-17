@@ -465,6 +465,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     updated = False
     if not new_monthly.equals(current_monthly):
         page.production_monthly.set_data(new_monthly, mark_user_input=False)
+        _update_table_editor_state(page.production_monthly)
         updated = True
 
     st.session_state["production_compound_cache"] = new_monthly.copy()
@@ -485,6 +486,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
 
     if not new_annual.equals(current_annual):
         page.production_annual.set_data(new_annual, mark_user_input=False)
+        _update_table_editor_state(page.production_annual)
         updated = True
 
     if updated:
