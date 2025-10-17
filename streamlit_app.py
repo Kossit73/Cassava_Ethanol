@@ -1342,9 +1342,14 @@ def _render_production_panel(page: InputLandingPage) -> None:
     """Expose production schedules outside the grouped tab layout."""
 
     st.subheader("Production Schedule")
-    st.caption(
-        "Adjust cassava tonnage with the +/- controls or insert dated changes on the right. "
-        "Monthly figures automatically cascade to the annual production summary."
+    st.markdown(
+        """
+        - **Cascade growth across the projection horizon.**
+        - Set a monthly growth percentage to apply from this month onward; the model will recalculate every subsequent production month automatically.
+        - Updates are applied immediately—use the section tables below for bulk edits or row management.
+        - The production schedule you see here is derived from your changes, not the seeded defaults.
+        - Adjust cassava tonnage with the ± controls or insert dated changes on the right. Monthly figures automatically cascade to the annual production summary.
+        """
     )
 
     monthly_table = page.production_monthly
@@ -1378,12 +1383,50 @@ def _render_production_panel(page: InputLandingPage) -> None:
             key="production_step_value",
         )
 
-        controls = st.columns([1, 1, 3])
+        growth_col = next((c for c in monthly_df.columns if "growth" in c.lower()), None)
+        default_growth_pct = 0.0
+        if growth_col is not None and row_idx in monthly_df.index:
+            current_growth = pd.to_numeric(
+                pd.Series([monthly_df.at[row_idx, growth_col]]), errors="coerce"
+            ).iloc[0]
+            if pd.notna(current_growth):
+                default_growth_pct = float(current_growth) * 100.0
+
+        controls = st.columns([1, 1, 2, 2])
         minus_pressed = controls[0].button("−", key=f"production_minus_{row_idx}")
         plus_pressed = controls[1].button("+", key=f"production_plus_{row_idx}")
 
         with controls[2]:
-            change_applied = _render_change_controls(page, monthly_table)
+            st.markdown("**Monthly growth % to apply**")
+            growth_value = st.number_input(
+                "Monthly growth % to apply",
+                value=float(default_growth_pct),
+                step=0.1,
+                format="%.2f",
+                key=f"production_growth_pct_{row_idx}",
+            )
+        with controls[3]:
+            if st.button(
+                "Cascade growth",
+                key=f"production_cascade_growth_{row_idx}",
+                help="Apply the selected growth rate from this month onward.",
+            ):
+                _apply_growth_cascade(
+                    page,
+                    monthly_table,
+                    monthly_table.data.copy(),
+                    row_idx,
+                    growth_value,
+                )
+                change_applied = True
+
+        st.markdown("**Change effective month**")
+        st.caption(
+            "Select the month where the new production plan should begin, click **Add change**, and edit the inserted row. "
+            "The model will cascade cassava tonnage (and the derived ethanol and animal feed outputs) to all later months automatically."
+        )
+        change_controls_applied = _render_change_controls(page, monthly_table)
+        change_applied = change_applied or change_controls_applied
 
         if step_value > 0:
             if minus_pressed:
@@ -1396,6 +1439,11 @@ def _render_production_panel(page: InputLandingPage) -> None:
     else:
         st.info(
             "The production schedule is empty. Use the bulk change controls to insert the first production month."
+        )
+        st.markdown("**Change effective month**")
+        st.caption(
+            "Select the month where the new production plan should begin, click **Add change**, and edit the newly inserted row. "
+            "The model will cascade cassava tonnage (and the derived ethanol and animal feed outputs) to all later months automatically."
         )
         change_applied = _render_change_controls(page, monthly_table)
 
