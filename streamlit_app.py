@@ -50,6 +50,24 @@ DERIVED_COLUMN_MAP = {
     "Production Annual": {"Ethanol litres", "Animal Feed ton"},
 }
 
+# Predefined category options surfaced in the "Modify Default Inputs & Figures"
+# editor. Users can still supply custom values by selecting the explicit custom
+# option exposed by the editor for each table.
+CATEGORY_SELECT_OPTIONS = {
+    ("Direct Costs Monthly", "Cost Category"): [
+        "Cassava Feedstock",
+        "Enzymes & Chemicals",
+        "Energy Cost",
+    ],
+    ("Other Opex Monthly", "Category"): [
+        "Insurance",
+        "Service Contracts",
+        "General Administration",
+        "Sales & Marketing",
+        "Research & Development",
+    ],
+}
+
 CHANGE_BUTTON_CONFIG = {
     "Production Monthly": {
         "type": "month",
@@ -1145,6 +1163,49 @@ def _row_editor_form(
             new_value = None if selection == "Not set" else selection
             df.at[row_idx, column] = new_value
             if current_str != new_value:
+                updated = True
+            continue
+
+        category_key = (table.name, column)
+        if category_key in CATEGORY_SELECT_OPTIONS:
+            options = list(CATEGORY_SELECT_OPTIONS[category_key])
+            current_str = (
+                ""
+                if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
+                else str(current_value)
+            )
+            if current_str and current_str not in options:
+                options.append(current_str)
+            custom_label = "Custom value"
+            if custom_label not in options:
+                options.append(custom_label)
+
+            default_index = 0
+            if current_str and current_str in options:
+                default_index = options.index(current_str)
+            elif custom_label in options and current_str and current_str not in CATEGORY_SELECT_OPTIONS[category_key]:
+                default_index = options.index(current_str)
+
+            selection = st.selectbox(
+                column,
+                options=options,
+                index=default_index,
+                key=widget_key,
+            )
+
+            if selection == custom_label:
+                custom_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}_custom".replace(" ", "_").lower()
+                custom_value = st.text_input(
+                    f"Specify {column.lower()}",
+                    value=current_str if current_str not in CATEGORY_SELECT_OPTIONS[category_key] else "",
+                    key=custom_key,
+                )
+                new_value = custom_value.strip() if custom_value.strip() else None
+            else:
+                new_value = selection
+
+            df.at[row_idx, column] = new_value
+            if (current_str or None) != (new_value or None):
                 updated = True
             continue
 
