@@ -130,6 +130,14 @@ def _update_table_editor_state(table: EditableTable) -> None:
     st.session_state[_table_editor_state_key(table)] = df_copy
 
 
+def _reset_table_widget(table: EditableTable) -> None:
+    """Remove any bound widget state so new data is rendered on the next run."""
+
+    widget_key = _table_widget_key(table)
+    if widget_key in st.session_state:
+        del st.session_state[widget_key]
+
+
 def _projection_month_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[str]:
     start_year = projection.start_year + start_year_offset
     if start_year > projection.end_year:
@@ -592,6 +600,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     if not new_monthly.equals(current_monthly):
         page.production_monthly.set_data(new_monthly, mark_user_input=False)
         _update_table_editor_state(page.production_monthly)
+        _reset_table_widget(page.production_monthly)
         updated = True
 
     st.session_state["production_compound_cache"] = new_monthly.copy()
@@ -613,6 +622,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     if not new_annual.equals(current_annual):
         page.production_annual.set_data(new_annual, mark_user_input=False)
         _update_table_editor_state(page.production_annual)
+        _reset_table_widget(page.production_annual)
         updated = True
 
     if updated:
