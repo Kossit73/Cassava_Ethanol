@@ -718,6 +718,11 @@ def _row_editor_form(
         widget_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}".replace(" ", "_").lower()
 
         if column in derived_columns:
+            if table.name == "Production Monthly":
+                # Skip rendering derived production outputs so the focused editor
+                # only exposes the cassava driver and growth inputs.
+                continue
+
             display_value = ""
             if current_value is not None and not (isinstance(current_value, float) and pd.isna(current_value)):
                 if isinstance(current_value, (int, float, np.floating, np.integer)):
