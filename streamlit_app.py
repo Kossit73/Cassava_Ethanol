@@ -146,6 +146,8 @@ MONTE_CARLO_STD = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
 MONTE_CARLO_ITERATIONS = 250
 MONTE_CARLO_SEED = 42
 
+PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
+
 def _load_session_inputs() -> InputLandingPage:
     """Return the mutable input landing page stored in session state."""
     if "input_page" not in st.session_state:
@@ -755,9 +757,10 @@ def _auto_compound_production(page: InputLandingPage) -> None:
 
     updated = False
     user_driven_change = previous_series is not None and bool(changed_periods)
+    user_edit_flag = bool(st.session_state.get(PRODUCTION_EDIT_FLAG, False))
 
     if not new_monthly.equals(current_monthly):
-        mark_user = user_driven_change or not page.production_monthly.placeholder
+        mark_user = user_edit_flag or user_driven_change or not page.production_monthly.placeholder
         page.production_monthly.set_data(new_monthly, mark_user_input=mark_user)
         _update_table_editor_state(page.production_monthly)
         _reset_table_widget(page.production_monthly)
@@ -780,7 +783,7 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             current_annual[col] = pd.to_numeric(current_annual[col], errors="coerce").round(6)
 
     if not new_annual.equals(current_annual):
-        mark_user = user_driven_change or not page.production_annual.placeholder
+        mark_user = user_edit_flag or user_driven_change or not page.production_annual.placeholder
         page.production_annual.set_data(new_annual, mark_user_input=mark_user)
         _update_table_editor_state(page.production_annual)
         _reset_table_widget(page.production_annual)
@@ -1119,6 +1122,9 @@ def _row_editor_form(
     if not df.loc[row_idx].equals(original_row):
         updated = True
 
+    if updated and table.name == "Production Monthly":
+        st.session_state[PRODUCTION_EDIT_FLAG] = True
+
     return df, updated, derived_metrics
 
 
@@ -1272,6 +1278,8 @@ def _render_table(page: InputLandingPage, table: EditableTable, section: str, ex
         if not new_data.equals(table.data):
             data_changed = True
         table.set_data(new_data, mark_user_input=data_changed)
+        if data_changed and table.name == "Production Monthly":
+            st.session_state[PRODUCTION_EDIT_FLAG] = True
         _update_table_editor_state(table)
 
         if data_changed or not table.data.equals(original_data):
