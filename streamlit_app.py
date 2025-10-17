@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -1138,7 +1139,8 @@ def _row_editor_form(
             )
             continue
 
-        if "month" in column.lower():
+        column_label = column.lower().replace("_", " ")
+        if re.search(r"\bmonth\b", column_label):
             current_str = (
                 None
                 if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
