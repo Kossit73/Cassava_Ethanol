@@ -208,20 +208,11 @@ class CassavaBioethanolModel:
             projection.end_year,
         )
 
-        receivables = page.accounts_receivable.model_frame.set_index("Metric")
-        inventory_inputs = page.inventory_payable.model_frame.set_index("Metric")
-        ar_days = float(receivables.loc["Receivables days", "Value"]) if "Receivables days" in receivables.index else 0.0
-        inventory_days = (
-            float(inventory_inputs.loc["Inventory days", "Value"]) if "Inventory days" in inventory_inputs.index else 0.0
-        )
-        ap_days = float(inventory_inputs.loc["Payables days", "Value"]) if "Payables days" in inventory_inputs.index else 0.0
-
         working_capital = compute_working_capital(
             revenue,
             cost_outputs,
-            ar_days=ar_days,
-            inventory_days=inventory_days,
-            ap_days=ap_days,
+            page.accounts_receivable.model_frame,
+            page.inventory_payable.model_frame,
         )
 
         global_inputs = page.global_inputs.model_frame.set_index("Parameter")

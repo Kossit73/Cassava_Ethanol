@@ -49,6 +49,17 @@ DERIVED_COLUMN_MAP = {
     "Production Annual": {"Ethanol litres", "Animal Feed ton"},
 }
 
+CHANGE_BUTTON_CONFIG = {
+    "Production Monthly": {"type": "month", "start_year_offset": 1},
+    "Direct Costs Monthly": {"type": "month", "start_year_offset": 1},
+    "Staff Costs Monthly": {"type": "month", "start_year_offset": 1},
+    "Other Opex Monthly": {"type": "month", "start_year_offset": 1},
+    "Accounts Receivable & Other Assets": {"type": "month", "start_year_offset": 1},
+    "Inventory & Accounts Payable": {"type": "month", "start_year_offset": 1},
+    "Loan Schedule": {"type": "month", "start_year_offset": 0},
+    "Inflation Schedule": {"type": "year", "start_year_offset": 0},
+}
+
 DEFAULT_SENSITIVITY_SCENARIOS: List[SensitivityScenario] = [
     SensitivityScenario("Corporate tax +1pp", "Corporate tax rate", 0.01),
     SensitivityScenario("Corporate tax -1pp", "Corporate tax rate", -0.01),
@@ -119,6 +130,118 @@ def _update_table_editor_state(table: EditableTable) -> None:
     st.session_state[_table_editor_state_key(table)] = df_copy
 
 
+def _projection_month_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[str]:
+    start_year = projection.start_year + start_year_offset
+    if start_year > projection.end_year:
+        return []
+    start_period = pd.Period(f"{start_year:04d}-01", freq="M")
+    end_period = pd.Period(f"{projection.end_year:04d}-12", freq="M")
+    if start_period > end_period:
+        return []
+    periods = pd.period_range(start_period, end_period, freq="M")
+    return [p.strftime("%Y-%m") for p in periods]
+
+
+def _projection_year_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[int]:
+    start_year = projection.start_year + start_year_offset
+    if start_year > projection.end_year:
+        return []
+    return list(range(start_year, projection.end_year + 1))
+
+
+def _apply_change_row(table: EditableTable, column: str, value: object) -> None:
+    df = table.data.copy()
+    if not df.empty:
+        base_row = df.iloc[-1].to_dict()
+    else:
+        base_row = {col: None for col in table.columns}
+
+    if column == "Year":
+        base_row[column] = int(value)
+    else:
+        base_row[column] = str(value)
+
+    if column in df.columns and not df.empty:
+        mask = df[column].astype(str) == str(base_row[column])
+    else:
+        mask = pd.Series(False, index=df.index)
+
+    if mask.any():
+        idx = mask[mask].index[-1]
+        for col in table.columns:
+            df.at[idx, col] = base_row.get(col)
+    else:
+        df = pd.concat([df, pd.DataFrame([base_row])], ignore_index=True)
+
+    if column == "Year" and "Year" in df.columns:
+        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+        df = df.sort_values("Year", na_position="last").reset_index(drop=True)
+    elif column in df.columns:
+        try:
+            order = pd.to_datetime(df[column].astype(str), errors="coerce").dt.to_period("M").dt.to_timestamp()
+            df = df.assign(_order=order).sort_values("_order").drop(columns="_order").reset_index(drop=True)
+        except Exception:  # pragma: no cover - defensive sorting guard
+            df = df.reset_index(drop=True)
+
+    table.set_data(df[table.columns], mark_user_input=True)
+    _update_table_editor_state(table)
+    _mark_inputs_dirty()
+
+
+def _render_change_controls(page: InputLandingPage, table: EditableTable) -> bool:
+    config = CHANGE_BUTTON_CONFIG.get(table.name)
+    if not config:
+        return False
+
+    change_type = config["type"]
+    offset = config.get("start_year_offset", 0)
+    safe_key = table.name.replace(" ", "_").lower()
+
+    if change_type == "month":
+        month_col = _get_month_column(table.data)
+        if not month_col:
+            return False
+        month_options = _projection_month_options(page.projection, offset)
+        if not month_options:
+            return False
+        default_month = month_options[0]
+        planning_start = page.projection.planning_start
+        if planning_start and planning_start in month_options:
+            default_month = planning_start
+        selected_month = st.selectbox(
+            "Change effective month",
+            month_options,
+            index=month_options.index(default_month) if default_month in month_options else 0,
+            key=f"change_month_select_{safe_key}",
+        )
+        if st.button("Add change", key=f"change_month_btn_{safe_key}"):
+            _apply_change_row(table, month_col, selected_month)
+            return True
+    elif change_type == "year":
+        if "Year" not in table.columns:
+            return False
+        year_options = _projection_year_options(page.projection, offset)
+        if not year_options:
+            return False
+        existing_years = pd.to_numeric(table.data.get("Year"), errors="coerce").dropna().astype(int)
+        default_year = year_options[0]
+        if not existing_years.empty:
+            candidate = existing_years.max() + 1
+            if candidate in year_options:
+                default_year = candidate
+        selected_year = st.selectbox(
+            "Change effective year",
+            year_options,
+            index=year_options.index(int(default_year)) if default_year in year_options else 0,
+            key=f"change_year_select_{safe_key}",
+        )
+        if st.button("Add change", key=f"change_year_btn_{safe_key}"):
+            _apply_change_row(table, "Year", int(selected_year))
+            return True
+
+    return False
+
+
 def _current_model_version() -> int:
     return int(st.session_state.get(MODEL_VERSION_KEY, 0))
 
@@ -130,7 +253,7 @@ def _bump_model_version() -> None:
 def _get_month_column(df: pd.DataFrame) -> str | None:
     """Return the preferred month column present in *df* (if any)."""
 
-    for column in ("Start Month", "Month"):
+    for column in ("Effective Month", "Start Month", "Month"):
         if column in df.columns:
             return column
     return None
@@ -271,8 +394,11 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     year_delta = start - previous_start
     tables_to_shift = [
         page.production_monthly,
+        page.direct_costs_monthly,
         page.staff_costs_monthly,
         page.other_opex_monthly,
+        page.accounts_receivable,
+        page.inventory_payable,
     ]
 
     any_shifted = False
@@ -893,12 +1019,12 @@ def _editable_tables(page: InputLandingPage) -> None:
         with tab:
             for table in tables:
                 expanded = section in {"Global", "Capex", "Financial"}
-                _render_table(page, table, expanded=expanded)
+                _render_table(page, table, section, expanded=expanded)
                 if table is page.initial_investment:
                     st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
 
 
-def _render_table(page: InputLandingPage, table: EditableTable, expanded: bool = False) -> None:
+def _render_table(page: InputLandingPage, table: EditableTable, section: str, expanded: bool = False) -> None:
     """Show a Streamlit data editor for a specific table."""
 
     safe_key = table.name.replace(' ', '_').lower()
@@ -926,6 +1052,10 @@ def _render_table(page: InputLandingPage, table: EditableTable, expanded: bool =
                 data_changed = True
         else:
             controls[1].markdown("&nbsp;")
+
+        change_applied = _render_change_controls(page, table)
+        if change_applied:
+            data_changed = True
 
         derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
         column_config = {}

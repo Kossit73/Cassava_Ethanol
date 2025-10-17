@@ -549,20 +549,67 @@ class WorkingCapitalOutput:
 def compute_working_capital(
     revenue: RevenueOutput,
     cost_outputs: Dict[str, CostOutput],
-    ar_days: float,
-    inventory_days: float,
-    ap_days: float,
+    accounts_receivable_inputs: pd.DataFrame,
+    inventory_inputs: pd.DataFrame,
 ) -> WorkingCapitalOutput:
-    monthly_revenue = revenue.monthly["Total Revenue"]
-    monthly_cogs = (
-        cost_outputs["Direct Costs"].monthly.sum(axis=1)
-        + cost_outputs["Staff Costs"].monthly.sum(axis=1)
-        + cost_outputs["Other Opex"].monthly.sum(axis=1)
-    )
-    days_in_month = monthly_revenue.index.days_in_month
-    receivables = monthly_revenue * (ar_days / 30)
-    inventory = monthly_cogs * (inventory_days / 30)
-    payables = monthly_cogs * (ap_days / 30)
+    if "Total Revenue" in revenue.monthly.columns:
+        monthly_revenue = revenue.monthly["Total Revenue"]
+    else:
+        months_index = revenue.monthly.index
+        if months_index.empty:
+            empty = pd.DataFrame(columns=["Receivables", "Inventory", "Payables", "Net Working Capital"])
+            return WorkingCapitalOutput(empty, pd.DataFrame())
+        monthly_revenue = pd.Series(0.0, index=months_index)
+
+    months = monthly_revenue.index
+
+    def _sum_cost(name: str) -> pd.Series:
+        output = cost_outputs.get(name)
+        if output is None or output.monthly.empty:
+            return pd.Series(0.0, index=months)
+        reindexed = output.monthly.reindex(months).fillna(0.0)
+        return reindexed.sum(axis=1)
+
+    monthly_cogs = _sum_cost("Direct Costs") + _sum_cost("Staff Costs") + _sum_cost("Other Opex")
+
+    def _metric_series(df: pd.DataFrame, metric_name: str, default: float = 0.0) -> pd.Series:
+        series = pd.Series(default, index=months, dtype=float)
+        if df is None or df.empty or "Metric" not in df.columns:
+            return series
+
+        working = df.copy()
+        effective_col = next((c for c in ("Effective Month", "Start Month", "Month") if c in working.columns), None)
+        if effective_col is None:
+            working["Effective Month"] = months[0]
+            effective_col = "Effective Month"
+
+        effective_dates = pd.to_datetime(working[effective_col].astype(str), errors="coerce")
+        working["_effective"] = effective_dates.dt.to_period("M").dt.to_timestamp()
+        working["_metric"] = working["Metric"].astype(str).str.lower()
+        working["_value"] = pd.to_numeric(working.get("Value"), errors="coerce")
+        mask = (working["_metric"] == metric_name.lower()) & working["_effective"].notna() & working["_value"].notna()
+        filtered = working.loc[mask, ["_effective", "_value"]].sort_values("_effective")
+        if filtered.empty:
+            return series
+
+        current_value = default
+        idx = 0
+        effective_values = filtered.values.tolist()
+        for month in months:
+            while idx < len(effective_values) and effective_values[idx][0] <= month:
+                current_value = float(effective_values[idx][1])
+                idx += 1
+            series.loc[month] = current_value
+        return series
+
+    ar_days_series = _metric_series(accounts_receivable_inputs, "Receivables days", 0.0)
+    inventory_days_series = _metric_series(inventory_inputs, "Inventory days", 0.0)
+    payables_days_series = _metric_series(inventory_inputs, "Payables days", 0.0)
+
+    receivables = monthly_revenue * (ar_days_series / 30.0)
+    inventory = monthly_cogs * (inventory_days_series / 30.0)
+    payables = monthly_cogs * (payables_days_series / 30.0)
+
     wc = pd.DataFrame(
         {
             "Receivables": receivables,

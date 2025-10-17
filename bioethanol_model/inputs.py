@@ -261,7 +261,7 @@ class ScenarioAssumption:
 
 
 def default_input_page() -> InputLandingPage:
-    projection = ProjectionHorizon(2024, 2034, "2024-01")
+    projection = ProjectionHorizon(2024, 2034, "2025-01")
 
     global_inputs = EditableTable(
         "Global Inputs",
@@ -314,18 +314,18 @@ def default_input_page() -> InputLandingPage:
         pd.DataFrame(
             [
                 {
-                    "Year": 2024,
-                    "Start Month": "2024-01",
-                    "Cassava ton": 95_000,
-                    "Ethanol litres": 11_875_000,
-                    "Animal Feed ton": 23_750,
-                },
-                {
                     "Year": 2025,
                     "Start Month": "2025-01",
-                    "Cassava ton": 100_000,
-                    "Ethanol litres": 12_500_000,
-                    "Animal Feed ton": 25_000,
+                    "Cassava ton": 110_000,
+                    "Ethanol litres": 22_000_000,
+                    "Animal Feed ton": 30_250,
+                },
+                {
+                    "Year": 2026,
+                    "Start Month": "2026-01",
+                    "Cassava ton": 115_000,
+                    "Ethanol litres": 23_000_000,
+                    "Animal Feed ton": 31_625,
                 },
             ]
         ),
@@ -333,16 +333,16 @@ def default_input_page() -> InputLandingPage:
     )
 
     # Monthly production will be spread evenly by default
-    monthly_index = pd.period_range("2024-01", "2024-12", freq="M")
+    monthly_index = pd.period_range("2025-01", "2025-12", freq="M")
     production_monthly = EditableTable(
         "Production Monthly",
         ["Start Month", "Cassava ton", "Ethanol litres", "Animal Feed ton", "Growth %"],
         pd.DataFrame(
             {
                 "Start Month": monthly_index.astype(str),
-                "Cassava ton": [8_000.0] * len(monthly_index),
-                "Ethanol litres": [1_000_000.0] * len(monthly_index),
-                "Animal Feed ton": [2_000.0] * len(monthly_index),
+                "Cassava ton": [10_000.0] * len(monthly_index),
+                "Ethanol litres": [2_000_000.0] * len(monthly_index),
+                "Animal Feed ton": [2_750.0] * len(monthly_index),
                 "Growth %": [0.0] * len(monthly_index),
             }
         ),
@@ -354,8 +354,8 @@ def default_input_page() -> InputLandingPage:
         ["Month", "Cost Category", "Amount"],
         pd.DataFrame(
             [
-                {"Month": "2024-01", "Cost Category": "Cassava Feedstock", "Amount": 450_000},
-                {"Month": "2024-01", "Cost Category": "Enzymes & Chemicals", "Amount": 120_000},
+                {"Month": "2025-01", "Cost Category": "Cassava Feedstock", "Amount": 600_000},
+                {"Month": "2025-01", "Cost Category": "Enzymes & Chemicals", "Amount": 150_000},
             ]
         ),
         placeholder=True,
@@ -381,8 +381,8 @@ def default_input_page() -> InputLandingPage:
         ["Month", "Department", "Headcount", "Cost"],
         pd.DataFrame(
             [
-                {"Month": "2024-01", "Department": "Operations", "Headcount": 45, "Cost": 95_000},
-                {"Month": "2024-01", "Department": "Farming", "Headcount": 120, "Cost": 60_000},
+                {"Month": "2025-01", "Department": "Operations", "Headcount": 45, "Cost": 120_000},
+                {"Month": "2025-01", "Department": "Farming", "Headcount": 120, "Cost": 65_000},
             ]
         ),
         placeholder=True,
@@ -393,12 +393,12 @@ def default_input_page() -> InputLandingPage:
         ["Month", "Category", "Amount"],
         pd.DataFrame(
             [
-                {"Month": "2024-01", "Category": "Insurance", "Amount": 35_000},
-                {"Month": "2024-01", "Category": "Service Contracts", "Amount": 28_000},
-                {"Month": "2024-01", "Category": "General Administration", "Amount": 75_000},
-                {"Month": "2024-01", "Category": "Sales & Marketing", "Amount": 20_000},
-                {"Month": "2024-01", "Category": "Research & Development", "Amount": 12_000},
-                {"Month": "2024-01", "Category": "Energy Cost", "Amount": 150_000},
+                {"Month": "2025-01", "Category": "Insurance", "Amount": 42_000},
+                {"Month": "2025-01", "Category": "Service Contracts", "Amount": 30_000},
+                {"Month": "2025-01", "Category": "General Administration", "Amount": 82_000},
+                {"Month": "2025-01", "Category": "Sales & Marketing", "Amount": 25_000},
+                {"Month": "2025-01", "Category": "Research & Development", "Amount": 15_000},
+                {"Month": "2025-01", "Category": "Energy Cost", "Amount": 165_000},
             ]
         ),
         placeholder=True,
@@ -406,12 +406,12 @@ def default_input_page() -> InputLandingPage:
 
     accounts_receivable = EditableTable(
         "Accounts Receivable & Other Assets",
-        ["Metric", "Value", "Units"],
+        ["Effective Month", "Metric", "Value", "Units"],
         pd.DataFrame(
             [
-                {"Metric": "Receivables days", "Value": 45, "Units": "days"},
-                {"Metric": "Prepaid expense days", "Value": 15, "Units": "days"},
-                {"Metric": "Other assets percent of revenue", "Value": 0.02, "Units": "%"},
+                {"Effective Month": "2025-01", "Metric": "Receivables days", "Value": 45, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Prepaid expense days", "Value": 15, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Other assets percent of revenue", "Value": 0.02, "Units": "%"},
             ]
         ),
         placeholder=True,
@@ -419,11 +419,11 @@ def default_input_page() -> InputLandingPage:
 
     inventory_payable = EditableTable(
         "Inventory & Accounts Payable",
-        ["Metric", "Value", "Units"],
+        ["Effective Month", "Metric", "Value", "Units"],
         pd.DataFrame(
             [
-                {"Metric": "Inventory days", "Value": 35, "Units": "days"},
-                {"Metric": "Payables days", "Value": 40, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Inventory days", "Value": 35, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Payables days", "Value": 40, "Units": "days"},
             ]
         ),
         placeholder=True,
@@ -440,6 +440,7 @@ def default_input_page() -> InputLandingPage:
             "Tenor Years",
             "Grace Years",
             "Amortization",
+            "Start Month",
         ],
         pd.DataFrame(
             [
@@ -452,6 +453,7 @@ def default_input_page() -> InputLandingPage:
                     "Tenor Years": 8,
                     "Grace Years": 1,
                     "Amortization": "Annuity",
+                    "Start Month": "2024-01",
                 }
             ]
         ),
