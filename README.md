@@ -44,3 +44,13 @@ The **Production Monthly** table on the Input Landing Page is the source of trut
 4. As soon as the monthly figures are updated, the production engine recomputes the compounded series across the projection horizon and refreshes the **Production Annual** table, which aggregates the updated monthly data by fiscal year.
 
 There is no need to edit the annual table manually—the monthly entries drive both the annual totals and every downstream schedule (revenue, feedstock costs, statements, sensitivities, and exports).
+
+### Applying changes part-way through the projection
+
+Most landing-page tables expose a **Change effective month/year** control directly above the data grid. To insert a new change:
+
+1. Choose the month (or year) when the revised assumption should start from the dropdown.
+2. Click **Add change** to insert a new row keyed to that period.
+3. Edit the values on the inserted row—production tables will cascade the cassava tonnage and the derived ethanol/animal-feed outputs automatically, while cost and policy tables hold the new figures from that point forward.
+
+These controls make it easy to stage CAPEX, production, cost, and working-capital adjustments later in the projection horizon without manually editing every period.

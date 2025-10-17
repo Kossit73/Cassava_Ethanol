@@ -50,14 +50,76 @@ DERIVED_COLUMN_MAP = {
 }
 
 CHANGE_BUTTON_CONFIG = {
-    "Production Monthly": {"type": "month", "start_year_offset": 1},
-    "Direct Costs Monthly": {"type": "month", "start_year_offset": 1},
-    "Staff Costs Monthly": {"type": "month", "start_year_offset": 1},
-    "Other Opex Monthly": {"type": "month", "start_year_offset": 1},
-    "Accounts Receivable & Other Assets": {"type": "month", "start_year_offset": 1},
-    "Inventory & Accounts Payable": {"type": "month", "start_year_offset": 1},
-    "Loan Schedule": {"type": "month", "start_year_offset": 0},
-    "Inflation Schedule": {"type": "year", "start_year_offset": 0},
+    "Production Monthly": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Select the month where the new production plan should begin, click "
+            "**Add change**, and then edit the newly inserted row. The model will "
+            "cascade the cassava tonnage (and the derived ethanol and animal feed "
+            "outputs) to all later months automatically."
+        ),
+    },
+    "Direct Costs Monthly": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Pick the month the revised cost takes effect and use **Add change** to "
+            "insert a row you can edit. The schedule keeps the change for that month "
+            "and beyond."
+        ),
+    },
+    "Staff Costs Monthly": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Choose the effective month for the staffing update, press **Add change**, "
+            "and adjust the new row. Future months inherit the change unless another "
+            "override is added."
+        ),
+    },
+    "Other Opex Monthly": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Select the start month for the new opex figure, click **Add change**, and "
+            "enter the updated values on the inserted row to carry them forward."
+        ),
+    },
+    "Accounts Receivable & Other Assets": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Use **Add change** after picking the effective month to insert a new "
+            "policy row. The working-capital calculations will apply it from that "
+            "point onward."
+        ),
+    },
+    "Inventory & Accounts Payable": {
+        "type": "month",
+        "start_year_offset": 1,
+        "help": (
+            "Insert a new policy row by selecting the effective month and clicking "
+            "**Add change**; the updated DIO/DPO settings will roll forward "
+            "automatically."
+        ),
+    },
+    "Loan Schedule": {
+        "type": "month",
+        "start_year_offset": 0,
+        "help": (
+            "Choose the draw month for a facility and press **Add change** to add a "
+            "new loan row tied to that date."
+        ),
+    },
+    "Inflation Schedule": {
+        "type": "year",
+        "start_year_offset": 0,
+        "help": (
+            "Select the year that a new index value applies to, click **Add change**, "
+            "and edit the inserted row."
+        ),
+    },
 }
 
 DEFAULT_SENSITIVITY_SCENARIOS: List[SensitivityScenario] = [
@@ -222,6 +284,9 @@ def _render_change_controls(page: InputLandingPage, table: EditableTable) -> boo
             index=month_options.index(default_month) if default_month in month_options else 0,
             key=f"change_month_select_{safe_key}",
         )
+        help_text = config.get("help")
+        if help_text:
+            st.caption(help_text)
         if st.button("Add change", key=f"change_month_btn_{safe_key}"):
             _apply_change_row(table, month_col, selected_month)
             return True
@@ -243,6 +308,9 @@ def _render_change_controls(page: InputLandingPage, table: EditableTable) -> boo
             index=year_options.index(int(default_year)) if default_year in year_options else 0,
             key=f"change_year_select_{safe_key}",
         )
+        help_text = config.get("help")
+        if help_text:
+            st.caption(help_text)
         if st.button("Add change", key=f"change_year_btn_{safe_key}"):
             _apply_change_row(table, "Year", int(selected_year))
             return True
