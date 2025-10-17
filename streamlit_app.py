@@ -964,34 +964,6 @@ def _render_table(page: InputLandingPage, table: EditableTable, expanded: bool =
         if data_changed or not table.data.equals(original_data):
             _mark_inputs_dirty()
 
-        if table.name == "Production Monthly" and not table.data.empty:
-            st.markdown("#### Edit individual months")
-            edit_state_key = f"quick_edit_row_{safe_key}"
-            for idx, row in table.data.iterrows():
-                label = row.get("Start Month") or row.get("Month") or f"Row {idx + 1}"
-                cols = st.columns([1, 4])
-                if cols[0].button("Edit", key=f"prod_month_edit_btn_{idx}"):
-                    st.session_state[edit_state_key] = int(idx)
-                cols[1].write(str(label))
-
-            selected_idx = st.session_state.get(edit_state_key)
-            if selected_idx in table.data.index:
-                st.markdown("---")
-                st.markdown(f"Editing row **{selected_idx + 1}**")
-                updated_df, row_updated, derived_metrics = _row_editor_form(
-                    table,
-                    int(selected_idx),
-                    page.projection,
-                    widget_prefix="quick_edit",
-                )
-                _display_production_metrics(derived_metrics)
-                if row_updated:
-                    table.set_data(updated_df, mark_user_input=True)
-                    _mark_inputs_dirty()
-                    _update_table_editor_state(table)
-                else:
-                    _update_table_editor_state(table)
-
 def _annualise(rate: float | None) -> float | None:
     if rate is None or pd.isna(rate):
         return None
