@@ -793,6 +793,77 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         _mark_inputs_dirty()
 
 
+def _apply_growth_cascade(
+    page: InputLandingPage,
+    table: EditableTable,
+    df: pd.DataFrame,
+    row_idx: int,
+    growth_percent: float,
+) -> tuple[pd.DataFrame, Tuple[float, float] | None]:
+    """Apply *growth_percent* (entered as percentage) to cascade production."""
+
+    if df.empty or row_idx not in df.index:
+        return df, None
+
+    month_col = _get_month_column(df)
+    if month_col is None or "Cassava ton" not in df.columns:
+        return df, None
+
+    month_values = pd.to_datetime(df[month_col].astype(str), errors="coerce").dt.to_period("M")
+    if month_values.isna().all():
+        return df, None
+
+    try:
+        base_period = month_values.iloc[row_idx]
+    except Exception:  # pragma: no cover - defensive guard
+        return df, None
+
+    if pd.isna(base_period):
+        return df, None
+
+    rate_decimal = float(growth_percent)
+    if not np.isfinite(rate_decimal):
+        rate_decimal = 0.0
+    if abs(rate_decimal) > 1.0:
+        rate_decimal = rate_decimal / 100.0
+    rate_decimal = float(np.clip(rate_decimal, -0.99, 10.0))
+
+    working = df.copy()
+    cassava_col = "Cassava ton"
+    working[cassava_col] = pd.to_numeric(working[cassava_col], errors="coerce")
+    growth_col = next((c for c in working.columns if "growth" in c.lower()), None)
+
+    later_mask = month_values > base_period
+    working.loc[later_mask, cassava_col] = np.nan
+
+    if growth_col:
+        working[growth_col] = pd.to_numeric(working[growth_col], errors="coerce")
+        working.at[row_idx, growth_col] = rate_decimal
+        working.loc[later_mask, growth_col] = np.nan
+
+    table.set_data(working, mark_user_input=True)
+    _update_table_editor_state(table)
+    st.session_state[PRODUCTION_EDIT_FLAG] = True
+    _mark_inputs_dirty()
+
+    _auto_compound_production(page)
+
+    refreshed = page.production_monthly.data.copy()
+    derived: Tuple[float, float] | None = None
+    refreshed_month_col = _get_month_column(refreshed)
+    if refreshed_month_col and "Cassava ton" in refreshed.columns:
+        month_str = base_period.strftime("%Y-%m")
+        match = refreshed[refreshed[refreshed_month_col] == month_str]
+        if not match.empty:
+            cassava_val = pd.to_numeric(match["Cassava ton"], errors="coerce").iloc[0]
+            if pd.notna(cassava_val):
+                ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
+                feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
+                derived = (ethanol_val, feed_val)
+
+    return refreshed, derived
+
+
 def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
     """Keep the monthly staff cost table aligned with position salaries."""
 
@@ -1178,11 +1249,54 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         widget_prefix="default_edit",
     )
 
+    cascade_applied = False
+    cascade_metrics: Tuple[float, float] | None = None
+
     if table.name == "Production Monthly":
         _display_production_metrics(derived_metrics)
 
+        growth_col = next((c for c in df_updated.columns if "growth" in c.lower()), None)
+        default_growth_pct = 0.0
+        if growth_col and row_idx in df_updated.index:
+            current_growth = pd.to_numeric(pd.Series([df_updated.at[row_idx, growth_col]]), errors="coerce").iloc[0]
+            if pd.notna(current_growth):
+                default_growth_pct = float(current_growth) * 100.0
+
+        st.markdown("---")
+        st.markdown("**Cascade growth across projection horizon**")
+        st.caption(
+            "Set a monthly growth percentage to apply from this month onward. The model will "
+            "recalculate all subsequent production months automatically."
+        )
+        growth_input = st.number_input(
+            "Monthly growth % to apply",
+            value=float(default_growth_pct),
+            step=0.1,
+            format="%.2f",
+            key=f"growth_pct_apply_{table.name.replace(' ', '_')}_{row_idx}",
+        )
+        if st.button(
+            "Apply growth to remaining months",
+            key=f"apply_growth_btn_{table.name.replace(' ', '_')}_{row_idx}",
+        ):
+            df_updated, cascade_metrics = _apply_growth_cascade(
+                page,
+                table,
+                df_updated,
+                row_idx,
+                growth_input,
+            )
+            cascade_applied = True
+            if cascade_metrics is not None:
+                derived_metrics = cascade_metrics
+
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
-    if updated:
+    if cascade_applied:
+        df = table.data.copy()
+        if not df.equals(df_updated):
+            table.set_data(df, mark_user_input=True)
+        _update_table_editor_state(table)
+    elif updated:
         table.set_data(df_updated, mark_user_input=True)
         _mark_inputs_dirty()
         _update_table_editor_state(table)
