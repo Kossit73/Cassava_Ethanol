@@ -514,6 +514,17 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         month_index = month_index[sort_order]
         df = df.iloc[sort_order].reset_index(drop=True)
 
+    if getattr(month_index, "has_duplicates", False) and month_index.has_duplicates:
+        keep_mask = ~month_index.duplicated(keep="last")
+        if keep_mask.ndim:
+            keep_indices = np.flatnonzero(keep_mask)
+            month_index = month_index[keep_indices]
+            df = df.iloc[keep_indices].reset_index(drop=True)
+        else:  # pragma: no cover - defensive fallback for scalar mask
+            month_index = month_index.unique()
+            df = df.iloc[: len(month_index)].reset_index(drop=True)
+        df.loc[:, month_col] = month_index.astype(str)
+
     month_index_set = set(month_index)
 
     previous_cache = st.session_state.get("production_compound_cache")
