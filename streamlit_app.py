@@ -509,6 +509,13 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     df.loc[:, month_col] = month_periods.astype(str)
     month_index = month_periods
 
+    sort_order = np.argsort(month_index.astype(str))
+    if len(sort_order) and not np.all(sort_order == np.arange(len(sort_order))):
+        month_index = month_index[sort_order]
+        df = df.iloc[sort_order].reset_index(drop=True)
+
+    month_index_set = set(month_index)
+
     previous_cache = st.session_state.get("production_compound_cache")
     previous_series = None
     if isinstance(previous_cache, pd.DataFrame) and not previous_cache.empty:
@@ -548,6 +555,16 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     manual_periods: set[pd.Period] = set()
     planning_period: pd.Period | None = None
     first_period: pd.Period | None = None
+    manual_state_key = "production_manual_periods"
+    session_manual = st.session_state.get(manual_state_key, set())
+    if not isinstance(session_manual, set):
+        session_manual = set(session_manual)
+    manual_session_periods: set[pd.Period] = set()
+    for value in session_manual:
+        try:
+            manual_session_periods.add(pd.Period(str(value), freq="M"))
+        except Exception:  # pragma: no cover - defensive parsing guard
+            continue
     if getattr(page.projection, "planning_start", None):
         try:
             planning_period = pd.Period(page.projection.planning_start, freq="M")
@@ -555,16 +572,13 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             planning_period = None
 
     if len(month_index) > 0:
-        first_period = month_index[0]
-        if planning_period is not None:
-            # Anchor the cascade to the first period on or after the planning
-            # start month so pre-planning rows don't hold on to stale manual
-            # values.
-            for candidate in month_index:
-                if candidate >= planning_period:
-                    first_period = candidate
-                    break
-        manual_periods.add(first_period)
+        for candidate in month_index:
+            if planning_period is not None and candidate < planning_period:
+                continue
+            first_period = candidate
+            break
+        if first_period is None:
+            first_period = month_index[0]
 
     if not growth_values.empty:
         # Treat the first row as the anchor growth rate. Any subsequent entries
@@ -611,47 +625,63 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     for period, val in growth_values.dropna().items():
         if val is not None:
             growth_periods.add(period)
+
+    cassava_current = pd.Series(dtype=float)
+    if "Cassava ton" in df.columns:
+        cassava_current = pd.to_numeric(df["Cassava ton"], errors="coerce")
+        cassava_current.index = month_index
+
+    changed_periods: set[pd.Period] = set()
+    if previous_series is None:
+        if first_period is not None:
+            changed_periods.add(first_period)
+    else:
+        aligned_prev = previous_series.reindex(month_index)
+        for period, value in cassava_current.items():
+            prev_val = aligned_prev.get(period)
+            if pd.isna(value):
+                if prev_val is not None and pd.notna(prev_val):
+                    changed_periods.add(period)
+                continue
+            try:
+                numeric_val = float(value)
+            except (TypeError, ValueError):
+                continue
+            if prev_val is None or pd.isna(prev_val) or not np.isclose(prev_val, numeric_val, atol=1e-9):
+                changed_periods.add(period)
+
+    baseline_changed = False
+    if first_period is not None:
+        if previous_series is None:
+            baseline_changed = True
+        elif first_period in changed_periods:
+            baseline_changed = True
+
+    if baseline_changed:
+        preserve = {p for p in changed_periods if p != first_period}
+        manual_periods = set(preserve)
+    else:
+        manual_periods = set(manual_session_periods)
+        manual_periods.update(changed_periods)
+
     manual_periods.update(growth_periods)
 
-    diff_periods: set[pd.Period] = set()
-    if previous_series is not None and "Cassava ton" in df.columns:
-        cassava_current = pd.to_numeric(df["Cassava ton"], errors="coerce")
-        for period, value in zip(month_index, cassava_current):
-            if not np.isfinite(value):
-                continue
-            previous_value = previous_series.get(period)
-            if previous_value is None or not np.isclose(previous_value, float(value), atol=1e-9):
-                manual_periods.add(period)
-                diff_periods.add(period)
+    if planning_period is not None:
+        manual_periods = {p for p in manual_periods if p >= planning_period}
 
-    first_changed = False
-    if first_period is not None and "Cassava ton" in df.columns:
-        try:
-            first_mask = month_index == first_period
-            if first_mask.any():
-                first_raw = pd.to_numeric(df.loc[first_mask, "Cassava ton"], errors="coerce")
-                if not first_raw.empty and pd.notna(first_raw.iloc[0]):
-                    first_value = float(first_raw.iloc[0])
-                    prev_value = previous_series.get(first_period) if previous_series is not None else None
-                    if prev_value is None or not np.isclose(prev_value, first_value, atol=1e-9):
-                        first_changed = True
-                else:
-                    first_changed = True
-        except Exception:  # pragma: no cover - defensive guard
-            first_changed = True
-    elif previous_series is None and first_period is not None:
-        first_changed = True
+    if first_period is not None:
+        manual_periods.add(first_period)
 
-    if first_changed and not diff_periods.difference({first_period}):
-        manual_periods = set()
-        if first_period is not None:
-            manual_periods.add(first_period)
-        manual_periods.update(growth_periods)
+    manual_periods &= month_index_set
+
+    st.session_state[manual_state_key] = {
+        period.strftime("%Y-%m") for period in manual_periods
+    }
 
     seed_df = df.copy()
+    manual_mask = month_index.isin(list(manual_periods))
     for col in manual_columns:
-        mask = ~month_index.isin(manual_periods)
-        seed_df.loc[mask, col] = np.nan
+        seed_df.loc[~manual_mask, col] = np.nan
     if growth_col:
         seed_df[growth_col] = growth_values.values
 
