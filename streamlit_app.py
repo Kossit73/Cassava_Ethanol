@@ -754,8 +754,11 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         current_monthly[growth_col] = pd.to_numeric(current_monthly[growth_col], errors="coerce")
 
     updated = False
+    user_driven_change = previous_series is not None and bool(changed_periods)
+
     if not new_monthly.equals(current_monthly):
-        page.production_monthly.set_data(new_monthly, mark_user_input=False)
+        mark_user = user_driven_change or not page.production_monthly.placeholder
+        page.production_monthly.set_data(new_monthly, mark_user_input=mark_user)
         _update_table_editor_state(page.production_monthly)
         _reset_table_widget(page.production_monthly)
         updated = True
@@ -777,7 +780,8 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             current_annual[col] = pd.to_numeric(current_annual[col], errors="coerce").round(6)
 
     if not new_annual.equals(current_annual):
-        page.production_annual.set_data(new_annual, mark_user_input=False)
+        mark_user = user_driven_change or not page.production_annual.placeholder
+        page.production_annual.set_data(new_annual, mark_user_input=mark_user)
         _update_table_editor_state(page.production_annual)
         _reset_table_widget(page.production_annual)
         updated = True
@@ -853,8 +857,12 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
     else:
         cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
 
+    production_source = page.production_monthly.model_frame
+    if production_source.empty:
+        return
+
     production = compute_production_tables(
-        page.production_monthly.data,
+        production_source,
         page.projection.start_year,
         page.projection.end_year,
         planning_start=page.projection.planning_start_timestamp,
@@ -887,7 +895,8 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
         updated_amounts.append(tons * cost_per_ton)
 
     direct_df["Amount"] = updated_amounts
-    page.direct_costs_monthly.set_data(direct_df, mark_user_input=False)
+    mark_user = not page.direct_costs_monthly.placeholder or not production_source.empty
+    page.direct_costs_monthly.set_data(direct_df, mark_user_input=mark_user)
 
 
 def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
