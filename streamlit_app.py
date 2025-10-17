@@ -868,11 +868,14 @@ def _apply_growth_cascade(
 def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
     """Keep the monthly staff cost table aligned with position salaries."""
 
+    if page.staff_positions.placeholder:
+        return
+
     staff_df = page.staff_costs_monthly.data.copy()
     if staff_df.empty or "Department" not in staff_df.columns:
         return
 
-    schedule = compute_staff_schedule(page.staff_positions.data)
+    schedule = compute_staff_schedule(page.staff_positions.model_frame)
     summary = schedule.department_summary
     if summary.empty or "Average Monthly Salary" not in summary.columns:
         return
@@ -894,11 +897,14 @@ def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
             updated_costs.append(float(row.get("Headcount", 0.0)) * float(salary))
 
     staff_df["Cost"] = updated_costs
-    page.staff_costs_monthly.set_data(staff_df, mark_user_input=False)
+    page.staff_costs_monthly.set_data(staff_df, mark_user_input=True)
 
 
 def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
     """Recalculate cassava feedstock costs using the active scenario pricing."""
+
+    if page.direct_costs_monthly.data.empty or page.direct_costs_monthly.placeholder:
+        return
 
     direct_df = page.direct_costs_monthly.data.copy()
     if direct_df.empty or "Cost Category" not in direct_df.columns:
@@ -970,8 +976,7 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
         updated_amounts.append(tons * cost_per_ton)
 
     direct_df["Amount"] = updated_amounts
-    mark_user = not page.direct_costs_monthly.placeholder or not production_source.empty
-    page.direct_costs_monthly.set_data(direct_df, mark_user_input=mark_user)
+    page.direct_costs_monthly.set_data(direct_df, mark_user_input=True)
 
 
 def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:

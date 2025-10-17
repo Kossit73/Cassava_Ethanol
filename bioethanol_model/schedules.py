@@ -388,17 +388,58 @@ def compute_cost_tables(
 ) -> Dict[str, CostOutput]:
     months = year_month_range(start_year, end_year)
 
-    def _prepare(df: pd.DataFrame, value_column: str = "Amount") -> pd.DataFrame:
-        copy = df.copy()
-        copy["Month"] = pd.to_datetime(copy["Month"].astype(str)).dt.to_period("M").dt.to_timestamp()
-        pivot = copy.pivot_table(index="Month", columns=df.columns[1], values=value_column, aggfunc="sum", fill_value=0)
-        pivot = pivot.sort_index().reindex(months)
-        pivot = pivot.ffill().fillna(0.0)
-        return pivot
+    def _prepare(
+        df: pd.DataFrame,
+        *,
+        category_col: str,
+        value_column: str,
+    ) -> pd.DataFrame:
+        """Convert a landing-page table into a monthly cost matrix.
 
-    direct = _prepare(direct_costs)
-    staff = _prepare(staff_costs, value_column="Cost")
-    other = _prepare(other_opex)
+        The landing tables let users rename columns (e.g. "Start Month" versus
+        "Month").  The helper therefore locates the first column containing the
+        word "month", coerces it to a monthly timestamp, and pivots the chosen
+        ``category_col`` against the numeric ``value_column``.  Empty tables
+        return an all-zero frame so downstream schedules never raise ``KeyError``
+        when the user has not yet supplied inputs.
+        """
+
+        if df is None or df.empty:
+            return pd.DataFrame(index=months)
+
+        working = df.copy()
+        month_col = next((c for c in working.columns if "month" in c.lower()), None)
+        if not month_col:
+            return pd.DataFrame(index=months)
+
+        month_values = pd.to_datetime(working[month_col].astype(str), errors="coerce")
+        working = working.loc[month_values.notna()].copy()
+        if working.empty:
+            return pd.DataFrame(index=months)
+
+        working["Month"] = month_values.loc[working.index].dt.to_period("M").dt.to_timestamp()
+        working[value_column] = pd.to_numeric(working[value_column], errors="coerce").fillna(0.0)
+        working[category_col] = working[category_col].astype(str).fillna("Category")
+
+        pivot = (
+            working.pivot_table(
+                index="Month",
+                columns=category_col,
+                values=value_column,
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            .sort_index()
+            .reindex(months, fill_value=0.0)
+        )
+
+        # Forward-fill within the projection horizon so dated overrides continue
+        # to apply after their effective month.
+        return pivot.ffill().fillna(0.0)
+
+    direct = _prepare(direct_costs, category_col="Cost Category", value_column="Amount")
+    staff = _prepare(staff_costs, category_col="Department", value_column="Cost")
+    other = _prepare(other_opex, category_col="Category", value_column="Amount")
 
     outputs = {}
     for name, table in {
@@ -406,8 +447,11 @@ def compute_cost_tables(
         "Staff Costs": staff,
         "Other Opex": other,
     }.items():
-        annual = table.resample("Y").sum()
-        annual.index = annual.index.year
+        if table.empty:
+            annual = pd.DataFrame(columns=[])
+        else:
+            annual = table.resample("Y").sum()
+            annual.index = annual.index.year
         outputs[name] = CostOutput(table, annual)
     return outputs
 
@@ -642,10 +686,21 @@ def compute_financial_statements(
     tax_rate: float,
 ) -> FinancialStatements:
     monthly = revenue.monthly.copy()
-    dep = depreciation.monthly["Total Depreciation"]
-    direct = cost_outputs["Direct Costs"].monthly.sum(axis=1)
-    staff = cost_outputs["Staff Costs"].monthly.sum(axis=1)
-    other = cost_outputs["Other Opex"].monthly.sum(axis=1)
+    dep_source = depreciation.monthly.get("Total Depreciation") if hasattr(depreciation.monthly, "get") else None
+    if dep_source is None:
+        dep = pd.Series(0.0, index=monthly.index)
+    else:
+        dep = pd.to_numeric(dep_source, errors="coerce").reindex(monthly.index, fill_value=0.0)
+
+    def _cost_series(name: str) -> pd.Series:
+        output = cost_outputs.get(name)
+        if output is None or output.monthly.empty:
+            return pd.Series(0.0, index=monthly.index)
+        return output.monthly.reindex(monthly.index, fill_value=0.0).sum(axis=1)
+
+    direct = _cost_series("Direct Costs")
+    staff = _cost_series("Staff Costs")
+    other = _cost_series("Other Opex")
     schedule_df = loan_schedule.schedule
     if schedule_df.empty:
         interest = pd.Series(0.0, index=monthly.index)
@@ -679,7 +734,12 @@ def compute_financial_statements(
     capex = depreciation.capex.reindex(monthly.index, fill_value=0.0)
 
     income_monthly = pd.DataFrame(index=monthly.index)
-    income_monthly["Revenue"] = monthly["Total Revenue"]
+    total_revenue = monthly.get("Total Revenue")
+    if total_revenue is None:
+        total_revenue = pd.Series(0.0, index=monthly.index)
+    else:
+        total_revenue = total_revenue.reindex(monthly.index, fill_value=0.0)
+    income_monthly["Revenue"] = total_revenue
     income_monthly["COGS"] = direct
     income_monthly["Staff Costs"] = staff
     income_monthly["Other Opex"] = other
