@@ -25,6 +25,7 @@ from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scena
 from bioethanol_model.schedules import (
     ANIMAL_FEED_TON_PER_TON,
     ETHANOL_LITRES_PER_TON,
+    ExpenseSummary,
     compute_production_tables,
     compute_staff_schedule,
 )
@@ -1681,6 +1682,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     revenue = results["revenue"]
     production = results["production"]
     costs = results["costs"]
+    expenses_summary: ExpenseSummary | None = results.get("expenses") if isinstance(results.get("expenses"), ExpenseSummary) else None
     financials = results["financials"]
     loan_schedule = results["loan_schedule"]
     depreciation = results["depreciation"]
@@ -1788,25 +1790,34 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         st.info("Revenue inputs are empty for the current projection.")
 
     st.markdown("### Operating Cost Breakdown")
-    cost_monthly = pd.DataFrame(
-        {
-            name: output.monthly.sum(axis=1)
-            for name, output in costs.items()
-            if output and not output.monthly.empty
-        }
-    )
-    if not cost_monthly.empty:
-        st.area_chart(cost_monthly)
-    cost_annual = pd.DataFrame(
-        {
-            name: output.annual.sum(axis=1)
-            for name, output in costs.items()
-            if output and not output.annual.empty
-        }
-    )
-    if not cost_annual.empty:
-        cost_annual.index.name = "Year"
-        st.dataframe(cost_annual.reset_index(), use_container_width=True)
+    if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.monthly.empty:
+        st.area_chart(expenses_summary.monthly)
+    else:
+        cost_monthly = pd.DataFrame(
+            {
+                name: output.monthly.sum(axis=1)
+                for name, output in costs.items()
+                if output and not output.monthly.empty
+            }
+        )
+        if not cost_monthly.empty:
+            st.area_chart(cost_monthly)
+
+    if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.annual.empty:
+        annual_expense = expenses_summary.annual.copy()
+        annual_expense.index.name = "Year"
+        st.dataframe(annual_expense.reset_index(), use_container_width=True)
+    else:
+        cost_annual = pd.DataFrame(
+            {
+                name: output.annual.sum(axis=1)
+                for name, output in costs.items()
+                if output and not output.annual.empty
+            }
+        )
+        if not cost_annual.empty:
+            cost_annual.index.name = "Year"
+            st.dataframe(cost_annual.reset_index(), use_container_width=True)
 
     st.markdown("### Capital Expenditure & Debt")
     capex_df = model.input_page.initial_investment.model_frame
@@ -1832,6 +1843,9 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
 
 def _render_financial_performance(results: Dict[str, object]) -> None:
     financials = results["financials"]
+    expenses_summary: ExpenseSummary | None = (
+        results.get("expenses") if isinstance(results.get("expenses"), ExpenseSummary) else None
+    )
     costs = results["costs"]
 
     st.subheader("Monthly Financial Performance")
@@ -1843,25 +1857,36 @@ def _render_financial_performance(results: Dict[str, object]) -> None:
     st.dataframe(annual_income.reset_index(), use_container_width=True)
 
     st.subheader("Total Expense Schedule")
-    monthly_expense = pd.DataFrame(
-        {
-            name: output.monthly.sum(axis=1)
-            for name, output in costs.items()
-            if output and not output.monthly.empty
-        }
-    )
-    if not monthly_expense.empty:
-        st.dataframe(_reset_period_index(monthly_expense, "Month"), use_container_width=True)
-    annual_expense = pd.DataFrame(
-        {
-            name: output.annual.sum(axis=1)
-            for name, output in costs.items()
-            if output and not output.annual.empty
-        }
-    )
-    if not annual_expense.empty:
-        annual_expense.index.name = "Year"
-        st.dataframe(annual_expense.reset_index(), use_container_width=True)
+    if isinstance(expenses_summary, ExpenseSummary):
+        if not expenses_summary.monthly.empty:
+            st.dataframe(
+                _reset_period_index(expenses_summary.monthly, "Month"),
+                use_container_width=True,
+            )
+        if not expenses_summary.annual.empty:
+            annual_expense = expenses_summary.annual.copy()
+            annual_expense.index.name = "Year"
+            st.dataframe(annual_expense.reset_index(), use_container_width=True)
+    else:
+        monthly_expense = pd.DataFrame(
+            {
+                name: output.monthly.sum(axis=1)
+                for name, output in costs.items()
+                if output and not output.monthly.empty
+            }
+        )
+        if not monthly_expense.empty:
+            st.dataframe(_reset_period_index(monthly_expense, "Month"), use_container_width=True)
+        annual_expense = pd.DataFrame(
+            {
+                name: output.annual.sum(axis=1)
+                for name, output in costs.items()
+                if output and not output.annual.empty
+            }
+        )
+        if not annual_expense.empty:
+            annual_expense.index.name = "Year"
+            st.dataframe(annual_expense.reset_index(), use_container_width=True)
 
     staff_schedule = results.get("staff_schedule")
     if staff_schedule is not None:

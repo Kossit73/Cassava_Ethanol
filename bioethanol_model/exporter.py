@@ -11,6 +11,7 @@ from .financial_model import CassavaBioethanolModel
 from .inputs import InputLandingPage
 from .scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
 from .sensitivity import SensitivityScenario, monte_carlo_simulation, run_sensitivity, tornado_chart_inputs
+from .schedules import ExpenseSummary
 
 
 SECTION_GAP = 2
@@ -187,6 +188,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
 
     metrics = results["metrics"]
     projection = model.input_page.projection
+    expenses: ExpenseSummary | None = results.get("expenses")  # type: ignore[assignment]
 
     def _get_metric(name: str, default=np.nan) -> float:
         value = metrics.get(name, default)
@@ -430,10 +432,17 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
             exclude_columns=exclude,
         )
 
-    cost_totals = {
-        name: output.annual.sum(axis=1)
-        for name, output in results["costs"].items()
-    }
+    expense_annual = pd.DataFrame()
+    if isinstance(expenses, ExpenseSummary):
+        expense_annual = expenses.annual
+
+    if not expense_annual.empty:
+        cost_totals = {col: expense_annual[col] for col in expense_annual.columns}
+    else:
+        cost_totals = {
+            name: output.annual.sum(axis=1)
+            for name, output in results["costs"].items()
+        }
     if cost_totals:
         cost_df = pd.DataFrame(cost_totals)
         cost_df.index.name = "Year"
@@ -524,10 +533,36 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
     sheet = "Financial Performance"
     income_monthly = results["financials"].income_monthly
     income_annual = results["financials"].income_annual
-    total_expense = income_monthly[["COGS", "Staff Costs", "Other Opex", "Depreciation", "Interest", "Tax"]]
+    expenses_summary = results.get("expenses") if isinstance(results.get("expenses"), ExpenseSummary) else None
+
+    expense_cols = ["COGS", "Staff Costs", "Other Opex", "Tax"]
+    monthly_expense = pd.DataFrame(index=income_monthly.index)
+    annual_expense = pd.DataFrame(index=income_annual.index)
+
+    if isinstance(expenses_summary, ExpenseSummary):
+        if not expenses_summary.monthly.empty:
+            monthly_expense = expenses_summary.monthly.reindex(
+                columns=[col for col in expense_cols if col in expenses_summary.monthly.columns]
+            )
+        if not expenses_summary.annual.empty:
+            annual_expense = expenses_summary.annual.reindex(
+                columns=[col for col in expense_cols if col in expenses_summary.annual.columns]
+            )
+
+    for extra in ("Depreciation", "Interest"):
+        if extra in income_monthly.columns:
+            monthly_expense[extra] = income_monthly[extra]
+        if extra in income_annual.columns:
+            annual_expense[extra] = income_annual[extra]
+
+    monthly_expense = monthly_expense.reindex(columns=list(dict.fromkeys(monthly_expense.columns)))
+    annual_expense = annual_expense.reindex(columns=list(dict.fromkeys(annual_expense.columns)))
+
     next_row = _write_table(writer, sheet, income_monthly, "Monthly Financial Performance")
     next_row = _write_table(writer, sheet, income_annual, "Annual Financial Performance", startrow=next_row)
-    next_row = _write_table(writer, sheet, total_expense, "Total Expense Schedule", startrow=next_row)
+    next_row = _write_table(writer, sheet, monthly_expense, "Total Expense Schedule", startrow=next_row)
+    if not annual_expense.empty:
+        next_row = _write_table(writer, sheet, annual_expense, "Total Expense Schedule (Annual)", startrow=next_row)
 
     staff_schedule = results.get("staff_schedule")
     if staff_schedule is not None:

@@ -677,6 +677,14 @@ class FinancialStatements:
     cashflow_annual: pd.DataFrame
 
 
+@dataclass
+class ExpenseSummary:
+    """Container for the key expense lines used across dashboards."""
+
+    monthly: pd.DataFrame
+    annual: pd.DataFrame
+
+
 def compute_financial_statements(
     revenue: RevenueOutput,
     depreciation: DepreciationOutput,
@@ -799,6 +807,35 @@ def compute_financial_statements(
         cashflow_monthly=cashflow_monthly,
         cashflow_annual=cashflow_annual,
     )
+
+
+def extract_expense_summary(
+    financials: FinancialStatements,
+    expense_columns: Iterable[str] = ("COGS", "Staff Costs", "Other Opex", "Tax"),
+) -> ExpenseSummary:
+    """Return the headline expense lines from the income statements.
+
+    The helper standardises the order of the returned columns and gracefully
+    skips any expense that is not present in the underlying schedules.  The
+    resulting dataframes are used throughout the dashboards and exporter so the
+    same values flow into the key metrics, financial statements, sensitivity
+    pages, and the workbook output.
+    """
+
+    def _ordered_subset(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=list(expense_columns))
+        existing = [col for col in expense_columns if col in df.columns]
+        if not existing:
+            return pd.DataFrame(columns=list(expense_columns), index=df.index)
+        subset = df[existing].copy()
+        return subset
+
+    monthly = _ordered_subset(financials.income_monthly)
+    annual = _ordered_subset(financials.income_annual)
+    if not annual.empty and annual.index.name is None:
+        annual.index.name = "Year"
+    return ExpenseSummary(monthly=monthly, annual=annual)
 
 
 def compute_key_metrics(

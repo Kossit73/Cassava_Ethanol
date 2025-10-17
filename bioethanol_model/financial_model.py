@@ -20,6 +20,8 @@ from .schedules import (
     compute_revenue_schedule,
     compute_staff_schedule,
     compute_working_capital,
+    extract_expense_summary,
+    ExpenseSummary,
 )
 from .utils import irr, npv
 
@@ -236,6 +238,8 @@ class CassavaBioethanolModel:
             tax_rate=tax_rate,
         )
 
+        expenses: ExpenseSummary = extract_expense_summary(financials)
+
         discount_rate = _get_global("Discount rate", 0.0)
         investor_share = _get_global("Investor share capital", 0.0)
         owner_share = _get_global("Owner share capital", float("nan"))
@@ -277,6 +281,7 @@ class CassavaBioethanolModel:
             "loan_schedule": loan_schedule,
             "working_capital": working_capital,
             "financials": financials,
+            "expenses": expenses,
             "metrics": metrics,
             "break_even": break_even,
             "payback": payback,
