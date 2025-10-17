@@ -545,8 +545,9 @@ def _auto_compound_production(page: InputLandingPage) -> None:
     else:
         growth_values = pd.Series(index=month_index, dtype=float)
 
-    manual_periods = set()
+    manual_periods: set[pd.Period] = set()
     planning_period: pd.Period | None = None
+    first_period: pd.Period | None = None
     if getattr(page.projection, "planning_start", None):
         try:
             planning_period = pd.Period(page.projection.planning_start, freq="M")
@@ -606,8 +607,13 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         if planning_period is not None and base_period < planning_period:
             manual_periods.discard(base_period)
 
-    manual_periods.update(period for period, val in growth_values.dropna().items() if val is not None)
+    growth_periods: set[pd.Period] = set()
+    for period, val in growth_values.dropna().items():
+        if val is not None:
+            growth_periods.add(period)
+    manual_periods.update(growth_periods)
 
+    diff_periods: set[pd.Period] = set()
     if previous_series is not None and "Cassava ton" in df.columns:
         cassava_current = pd.to_numeric(df["Cassava ton"], errors="coerce")
         for period, value in zip(month_index, cassava_current):
@@ -616,6 +622,31 @@ def _auto_compound_production(page: InputLandingPage) -> None:
             previous_value = previous_series.get(period)
             if previous_value is None or not np.isclose(previous_value, float(value), atol=1e-9):
                 manual_periods.add(period)
+                diff_periods.add(period)
+
+    first_changed = False
+    if first_period is not None and "Cassava ton" in df.columns:
+        try:
+            first_mask = month_index == first_period
+            if first_mask.any():
+                first_raw = pd.to_numeric(df.loc[first_mask, "Cassava ton"], errors="coerce")
+                if not first_raw.empty and pd.notna(first_raw.iloc[0]):
+                    first_value = float(first_raw.iloc[0])
+                    prev_value = previous_series.get(first_period) if previous_series is not None else None
+                    if prev_value is None or not np.isclose(prev_value, first_value, atol=1e-9):
+                        first_changed = True
+                else:
+                    first_changed = True
+        except Exception:  # pragma: no cover - defensive guard
+            first_changed = True
+    elif previous_series is None and first_period is not None:
+        first_changed = True
+
+    if first_changed and not diff_periods.difference({first_period}):
+        manual_periods = set()
+        if first_period is not None:
+            manual_periods.add(first_period)
+        manual_periods.update(growth_periods)
 
     seed_df = df.copy()
     for col in manual_columns:
