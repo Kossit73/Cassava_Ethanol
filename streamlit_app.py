@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -1305,13 +1306,130 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         _update_table_editor_state(table)
 
 
+def _apply_production_delta(
+    page: InputLandingPage, table: EditableTable, row_idx: int, delta: float
+) -> bool:
+    """Adjust the cassava tonnage for *row_idx* by *delta* and refresh derived fields."""
+
+    if table.name != "Production Monthly" or "Cassava ton" not in table.columns:
+        return False
+
+    df = table.data.copy()
+    if df.empty or row_idx not in df.index:
+        return False
+
+    cassava_raw = pd.to_numeric(pd.Series([df.at[row_idx, "Cassava ton"]]), errors="coerce").iloc[0]
+    current_value = float(cassava_raw) if pd.notna(cassava_raw) else 0.0
+    new_value = max(0.0, current_value + float(delta))
+
+    if not np.isfinite(new_value) or np.isclose(new_value, current_value, atol=1e-9):
+        return False
+
+    df.at[row_idx, "Cassava ton"] = new_value
+    if "Ethanol litres" in df.columns:
+        df.at[row_idx, "Ethanol litres"] = new_value * ETHANOL_LITRES_PER_TON
+    if "Animal Feed ton" in df.columns:
+        df.at[row_idx, "Animal Feed ton"] = new_value * ANIMAL_FEED_TON_PER_TON
+
+    table.set_data(df, mark_user_input=True)
+    st.session_state[PRODUCTION_EDIT_FLAG] = True
+    _mark_inputs_dirty()
+    _update_table_editor_state(table)
+    return True
+
+
+def _render_production_panel(page: InputLandingPage) -> None:
+    """Expose production schedules outside the grouped tab layout."""
+
+    st.subheader("Production Schedule")
+    st.caption(
+        "Adjust cassava tonnage with the +/- controls or insert dated changes on the right. "
+        "Monthly figures automatically cascade to the annual production summary."
+    )
+
+    monthly_table = page.production_monthly
+    annual_table = page.production_annual
+
+    monthly_df = monthly_table.data.copy()
+
+    change_applied = False
+    if not monthly_df.empty:
+        month_col = _get_month_column(monthly_df) or monthly_table.columns[0]
+
+        def _format_row(idx: int) -> str:
+            if month_col in monthly_df.columns:
+                value = monthly_df.at[idx, month_col]
+                if pd.notna(value):
+                    return str(value)
+            return f"Row {idx + 1}"
+
+        row_idx = st.selectbox(
+            "Month to adjust",
+            list(monthly_df.index),
+            format_func=_format_row,
+            key="production_month_select",
+        )
+
+        step_value = st.number_input(
+            "Adjustment step (tons)",
+            min_value=0.0,
+            value=100.0,
+            step=10.0,
+            key="production_step_value",
+        )
+
+        controls = st.columns([1, 1, 3])
+        minus_pressed = controls[0].button("−", key=f"production_minus_{row_idx}")
+        plus_pressed = controls[1].button("+", key=f"production_plus_{row_idx}")
+
+        with controls[2]:
+            change_applied = _render_change_controls(page, monthly_table)
+
+        if step_value > 0:
+            if minus_pressed:
+                _apply_production_delta(page, monthly_table, row_idx, -step_value)
+            if plus_pressed:
+                _apply_production_delta(page, monthly_table, row_idx, step_value)
+        elif minus_pressed or plus_pressed:
+            st.warning("Set a step above zero to apply the adjustment.")
+
+    else:
+        st.info(
+            "The production schedule is empty. Use the bulk change controls to insert the first production month."
+        )
+        change_applied = _render_change_controls(page, monthly_table)
+
+    if change_applied and monthly_table.name == "Production Monthly":
+        st.session_state[PRODUCTION_EDIT_FLAG] = True
+
+    _render_table(
+        page,
+        monthly_table,
+        "Production",
+        expanded=True,
+        allow_change_controls=False,
+    )
+
+    _render_table(
+        page,
+        annual_table,
+        "Production",
+        expanded=False,
+        allow_change_controls=False,
+    )
+
+
 def _editable_tables(page: InputLandingPage) -> None:
     """Render editable data tables grouped by the landing-page sections."""
 
     categories = page.grouped_tables()
-    tabs = st.tabs(list(categories.keys()))
+    filtered = OrderedDict((k, v) for k, v in categories.items() if k != "Production")
+    if not filtered:
+        return
 
-    for tab, (section, tables) in zip(tabs, categories.items()):
+    tabs = st.tabs(list(filtered.keys()))
+
+    for tab, (section, tables) in zip(tabs, filtered.items()):
         with tab:
             for table in tables:
                 expanded = section in {"Global", "Capex", "Financial"}
@@ -1320,7 +1438,14 @@ def _editable_tables(page: InputLandingPage) -> None:
                     st.metric("Total Initial Investment", _format_currency(page.total_initial_investment))
 
 
-def _render_table(page: InputLandingPage, table: EditableTable, section: str, expanded: bool = False) -> None:
+def _render_table(
+    page: InputLandingPage,
+    table: EditableTable,
+    section: str,
+    *,
+    expanded: bool = False,
+    allow_change_controls: bool = True,
+) -> None:
     """Show a Streamlit data editor for a specific table."""
 
     safe_key = table.name.replace(' ', '_').lower()
@@ -1349,9 +1474,11 @@ def _render_table(page: InputLandingPage, table: EditableTable, section: str, ex
         else:
             controls[1].markdown("&nbsp;")
 
-        change_applied = _render_change_controls(page, table)
-        if change_applied:
-            data_changed = True
+        change_applied = False
+        if allow_change_controls:
+            change_applied = _render_change_controls(page, table)
+            if change_applied:
+                data_changed = True
 
         derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
         column_config = {}
@@ -1392,7 +1519,7 @@ def _render_table(page: InputLandingPage, table: EditableTable, section: str, ex
         if not new_data.equals(table.data):
             data_changed = True
         table.set_data(new_data, mark_user_input=data_changed)
-        if data_changed and table.name == "Production Monthly":
+        if (data_changed or change_applied) and table.name == "Production Monthly":
             st.session_state[PRODUCTION_EDIT_FLAG] = True
         _update_table_editor_state(table)
 
@@ -1941,6 +2068,7 @@ def main() -> None:
         _update_projection(input_page)
         _key_assumptions_controls(input_page.global_inputs)
         _modify_default_inputs(input_page)
+        _render_production_panel(input_page)
         _sync_table_editors(input_page)
         _apply_dependent_updates(input_page, selected_scenario)
         _editable_tables(input_page)
