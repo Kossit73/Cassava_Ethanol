@@ -604,6 +604,9 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
             ordered_cols.append(extra)
     ordered_cols = list(dict.fromkeys(ordered_cols))
     monthly_expense = monthly_expense.reindex(columns=ordered_cols)
+    monthly_expense = monthly_expense.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if not monthly_expense.empty:
+        monthly_expense["Total"] = monthly_expense.sum(axis=1)
 
     annual_ordered_cols = [col for col in expense_cols if col in annual_expense.columns]
     for extra in ("Depreciation", "Interest"):
@@ -611,6 +614,9 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
             annual_ordered_cols.append(extra)
     annual_ordered_cols = list(dict.fromkeys(annual_ordered_cols))
     annual_expense = annual_expense.reindex(columns=annual_ordered_cols)
+    annual_expense = annual_expense.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if not annual_expense.empty:
+        annual_expense["Total"] = annual_expense.sum(axis=1)
 
     next_row = _write_table(writer, sheet, income_monthly, "Monthly Financial Performance")
     next_row = _write_table(writer, sheet, income_annual, "Annual Financial Performance", startrow=next_row)

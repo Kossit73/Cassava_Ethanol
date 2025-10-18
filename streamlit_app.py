@@ -1990,19 +1990,35 @@ def _render_financial_performance(results: Dict[str, object]) -> None:
     st.dataframe(annual_income.reset_index(), use_container_width=True)
 
     expense_columns = ["COGS", "Staff Costs", "Other Opex"]
-    monthly_expense_breakdown = financials.income_monthly.reindex(columns=[c for c in expense_columns if c in financials.income_monthly.columns])
-    if monthly_expense_breakdown.empty:
-        monthly_expense_breakdown = pd.DataFrame(0.0, index=financials.income_monthly.index, columns=expense_columns)
+
+    def _expense_breakdown(source: pd.DataFrame, index_label: str) -> pd.DataFrame:
+        subset_cols = [c for c in expense_columns if c in source.columns]
+        frame = source.reindex(columns=subset_cols).copy()
+        frame = frame.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        if not frame.empty:
+            frame["Total"] = frame.sum(axis=1)
+        if index_label == "Year":
+            frame.index.name = "Year"
+        return frame
+
+    if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.monthly.empty:
+        monthly_expense_breakdown = _expense_breakdown(expenses_summary.monthly, "Month")
+    else:
+        monthly_expense_breakdown = _expense_breakdown(financials.income_monthly, "Month")
+        if monthly_expense_breakdown.empty:
+            monthly_expense_breakdown = pd.DataFrame(0.0, index=financials.income_monthly.index, columns=expense_columns + ["Total"])
     st.subheader("Expense Breakdown (Monthly)")
     st.dataframe(_reset_period_index(monthly_expense_breakdown, "Month"), use_container_width=True)
 
-    annual_expense_breakdown = financials.income_annual.reindex(columns=[c for c in expense_columns if c in financials.income_annual.columns])
-    if annual_expense_breakdown.empty:
-        annual_expense_breakdown = pd.DataFrame(0.0, index=financials.income_annual.index, columns=expense_columns)
-    annual_expense_breakdown = annual_expense_breakdown.copy()
-    annual_expense_breakdown.index.name = "Year"
+    if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.annual.empty:
+        annual_expense_breakdown = _expense_breakdown(expenses_summary.annual, "Year")
+    else:
+        annual_expense_breakdown = _expense_breakdown(financials.income_annual, "Year")
+        if annual_expense_breakdown.empty:
+            annual_expense_breakdown = pd.DataFrame(0.0, index=financials.income_annual.index, columns=expense_columns + ["Total"])
+            annual_expense_breakdown.index.name = "Year"
     st.subheader("Expense Breakdown (Annual)")
-    st.dataframe(annual_expense_breakdown.reset_index(), use_container_width=True)
+    st.dataframe(_reset_period_index(annual_expense_breakdown, "Year"), use_container_width=True)
 
     income_ratios_monthly = getattr(financials, "income_ratios_monthly", pd.DataFrame())
     if isinstance(income_ratios_monthly, pd.DataFrame) and not income_ratios_monthly.empty:
