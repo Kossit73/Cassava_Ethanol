@@ -65,12 +65,14 @@ def _is_cassava_feedstock(value: object) -> bool:
 # Predefined category options surfaced in the "Modify Default Inputs & Figures"
 # editor. Users can still supply custom values by selecting the explicit custom
 # option exposed by the editor for each table.
+DIRECT_COST_CATEGORY_OPTIONS = [
+    "Cassava Feedstock",
+    "Enzymes & Chemicals",
+    "Energy Cost",
+]
+
 CATEGORY_SELECT_OPTIONS = {
-    ("Direct Costs Monthly", "Cost Category"): [
-        "Cassava Feedstock",
-        "Enzymes & Chemicals",
-        "Energy Cost",
-    ],
+    ("Direct Costs Monthly", "Cost Category"): DIRECT_COST_CATEGORY_OPTIONS,
     ("Other Opex Monthly", "Category"): [
         "Service Contracts",
         "General Administration",
@@ -1366,6 +1368,15 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                 label = f"Row {idx + 1}"
         else:
             label = f"Row {idx + 1}"
+
+        if (
+            table.name == "Direct Costs Monthly"
+            and "Cost Category" in table.data.columns
+        ):
+            category = table.data.at[idx, "Cost Category"]
+            if category and not pd.isna(category):
+                label = f"{label} – {category}"
+
         return f"{idx + 1}. {label}"
 
     row_idx = st.selectbox(
@@ -1721,7 +1732,7 @@ def _render_table(
                 if "Cost Category" in manual_rows.columns:
                     manual_column_config["Cost Category"] = st.column_config.SelectboxColumn(
                         label="Cost Category",
-                        options=CATEGORY_SELECT_OPTIONS.get(("Direct Costs Monthly", "Cost Category"), []),
+                        options=list(DIRECT_COST_CATEGORY_OPTIONS),
                     )
                 edited_manual = st.data_editor(
                     manual_rows,
