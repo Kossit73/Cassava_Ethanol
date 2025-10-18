@@ -88,10 +88,9 @@ CATEGORY_SELECT_OPTIONS = {
         "Other assets percent of revenue",
     ],
     (
-        "Inventory & Accounts Payable",
+        "Accounts Payable",
         "Metric",
     ): [
-        "Inventory days",
         "Payables days",
         "Other payable days",
     ],
@@ -143,12 +142,12 @@ CHANGE_BUTTON_CONFIG = {
             "point onward."
         ),
     },
-    "Inventory & Accounts Payable": {
+    "Accounts Payable": {
         "type": "month",
         "start_year_offset": 1,
         "help": (
             "Insert a new policy row by selecting the effective month and clicking "
-            "**Add change**; the updated DIO/DPO settings will roll forward "
+            "**Add change**; the updated payable settings will roll forward "
             "automatically."
         ),
     },
@@ -1027,34 +1026,15 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
 
 
 def _sync_working_capital_tables(page: InputLandingPage) -> None:
-    """Mirror inventory/payable metrics from the AR table for consistency."""
+    """Refresh the Accounts Payable editor state after landing-page edits."""
 
-    ar_table = page.accounts_receivable
     inv_table = page.inventory_payable
     if inv_table is None:
         return
 
-    source_df = ar_table.data.copy()
-    if source_df.empty:
-        _update_table_editor_state(inv_table)
-        return
-
-    metrics_to_sync = {"Inventory days"}
-    subset = source_df[source_df.get("Metric").isin(metrics_to_sync)].copy()
-    if subset.empty:
-        _update_table_editor_state(inv_table)
-        return
-
-    existing = inv_table.data.copy()
-    if existing.empty:
-        existing = pd.DataFrame(columns=inv_table.columns)
-
-    combined = pd.concat([existing, subset], ignore_index=True)
-    if {"Metric", "Effective Month"}.issubset(combined.columns):
-        combined = combined.drop_duplicates(subset=["Metric", "Effective Month"], keep="last")
-        combined = combined.sort_values(["Metric", "Effective Month"], kind="mergesort")
-
-    inv_table.set_data(combined.reset_index(drop=True), mark_user_input=not ar_table.placeholder)
+    # With payables metrics now maintained exclusively in the Accounts Payable table,
+    # we only need to refresh the editor cache so user edits remain visible. The
+    # values themselves come directly from the landing-page entries.
     _update_table_editor_state(inv_table)
 
 

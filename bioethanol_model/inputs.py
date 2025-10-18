@@ -169,7 +169,7 @@ class InputLandingPage:
             "Staff Monthly": self.staff_costs_monthly,
             "Other Opex Monthly": self.other_opex_monthly,
             "Accounts Receivable": self.accounts_receivable,
-            "Inventory & Accounts Payable": self.inventory_payable,
+            "Accounts Payable": self.inventory_payable,
             "Loan Schedule": self.loan_schedule,
             "Tax Schedule": self.tax_schedule,
             "Inflation Schedule": self.inflation_schedule,
@@ -424,11 +424,10 @@ def default_input_page() -> InputLandingPage:
     )
 
     inventory_payable = EditableTable(
-        "Inventory & Accounts Payable",
+        "Accounts Payable",
         ["Effective Month", "Metric", "Value", "Units"],
         pd.DataFrame(
             [
-                {"Effective Month": "2025-01", "Metric": "Inventory days", "Value": 35, "Units": "days"},
                 {"Effective Month": "2025-01", "Metric": "Payables days", "Value": 40, "Units": "days"},
                 {"Effective Month": "2025-01", "Metric": "Other payable days", "Value": 20, "Units": "days"},
             ]
