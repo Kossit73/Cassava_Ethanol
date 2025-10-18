@@ -1871,6 +1871,23 @@ def _render_financial_performance(results: Dict[str, object]) -> None:
     st.subheader("Expense Breakdown (Annual)")
     st.dataframe(annual_expense_breakdown.reset_index(), use_container_width=True)
 
+    income_ratios_monthly = getattr(financials, "income_ratios_monthly", pd.DataFrame())
+    if isinstance(income_ratios_monthly, pd.DataFrame) and not income_ratios_monthly.empty:
+        ratio_monthly = _reset_period_index(income_ratios_monthly, "Month")
+        if "Month" in ratio_monthly.columns:
+            try:
+                ratio_monthly["Month"] = pd.to_datetime(ratio_monthly["Month"]).dt.to_period("M").astype(str)
+            except Exception:
+                ratio_monthly["Month"] = ratio_monthly["Month"].astype(str)
+        st.subheader("Income Statement Ratios (Monthly)")
+        st.dataframe(ratio_monthly, use_container_width=True)
+
+    income_ratios_annual = getattr(financials, "income_ratios_annual", pd.DataFrame())
+    if isinstance(income_ratios_annual, pd.DataFrame) and not income_ratios_annual.empty:
+        ratio_annual = _reset_period_index(income_ratios_annual, "Year")
+        st.subheader("Income Statement Ratios (Annual)")
+        st.dataframe(ratio_annual, use_container_width=True)
+
     st.subheader("Total Expense Schedule")
     if isinstance(expenses_summary, ExpenseSummary):
         if not expenses_summary.monthly.empty:
@@ -1924,6 +1941,23 @@ def _render_financial_position(results: Dict[str, object]) -> None:
     balance_annual = financials.balance_annual.copy()
     balance_annual.index.name = "Year"
     st.dataframe(balance_annual.reset_index(), use_container_width=True)
+
+    balance_ratios_monthly = getattr(financials, "balance_ratios_monthly", pd.DataFrame())
+    if isinstance(balance_ratios_monthly, pd.DataFrame) and not balance_ratios_monthly.empty:
+        ratio_monthly = _reset_period_index(balance_ratios_monthly, "Month")
+        if "Month" in ratio_monthly.columns:
+            try:
+                ratio_monthly["Month"] = pd.to_datetime(ratio_monthly["Month"]).dt.to_period("M").astype(str)
+            except Exception:
+                ratio_monthly["Month"] = ratio_monthly["Month"].astype(str)
+        st.subheader("Statement of Financial Position Ratios (Monthly)")
+        st.dataframe(ratio_monthly, use_container_width=True)
+
+    balance_ratios_annual = getattr(financials, "balance_ratios_annual", pd.DataFrame())
+    if isinstance(balance_ratios_annual, pd.DataFrame) and not balance_ratios_annual.empty:
+        ratio_annual = _reset_period_index(balance_ratios_annual, "Year")
+        st.subheader("Statement of Financial Position Ratios (Annual)")
+        st.dataframe(ratio_annual, use_container_width=True)
 
 def _render_cash_flow_page(results: Dict[str, object]) -> None:
     financials = results["financials"]

@@ -588,6 +588,34 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
     if not annual_expense.empty:
         next_row = _write_table(writer, sheet, annual_expense, "Expense Breakdown (Annual)", startrow=next_row)
 
+    income_ratios_monthly = getattr(results["financials"], "income_ratios_monthly", pd.DataFrame())
+    income_ratios_annual = getattr(results["financials"], "income_ratios_annual", pd.DataFrame())
+    if isinstance(income_ratios_monthly, pd.DataFrame) and not income_ratios_monthly.empty:
+        ratio_monthly = _reset_period_index(income_ratios_monthly, "Month")
+        if "Month" in ratio_monthly.columns:
+            try:
+                ratio_monthly["Month"] = pd.to_datetime(ratio_monthly["Month"]).dt.to_period("M").astype(str)
+            except Exception:
+                ratio_monthly["Month"] = ratio_monthly["Month"].astype(str)
+        next_row = _write_table(
+            writer,
+            sheet,
+            ratio_monthly,
+            "Income Statement Ratios (Monthly)",
+            startrow=next_row,
+            index=False,
+        )
+    if isinstance(income_ratios_annual, pd.DataFrame) and not income_ratios_annual.empty:
+        ratio_annual = _reset_period_index(income_ratios_annual, "Year")
+        next_row = _write_table(
+            writer,
+            sheet,
+            ratio_annual,
+            "Income Statement Ratios (Annual)",
+            startrow=next_row,
+            index=False,
+        )
+
     staff_schedule = results.get("staff_schedule")
     if staff_schedule is not None:
         positions_df = getattr(staff_schedule, "positions", pd.DataFrame())
@@ -603,7 +631,35 @@ def _write_financial_position(writer: pd.ExcelWriter, results: Dict[str, object]
     balance_monthly = results["financials"].balance_monthly
     balance_annual = results["financials"].balance_annual
     next_row = _write_table(writer, sheet, balance_monthly, "Monthly Statement of Financial Position")
-    _write_table(writer, sheet, balance_annual, "Annual Statement of Financial Position", startrow=next_row)
+    next_row = _write_table(writer, sheet, balance_annual, "Annual Statement of Financial Position", startrow=next_row)
+
+    balance_ratios_monthly = getattr(results["financials"], "balance_ratios_monthly", pd.DataFrame())
+    balance_ratios_annual = getattr(results["financials"], "balance_ratios_annual", pd.DataFrame())
+    if isinstance(balance_ratios_monthly, pd.DataFrame) and not balance_ratios_monthly.empty:
+        ratio_monthly = _reset_period_index(balance_ratios_monthly, "Month")
+        if "Month" in ratio_monthly.columns:
+            try:
+                ratio_monthly["Month"] = pd.to_datetime(ratio_monthly["Month"]).dt.to_period("M").astype(str)
+            except Exception:
+                ratio_monthly["Month"] = ratio_monthly["Month"].astype(str)
+        next_row = _write_table(
+            writer,
+            sheet,
+            ratio_monthly,
+            "Statement of Financial Position Ratios (Monthly)",
+            startrow=next_row,
+            index=False,
+        )
+    if isinstance(balance_ratios_annual, pd.DataFrame) and not balance_ratios_annual.empty:
+        ratio_annual = _reset_period_index(balance_ratios_annual, "Year")
+        _write_table(
+            writer,
+            sheet,
+            ratio_annual,
+            "Statement of Financial Position Ratios (Annual)",
+            startrow=next_row,
+            index=False,
+        )
 
 
 def _write_cash_flow_page(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:

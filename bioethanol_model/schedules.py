@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, Tuple
 
 import numpy as np
@@ -675,6 +675,10 @@ class FinancialStatements:
     balance_annual: pd.DataFrame
     cashflow_monthly: pd.DataFrame
     cashflow_annual: pd.DataFrame
+    balance_ratios_monthly: pd.DataFrame = field(default_factory=pd.DataFrame)
+    balance_ratios_annual: pd.DataFrame = field(default_factory=pd.DataFrame)
+    income_ratios_monthly: pd.DataFrame = field(default_factory=pd.DataFrame)
+    income_ratios_annual: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
@@ -836,6 +840,63 @@ def compute_financial_statements(
     balance_annual = balance_monthly.resample("Y").last()
     balance_annual.index = balance_annual.index.year
 
+    def _balance_series(column: str) -> pd.Series:
+        if column in balance_monthly.columns:
+            return pd.to_numeric(balance_monthly[column], errors="coerce").reindex(balance_monthly.index, fill_value=0.0)
+        return pd.Series(0.0, index=balance_monthly.index)
+
+    def _income_series(column: str) -> pd.Series:
+        if column in income_monthly.columns:
+            return pd.to_numeric(income_monthly[column], errors="coerce").reindex(income_monthly.index, fill_value=0.0)
+        return pd.Series(0.0, index=income_monthly.index)
+
+    def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+        denominator = denominator.where(denominator != 0, np.nan)
+        result = numerator.divide(denominator)
+        return result.replace([np.inf, -np.inf], np.nan)
+
+    cash_series = _balance_series("Cash")
+    receivables_series = _balance_series("Accounts Receivable & Other Assets")
+    inventory_series = _balance_series("Inventory")
+    current_assets = cash_series + receivables_series + inventory_series
+    current_liabilities = _balance_series("Accounts Payable") + _balance_series("Debt")
+    total_liabilities = _balance_series("Total Liabilities")
+    total_assets = _balance_series("Total Assets")
+    equity_series = _balance_series("Equity")
+
+    balance_ratios_monthly = pd.DataFrame(index=balance_monthly.index)
+    balance_ratios_monthly["Current Ratio"] = _safe_ratio(current_assets, current_liabilities)
+    balance_ratios_monthly["Debt-to-Equity Ratio"] = _safe_ratio(total_liabilities, equity_series)
+    balance_ratios_monthly["Debt Ratio"] = _safe_ratio(total_liabilities, total_assets)
+
+    balance_ratios_annual = balance_ratios_monthly.resample("Y").last()
+    balance_ratios_annual.index = balance_ratios_annual.index.year
+
+    revenue_series = _income_series("Revenue")
+    cogs_series = _income_series("COGS")
+    net_income_series = _income_series("Net Income")
+    gross_profit_series = revenue_series - cogs_series
+    average_equity = (equity_series + equity_series.shift(1)).div(2).fillna(equity_series)
+
+    income_ratios_monthly = pd.DataFrame(index=income_monthly.index)
+    income_ratios_monthly["Gross Margin"] = _safe_ratio(gross_profit_series, revenue_series)
+    income_ratios_monthly["Return on Assets (ROA)"] = _safe_ratio(net_income_series, total_assets)
+    income_ratios_monthly["Return on Equity (ROE)"] = _safe_ratio(net_income_series, average_equity)
+
+    income_ratios_annual = pd.DataFrame(index=income_annual.index)
+    if not income_annual.empty:
+        annual_revenue = pd.to_numeric(income_annual.get("Revenue", pd.Series(0.0, index=income_annual.index)), errors="coerce").fillna(0.0)
+        annual_cogs = pd.to_numeric(income_annual.get("COGS", pd.Series(0.0, index=income_annual.index)), errors="coerce").fillna(0.0)
+        annual_net_income = pd.to_numeric(income_annual.get("Net Income", pd.Series(0.0, index=income_annual.index)), errors="coerce").fillna(0.0)
+        annual_gross_profit = annual_revenue - annual_cogs
+        annual_assets = pd.to_numeric(balance_annual.get("Total Assets", pd.Series(0.0, index=balance_annual.index)), errors="coerce").fillna(0.0)
+        annual_equity = pd.to_numeric(balance_annual.get("Equity", pd.Series(0.0, index=balance_annual.index)), errors="coerce").fillna(0.0)
+        annual_avg_equity = (annual_equity + annual_equity.shift(1)).div(2).fillna(annual_equity)
+
+        income_ratios_annual["Gross Margin"] = _safe_ratio(annual_gross_profit, annual_revenue)
+        income_ratios_annual["Return on Assets (ROA)"] = _safe_ratio(annual_net_income, annual_assets)
+        income_ratios_annual["Return on Equity (ROE)"] = _safe_ratio(annual_net_income, annual_avg_equity)
+
     return FinancialStatements(
         income_monthly=income_monthly,
         income_annual=income_annual,
@@ -843,6 +904,10 @@ def compute_financial_statements(
         balance_annual=balance_annual,
         cashflow_monthly=cashflow_monthly,
         cashflow_annual=cashflow_annual,
+        balance_ratios_monthly=balance_ratios_monthly,
+        balance_ratios_annual=balance_ratios_annual,
+        income_ratios_monthly=income_ratios_monthly,
+        income_ratios_annual=income_ratios_annual,
     )
 
 
