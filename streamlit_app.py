@@ -86,6 +86,12 @@ CATEGORY_SELECT_OPTIONS = {
         "Inventory days",
         "Prepaid expense days",
         "Other assets percent of revenue",
+    ],
+    (
+        "Inventory & Accounts Payable",
+        "Metric",
+    ): [
+        "Inventory days",
         "Payables days",
         "Other payable days",
     ],
@@ -1030,21 +1036,25 @@ def _sync_working_capital_tables(page: InputLandingPage) -> None:
 
     source_df = ar_table.data.copy()
     if source_df.empty:
-        empty_df = pd.DataFrame(columns=inv_table.columns)
-        inv_table.set_data(empty_df, mark_user_input=False)
         _update_table_editor_state(inv_table)
         return
 
-    metrics_to_copy = {"Inventory days", "Payables days", "Other payable days"}
-    subset = source_df[source_df.get("Metric").isin(metrics_to_copy)].copy()
+    metrics_to_sync = {"Inventory days"}
+    subset = source_df[source_df.get("Metric").isin(metrics_to_sync)].copy()
     if subset.empty:
-        empty_df = pd.DataFrame(columns=inv_table.columns)
-        inv_table.set_data(empty_df, mark_user_input=False)
         _update_table_editor_state(inv_table)
         return
 
-    subset = subset.reset_index(drop=True)
-    inv_table.set_data(subset, mark_user_input=not ar_table.placeholder)
+    existing = inv_table.data.copy()
+    if existing.empty:
+        existing = pd.DataFrame(columns=inv_table.columns)
+
+    combined = pd.concat([existing, subset], ignore_index=True)
+    if {"Metric", "Effective Month"}.issubset(combined.columns):
+        combined = combined.drop_duplicates(subset=["Metric", "Effective Month"], keep="last")
+        combined = combined.sort_values(["Metric", "Effective Month"], kind="mergesort")
+
+    inv_table.set_data(combined.reset_index(drop=True), mark_user_input=not ar_table.placeholder)
     _update_table_editor_state(inv_table)
 
 

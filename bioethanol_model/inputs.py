@@ -418,8 +418,6 @@ def default_input_page() -> InputLandingPage:
                     "Value": 0.02,
                     "Units": "%",
                 },
-                {"Effective Month": "2025-01", "Metric": "Payables days", "Value": 40, "Units": "days"},
-                {"Effective Month": "2025-01", "Metric": "Other payable days", "Value": 20, "Units": "days"},
             ]
         ),
         placeholder=True,
