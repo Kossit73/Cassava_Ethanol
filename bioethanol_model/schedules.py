@@ -762,8 +762,32 @@ def compute_financial_statements(
     income_annual = income_monthly.resample("Y").sum()
     income_annual.index = income_annual.index.year
 
-    wc = working_capital.monthly["Net Working Capital"]
-    delta_wc = wc.diff().fillna(wc)
+    wc_monthly = working_capital.monthly
+    if wc_monthly is None or wc_monthly.empty:
+        wc_monthly = pd.DataFrame(index=monthly.index)
+    wc_monthly = wc_monthly.reindex(monthly.index).fillna(0.0)
+
+    def _wc_series(column: str, default: float = 0.0) -> pd.Series:
+        series = wc_monthly.get(column)
+        if series is None:
+            return pd.Series(default, index=monthly.index, dtype=float)
+        return pd.to_numeric(series, errors="coerce").reindex(monthly.index, fill_value=default)
+
+    receivables = _wc_series("Receivables")
+    inventory = _wc_series("Inventory")
+    other_assets = _wc_series("Other Assets")
+    payables = _wc_series("Payables")
+
+    accounts_receivable_other = receivables.add(other_assets, fill_value=0.0)
+    net_working_capital = wc_monthly.get("Net Working Capital")
+    if net_working_capital is None:
+        net_working_capital = accounts_receivable_other + inventory - payables
+    else:
+        net_working_capital = pd.to_numeric(
+            net_working_capital, errors="coerce"
+        ).reindex(monthly.index, fill_value=0.0)
+
+    delta_wc = net_working_capital.diff().fillna(net_working_capital)
 
     cashflow_monthly = pd.DataFrame(index=monthly.index)
     cashflow_monthly["Net Income"] = income_monthly["Net Income"]
@@ -790,11 +814,26 @@ def compute_financial_statements(
     gross_ppe = capex.cumsum()
     accumulated_dep = dep.cumsum()
     balance_monthly["Net PP&E"] = gross_ppe - accumulated_dep
-    balance_monthly["Working Capital"] = wc
+    balance_monthly["Accounts Receivable & Other Assets"] = accounts_receivable_other
+    balance_monthly["Inventory"] = inventory
+    balance_monthly["Accounts Payable"] = payables
     balance_monthly["Debt"] = closing_balance
-    balance_monthly["Equity"] = (
-        balance_monthly[["Cash", "Net PP&E", "Working Capital"]].sum(axis=1) - balance_monthly["Debt"]
-    )
+    balance_monthly["Net Working Capital"] = net_working_capital
+    balance_monthly["Working Capital"] = net_working_capital
+
+    asset_columns = [
+        "Cash",
+        "Accounts Receivable & Other Assets",
+        "Inventory",
+        "Net PP&E",
+    ]
+    liability_columns = ["Accounts Payable", "Debt"]
+    total_assets = balance_monthly[asset_columns].sum(axis=1)
+    total_liabilities = balance_monthly[liability_columns].sum(axis=1)
+    balance_monthly["Equity"] = total_assets - total_liabilities
+    balance_monthly["Total Assets"] = total_assets
+    balance_monthly["Total Liabilities"] = total_liabilities
+    balance_monthly["Total Liabilities & Equity"] = total_liabilities + balance_monthly["Equity"]
 
     balance_annual = balance_monthly.resample("Y").last()
     balance_annual.index = balance_annual.index.year
