@@ -1711,7 +1711,7 @@ def _render_table(
             manual_rows = table.data.loc[~auto_mask].copy()
 
             if not auto_rows.empty:
-                auto_rows = auto_rows.sort_index()
+                auto_rows = auto_rows.sort_index().reset_index(drop=True)
                 st.caption(
                     "Cassava feedstock costs are scenario-driven and locked. Adjust other "
                     "direct-cost rows using the editor below."
@@ -1724,31 +1724,33 @@ def _render_table(
                     column_config=column_config or None,
                 )
 
-            if manual_rows.empty:
+            display_manual = manual_rows.reset_index(drop=True)
+
+            if display_manual.empty:
                 st.info("No editable direct-cost rows are available. Use **Add row** to insert a new item.")
-                manual_result = manual_rows.copy()
+                manual_result = display_manual.copy()
             else:
                 manual_column_config = dict(column_config)
-                if "Cost Category" in manual_rows.columns:
+                if "Cost Category" in display_manual.columns:
                     manual_column_config["Cost Category"] = st.column_config.SelectboxColumn(
                         label="Cost Category",
                         options=list(DIRECT_COST_CATEGORY_OPTIONS),
                     )
                 edited_manual = st.data_editor(
-                    manual_rows,
+                    display_manual,
                     num_rows="dynamic",
                     use_container_width=True,
                     key=f"{widget_key}_manual",
                     column_config=manual_column_config or None,
                 )
                 if isinstance(edited_manual, pd.DataFrame):
-                    manual_result = edited_manual[manual_rows.columns].copy()
+                    manual_result = edited_manual[display_manual.columns].copy()
                 else:  # pragma: no cover
-                    manual_result = pd.DataFrame(edited_manual, columns=manual_rows.columns)
-                if not manual_result.equals(manual_rows):
+                    manual_result = pd.DataFrame(edited_manual, columns=display_manual.columns)
+                if not manual_result.equals(display_manual):
                     data_changed = True
 
-            combined = pd.concat([auto_rows, manual_result], axis=0).reindex(table.data.index)
+            combined = pd.concat([auto_rows, manual_result], axis=0, ignore_index=True)
             new_data = combined[table.columns]
         else:
             edited = st.data_editor(
