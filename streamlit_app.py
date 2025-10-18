@@ -61,6 +61,20 @@ def _is_cassava_feedstock(value: object) -> bool:
     text = str(value).strip().lower()
     return "cassava" in text and "feedstock" in text
 
+
+def _is_highlighted_direct_cost(value: object) -> bool:
+    """Identify direct-cost rows that should appear in the read-only reference table."""
+
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    if not text:
+        return False
+    return (
+        ("cassava" in text and "feedstock" in text)
+        or ("enzymes" in text and "chemical" in text)
+    )
+
 # Predefined category options surfaced in the "Modify Default Inputs & Figures"
 # editor. Users can still supply custom values by selecting the explicit custom
 # option exposed by the editor for each table.
@@ -1708,12 +1722,17 @@ def _render_table(
             auto_rows = table.data.loc[auto_mask].copy()
             manual_rows = table.data.loc[~auto_mask].copy()
 
-            if not auto_rows.empty:
+            highlight_mask = table.data["Cost Category"].apply(_is_highlighted_direct_cost)
+            highlight_rows = table.data.loc[highlight_mask].copy()
+            if not highlight_rows.empty:
+                highlight_rows = highlight_rows.sort_index()
                 st.caption(
-                    "Cassava feedstock costs are calculated automatically from scenario pricing and are read-only."
+                    "Cassava feedstock and Enzymes & Chemicals rows are shown below for reference. "
+                    "Cassava feedstock values are scenario-driven and locked; adjust Enzymes & Chemicals "
+                    "using the editable table underneath."
                 )
                 st.data_editor(
-                    auto_rows,
+                    highlight_rows,
                     use_container_width=True,
                     key=f"{widget_key}_auto",
                     disabled=True,
