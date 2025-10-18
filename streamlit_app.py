@@ -62,11 +62,11 @@ CATEGORY_SELECT_OPTIONS = {
         "Energy Cost",
     ],
     ("Other Opex Monthly", "Category"): [
-        "Insurance",
         "Service Contracts",
         "General Administration",
-        "Sales & Marketing",
         "Research & Development",
+        "Energy Cost",
+        "Sales & Marketing",
     ],
 }
 
