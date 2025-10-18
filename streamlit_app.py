@@ -52,6 +52,15 @@ DERIVED_COLUMN_MAP = {
     "Production Annual": {"Ethanol litres", "Animal Feed ton"},
 }
 
+
+def _is_cassava_feedstock(value: object) -> bool:
+    """Return True when *value* refers to the cassava feedstock cost row."""
+
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return "cassava" in text and "feedstock" in text
+
 # Predefined category options surfaced in the "Modify Default Inputs & Figures"
 # editor. Users can still supply custom values by selecting the explicit custom
 # option exposed by the editor for each table.
@@ -1104,6 +1113,16 @@ def _row_editor_form(
 
     original_row = df.loc[row_idx].copy()
 
+    if (
+        table.name == "Direct Costs Monthly"
+        and "Cost Category" in df.columns
+        and _is_cassava_feedstock(df.at[row_idx, "Cost Category"])
+    ):
+        st.info(
+            "Cassava feedstock costs are linked to scenario pricing and cannot be overridden here."
+        )
+        return df, False, None
+
     month_range = pd.period_range(
         f"{int(projection.start_year):04d}-01",
         f"{int(projection.end_year):04d}-12",
@@ -1586,8 +1605,16 @@ def _render_table(
                 format_func=lambda i: f"Row {i + 1}",
             )
             if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
-                table.remove_row(int(remove_index))
-                data_changed = True
+                idx = int(remove_index)
+                if (
+                    table.name == "Direct Costs Monthly"
+                    and "Cost Category" in table.data.columns
+                    and _is_cassava_feedstock(table.data.at[idx, "Cost Category"])
+                ):
+                    st.warning("Cassava feedstock costs are scenario-driven and cannot be removed.")
+                else:
+                    table.remove_row(idx)
+                    data_changed = True
         else:
             controls[1].markdown("&nbsp;")
 
@@ -1621,20 +1648,59 @@ def _render_table(
         if cache_key not in st.session_state:
             st.session_state[cache_key] = table.data.copy()
 
-        edited = st.data_editor(
-            table.data,
-            num_rows="dynamic",
-            use_container_width=True,
-            key=widget_key,
-            column_config=column_config or None,
-        )
-        if isinstance(edited, pd.DataFrame):
-            new_data = edited[table.columns].copy()
-        else:  # pragma: no cover - safety for older Streamlit returning list of dicts
-            new_data = pd.DataFrame(edited, columns=table.columns)
+        if table.name == "Direct Costs Monthly" and "Cost Category" in table.data.columns:
+            auto_mask = table.data["Cost Category"].apply(_is_cassava_feedstock)
+            auto_rows = table.data.loc[auto_mask].copy()
+            manual_rows = table.data.loc[~auto_mask].copy()
 
-        if not new_data.equals(table.data):
-            data_changed = True
+            if not auto_rows.empty:
+                st.caption(
+                    "Cassava feedstock costs are calculated automatically from scenario pricing and are read-only."
+                )
+                st.data_editor(
+                    auto_rows,
+                    use_container_width=True,
+                    key=f"{widget_key}_auto",
+                    disabled=True,
+                    column_config=column_config or None,
+                )
+
+            if manual_rows.empty:
+                st.info("No editable direct-cost rows are available. Use **Add row** to insert a new item.")
+                manual_result = manual_rows.copy()
+            else:
+                edited_manual = st.data_editor(
+                    manual_rows,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key=f"{widget_key}_manual",
+                    column_config=column_config or None,
+                )
+                if isinstance(edited_manual, pd.DataFrame):
+                    manual_result = edited_manual[manual_rows.columns].copy()
+                else:  # pragma: no cover
+                    manual_result = pd.DataFrame(edited_manual, columns=manual_rows.columns)
+                if not manual_result.equals(manual_rows):
+                    data_changed = True
+
+            combined = pd.concat([auto_rows, manual_result], axis=0).reindex(table.data.index)
+            new_data = combined[table.columns]
+        else:
+            edited = st.data_editor(
+                table.data,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=widget_key,
+                column_config=column_config or None,
+            )
+            if isinstance(edited, pd.DataFrame):
+                new_data = edited[table.columns].copy()
+            else:  # pragma: no cover - safety for older Streamlit returning list of dicts
+                new_data = pd.DataFrame(edited, columns=table.columns)
+
+            if not new_data.equals(table.data):
+                data_changed = True
+
         table.set_data(new_data, mark_user_input=data_changed)
         if (data_changed or change_applied) and table.name == "Production Monthly":
             st.session_state[PRODUCTION_EDIT_FLAG] = True
