@@ -536,6 +536,7 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
     expenses_summary = results.get("expenses") if isinstance(results.get("expenses"), ExpenseSummary) else None
 
     expense_cols = ["COGS", "Staff Costs", "Other Opex", "Tax"]
+    primary_expense_cols = ["COGS", "Staff Costs", "Other Opex"]
     monthly_expense = pd.DataFrame(index=income_monthly.index)
     annual_expense = pd.DataFrame(index=income_annual.index)
 
@@ -549,20 +550,43 @@ def _write_financial_performance(writer: pd.ExcelWriter, results: Dict[str, obje
                 columns=[col for col in expense_cols if col in expenses_summary.annual.columns]
             )
 
+    for col in primary_expense_cols:
+        if col not in monthly_expense.columns:
+            if col in income_monthly.columns:
+                monthly_expense[col] = income_monthly[col]
+            else:
+                monthly_expense[col] = 0.0
+        if col not in annual_expense.columns:
+            if col in income_annual.columns:
+                annual_expense[col] = income_annual[col]
+            else:
+                annual_expense[col] = 0.0
+
     for extra in ("Depreciation", "Interest"):
         if extra in income_monthly.columns:
             monthly_expense[extra] = income_monthly[extra]
         if extra in income_annual.columns:
             annual_expense[extra] = income_annual[extra]
 
-    monthly_expense = monthly_expense.reindex(columns=list(dict.fromkeys(monthly_expense.columns)))
-    annual_expense = annual_expense.reindex(columns=list(dict.fromkeys(annual_expense.columns)))
+    ordered_cols = [col for col in expense_cols if col in monthly_expense.columns]
+    for extra in ("Depreciation", "Interest"):
+        if extra in monthly_expense.columns:
+            ordered_cols.append(extra)
+    ordered_cols = list(dict.fromkeys(ordered_cols))
+    monthly_expense = monthly_expense.reindex(columns=ordered_cols)
+
+    annual_ordered_cols = [col for col in expense_cols if col in annual_expense.columns]
+    for extra in ("Depreciation", "Interest"):
+        if extra in annual_expense.columns:
+            annual_ordered_cols.append(extra)
+    annual_ordered_cols = list(dict.fromkeys(annual_ordered_cols))
+    annual_expense = annual_expense.reindex(columns=annual_ordered_cols)
 
     next_row = _write_table(writer, sheet, income_monthly, "Monthly Financial Performance")
     next_row = _write_table(writer, sheet, income_annual, "Annual Financial Performance", startrow=next_row)
-    next_row = _write_table(writer, sheet, monthly_expense, "Total Expense Schedule", startrow=next_row)
+    next_row = _write_table(writer, sheet, monthly_expense, "Expense Breakdown (Monthly)", startrow=next_row)
     if not annual_expense.empty:
-        next_row = _write_table(writer, sheet, annual_expense, "Total Expense Schedule (Annual)", startrow=next_row)
+        next_row = _write_table(writer, sheet, annual_expense, "Expense Breakdown (Annual)", startrow=next_row)
 
     staff_schedule = results.get("staff_schedule")
     if staff_schedule is not None:

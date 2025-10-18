@@ -1856,6 +1856,21 @@ def _render_financial_performance(results: Dict[str, object]) -> None:
     annual_income.index.name = "Year"
     st.dataframe(annual_income.reset_index(), use_container_width=True)
 
+    expense_columns = ["COGS", "Staff Costs", "Other Opex"]
+    monthly_expense_breakdown = financials.income_monthly.reindex(columns=[c for c in expense_columns if c in financials.income_monthly.columns])
+    if monthly_expense_breakdown.empty:
+        monthly_expense_breakdown = pd.DataFrame(0.0, index=financials.income_monthly.index, columns=expense_columns)
+    st.subheader("Expense Breakdown (Monthly)")
+    st.dataframe(_reset_period_index(monthly_expense_breakdown, "Month"), use_container_width=True)
+
+    annual_expense_breakdown = financials.income_annual.reindex(columns=[c for c in expense_columns if c in financials.income_annual.columns])
+    if annual_expense_breakdown.empty:
+        annual_expense_breakdown = pd.DataFrame(0.0, index=financials.income_annual.index, columns=expense_columns)
+    annual_expense_breakdown = annual_expense_breakdown.copy()
+    annual_expense_breakdown.index.name = "Year"
+    st.subheader("Expense Breakdown (Annual)")
+    st.dataframe(annual_expense_breakdown.reset_index(), use_container_width=True)
+
     st.subheader("Total Expense Schedule")
     if isinstance(expenses_summary, ExpenseSummary):
         if not expenses_summary.monthly.empty:
