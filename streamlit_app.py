@@ -77,6 +77,17 @@ CATEGORY_SELECT_OPTIONS = {
         "Energy Cost",
         "Sales & Marketing",
     ],
+    (
+        "Accounts Receivable & Other Assets",
+        "Metric",
+    ): [
+        "Receivables days",
+        "Inventory days",
+        "Prepaid expense days",
+        "Other assets percent of revenue",
+        "Payables days",
+        "Other payable days",
+    ],
 }
 
 CHANGE_BUTTON_CONFIG = {
