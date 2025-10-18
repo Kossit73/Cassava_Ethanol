@@ -601,7 +601,18 @@ def compute_working_capital(
     else:
         months_index = revenue.monthly.index
         if months_index.empty:
-            empty = pd.DataFrame(columns=["Receivables", "Inventory", "Payables", "Net Working Capital"])
+            empty = pd.DataFrame(
+                columns=
+                [
+                    "Receivables",
+                    "Inventory",
+                    "Prepaid Expenses",
+                    "Other Assets",
+                    "Payables",
+                    "Other Payables",
+                    "Net Working Capital",
+                ]
+            )
             return WorkingCapitalOutput(empty, pd.DataFrame())
         monthly_revenue = pd.Series(0.0, index=months_index)
 
@@ -614,12 +625,18 @@ def compute_working_capital(
         reindexed = output.monthly.reindex(months).fillna(0.0)
         return reindexed.sum(axis=1)
 
-    monthly_cogs = _sum_cost("Direct Costs") + _sum_cost("Staff Costs") + _sum_cost("Other Opex")
+    direct_costs = _sum_cost("Direct Costs")
+    staff_costs = _sum_cost("Staff Costs")
+    other_costs = _sum_cost("Other Opex")
+    monthly_cogs = direct_costs + staff_costs + other_costs
+    operating_costs = staff_costs + other_costs
 
-    def _metric_series(df: pd.DataFrame, metric_name: str, default: float = 0.0) -> pd.Series:
+    def _metric_series(
+        df: pd.DataFrame, metric_name: str, default: float = 0.0
+    ) -> Tuple[pd.Series, bool]:
         series = pd.Series(default, index=months, dtype=float)
         if df is None or df.empty or "Metric" not in df.columns:
-            return series
+            return series, False
 
         working = df.copy()
         effective_col = next((c for c in ("Effective Month", "Start Month", "Month") if c in working.columns), None)
@@ -631,10 +648,12 @@ def compute_working_capital(
         working["_effective"] = effective_dates.dt.to_period("M").dt.to_timestamp()
         working["_metric"] = working["Metric"].astype(str).str.lower()
         working["_value"] = pd.to_numeric(working.get("Value"), errors="coerce")
-        mask = (working["_metric"] == metric_name.lower()) & working["_effective"].notna() & working["_value"].notna()
+        mask = (
+            working["_metric"] == metric_name.lower()
+        ) & working["_effective"].notna() & working["_value"].notna()
         filtered = working.loc[mask, ["_effective", "_value"]].sort_values("_effective")
         if filtered.empty:
-            return series
+            return series, False
 
         current_value = default
         idx = 0
@@ -644,23 +663,50 @@ def compute_working_capital(
                 current_value = float(effective_values[idx][1])
                 idx += 1
             series.loc[month] = current_value
-        return series
+        return series, True
 
-    ar_days_series = _metric_series(accounts_receivable_inputs, "Receivables days", 0.0)
-    inventory_days_series = _metric_series(inventory_inputs, "Inventory days", 0.0)
-    payables_days_series = _metric_series(inventory_inputs, "Payables days", 0.0)
+    ar_days_series, _ = _metric_series(accounts_receivable_inputs, "Receivables days", 0.0)
+    inventory_days_series, has_inventory = _metric_series(accounts_receivable_inputs, "Inventory days", 0.0)
+    if not has_inventory:
+        inventory_days_series, _ = _metric_series(inventory_inputs, "Inventory days", 0.0)
+
+    prepaid_days_series, has_prepaid = _metric_series(accounts_receivable_inputs, "Prepaid expense days", 0.0)
+    other_asset_pct_series, has_other_assets = _metric_series(
+        accounts_receivable_inputs, "Other assets percent of revenue", 0.0
+    )
+    payables_days_series, has_payables = _metric_series(accounts_receivable_inputs, "Payables days", 0.0)
+    if not has_payables:
+        payables_days_series, _ = _metric_series(inventory_inputs, "Payables days", 0.0)
+    other_payable_days_series, has_other_payables = _metric_series(
+        accounts_receivable_inputs, "Other payable days", 0.0
+    )
+    if not has_other_payables:
+        other_payable_days_series, _ = _metric_series(inventory_inputs, "Other payable days", 0.0)
 
     receivables = monthly_revenue * (ar_days_series / 30.0)
     inventory = monthly_cogs * (inventory_days_series / 30.0)
+    prepaid = operating_costs * (prepaid_days_series / 30.0)
+    other_assets = monthly_revenue * other_asset_pct_series
     payables = monthly_cogs * (payables_days_series / 30.0)
+    other_payables = operating_costs * (other_payable_days_series / 30.0)
 
     wc = pd.DataFrame(
         {
             "Receivables": receivables,
             "Inventory": inventory,
+            "Prepaid Expenses": prepaid,
+            "Other Assets": other_assets,
             "Payables": payables,
-            "Net Working Capital": receivables + inventory - payables,
+            "Other Payables": other_payables,
         }
+    )
+    wc["Net Working Capital"] = (
+        receivables
+        + inventory
+        + prepaid
+        + other_assets
+        - payables
+        - other_payables
     )
     annual = wc.resample("Y").mean()
     annual.index = annual.index.year
@@ -779,13 +825,19 @@ def compute_financial_statements(
 
     receivables = _wc_series("Receivables")
     inventory = _wc_series("Inventory")
+    prepaid = _wc_series("Prepaid Expenses")
     other_assets = _wc_series("Other Assets")
     payables = _wc_series("Payables")
+    other_payables = _wc_series("Other Payables")
 
-    accounts_receivable_other = receivables.add(other_assets, fill_value=0.0)
+    accounts_receivable_other = (
+        receivables.add(prepaid, fill_value=0.0).add(other_assets, fill_value=0.0)
+    )
     net_working_capital = wc_monthly.get("Net Working Capital")
     if net_working_capital is None:
-        net_working_capital = accounts_receivable_other + inventory - payables
+        net_working_capital = (
+            accounts_receivable_other + inventory - payables - other_payables
+        )
     else:
         net_working_capital = pd.to_numeric(
             net_working_capital, errors="coerce"
@@ -821,6 +873,7 @@ def compute_financial_statements(
     balance_monthly["Accounts Receivable & Other Assets"] = accounts_receivable_other
     balance_monthly["Inventory"] = inventory
     balance_monthly["Accounts Payable"] = payables
+    balance_monthly["Other Payables"] = other_payables
     balance_monthly["Debt"] = closing_balance
 
     asset_columns = [
@@ -829,7 +882,7 @@ def compute_financial_statements(
         "Inventory",
         "Net PP&E",
     ]
-    liability_columns = ["Accounts Payable", "Debt"]
+    liability_columns = ["Accounts Payable", "Other Payables", "Debt"]
     total_assets = balance_monthly[asset_columns].sum(axis=1)
     total_liabilities = balance_monthly[liability_columns].sum(axis=1)
     balance_monthly["Equity"] = total_assets - total_liabilities
@@ -859,7 +912,11 @@ def compute_financial_statements(
     receivables_series = _balance_series("Accounts Receivable & Other Assets")
     inventory_series = _balance_series("Inventory")
     current_assets = cash_series + receivables_series + inventory_series
-    current_liabilities = _balance_series("Accounts Payable") + _balance_series("Debt")
+    current_liabilities = (
+        _balance_series("Accounts Payable")
+        + _balance_series("Other Payables")
+        + _balance_series("Debt")
+    )
     total_liabilities = _balance_series("Total Liabilities")
     total_assets = _balance_series("Total Assets")
     equity_series = _balance_series("Equity")

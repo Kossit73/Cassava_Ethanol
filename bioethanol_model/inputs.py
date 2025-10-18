@@ -410,8 +410,16 @@ def default_input_page() -> InputLandingPage:
         pd.DataFrame(
             [
                 {"Effective Month": "2025-01", "Metric": "Receivables days", "Value": 45, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Inventory days", "Value": 35, "Units": "days"},
                 {"Effective Month": "2025-01", "Metric": "Prepaid expense days", "Value": 15, "Units": "days"},
-                {"Effective Month": "2025-01", "Metric": "Other assets percent of revenue", "Value": 0.02, "Units": "%"},
+                {
+                    "Effective Month": "2025-01",
+                    "Metric": "Other assets percent of revenue",
+                    "Value": 0.02,
+                    "Units": "%",
+                },
+                {"Effective Month": "2025-01", "Metric": "Payables days", "Value": 40, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Other payable days", "Value": 20, "Units": "days"},
             ]
         ),
         placeholder=True,
@@ -424,6 +432,7 @@ def default_input_page() -> InputLandingPage:
             [
                 {"Effective Month": "2025-01", "Metric": "Inventory days", "Value": 35, "Units": "days"},
                 {"Effective Month": "2025-01", "Metric": "Payables days", "Value": 40, "Units": "days"},
+                {"Effective Month": "2025-01", "Metric": "Other payable days", "Value": 20, "Units": "days"},
             ]
         ),
         placeholder=True,

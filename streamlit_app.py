@@ -1008,12 +1008,41 @@ def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
     page.direct_costs_monthly.set_data(direct_df, mark_user_input=True)
 
 
+def _sync_working_capital_tables(page: InputLandingPage) -> None:
+    """Mirror inventory/payable metrics from the AR table for consistency."""
+
+    ar_table = page.accounts_receivable
+    inv_table = page.inventory_payable
+    if inv_table is None:
+        return
+
+    source_df = ar_table.data.copy()
+    if source_df.empty:
+        empty_df = pd.DataFrame(columns=inv_table.columns)
+        inv_table.set_data(empty_df, mark_user_input=False)
+        _update_table_editor_state(inv_table)
+        return
+
+    metrics_to_copy = {"Inventory days", "Payables days", "Other payable days"}
+    subset = source_df[source_df.get("Metric").isin(metrics_to_copy)].copy()
+    if subset.empty:
+        empty_df = pd.DataFrame(columns=inv_table.columns)
+        inv_table.set_data(empty_df, mark_user_input=False)
+        _update_table_editor_state(inv_table)
+        return
+
+    subset = subset.reset_index(drop=True)
+    inv_table.set_data(subset, mark_user_input=not ar_table.placeholder)
+    _update_table_editor_state(inv_table)
+
+
 def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
     """Ensure derived landing-page tables stay synchronised with inputs."""
 
     _auto_compound_production(page)
     _update_staff_costs_from_positions(page)
     _update_feedstock_costs(page, scenario)
+    _sync_working_capital_tables(page)
 
 
 def _key_assumptions_controls(table: EditableTable) -> None:
