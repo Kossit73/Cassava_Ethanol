@@ -34,6 +34,16 @@ streamlit run streamlit_app.py
 
 The web app lets you edit all landing-page tables, recalculates the integrated statements on demand, and provides an instant Excel download that mirrors the command line export.
 
+### Verifying the codebase
+
+For a quick sanity check that the repository still compiles after making changes, run the helper script:
+
+```bash
+python tools/run_checks.py
+```
+
+The script byte-compiles the core packages and attempts to build the default FARM_ONLY scenario. If optional dependencies such as NumPy or pandas are unavailable in the environment, the scenario build is skipped and a warning is printed so the command can still finish successfully.
+
 ### Editing the production schedules
 
 The **Production Monthly** table on the Input Landing Page is the source of truth for the cassava processing plan. To adjust production and have the changes flow through to the **Production Annual** roll-up:
