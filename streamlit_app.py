@@ -1713,12 +1713,18 @@ def _render_table(
                 st.info("No editable direct-cost rows are available. Use **Add row** to insert a new item.")
                 manual_result = manual_rows.copy()
             else:
+                manual_column_config = dict(column_config)
+                if "Cost Category" in manual_rows.columns:
+                    manual_column_config["Cost Category"] = st.column_config.SelectboxColumn(
+                        label="Cost Category",
+                        options=CATEGORY_SELECT_OPTIONS.get(("Direct Costs Monthly", "Cost Category"), []),
+                    )
                 edited_manual = st.data_editor(
                     manual_rows,
                     num_rows="dynamic",
                     use_container_width=True,
                     key=f"{widget_key}_manual",
-                    column_config=column_config or None,
+                    column_config=manual_column_config or None,
                 )
                 if isinstance(edited_manual, pd.DataFrame):
                     manual_result = edited_manual[manual_rows.columns].copy()
