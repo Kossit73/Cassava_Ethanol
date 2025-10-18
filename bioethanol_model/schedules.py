@@ -818,8 +818,6 @@ def compute_financial_statements(
     balance_monthly["Inventory"] = inventory
     balance_monthly["Accounts Payable"] = payables
     balance_monthly["Debt"] = closing_balance
-    balance_monthly["Net Working Capital"] = net_working_capital
-    balance_monthly["Working Capital"] = net_working_capital
 
     asset_columns = [
         "Cash",
