@@ -135,6 +135,10 @@ def _write_financial_statements_page(writer: pd.ExcelWriter, results: Dict[str, 
         worksheet = writer.book.add_worksheet(sheet)
         writer.sheets[sheet] = worksheet
 
+    expenses_summary: ExpenseSummary | None = (
+        results.get("expenses") if isinstance(results.get("expenses"), ExpenseSummary) else None
+    )
+
     statements = [
         (
             "Income Statement",
@@ -176,6 +180,32 @@ def _write_financial_statements_page(writer: pd.ExcelWriter, results: Dict[str, 
             index=False,
         )
         current_row += 1
+
+        if title == "Income Statement" and isinstance(expenses_summary, ExpenseSummary):
+            expense_monthly = expenses_summary.monthly
+            expense_annual = expenses_summary.annual
+
+            if isinstance(expense_monthly, pd.DataFrame) and not expense_monthly.empty:
+                expense_monthly_tbl = _reset_period_index(expense_monthly, "Month")
+                current_row = _write_table(
+                    writer,
+                    sheet,
+                    expense_monthly_tbl,
+                    "Income Statement Expense Breakdown (Monthly)",
+                    startrow=current_row,
+                    index=False,
+                )
+
+            if isinstance(expense_annual, pd.DataFrame) and not expense_annual.empty:
+                expense_annual_tbl = _reset_period_index(expense_annual, "Year")
+                current_row = _write_table(
+                    writer,
+                    sheet,
+                    expense_annual_tbl,
+                    "Income Statement Expense Breakdown (Annual)",
+                    startrow=current_row,
+                    index=False,
+                )
 
 
 def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, results: Dict[str, object]) -> None:

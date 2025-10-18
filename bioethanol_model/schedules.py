@@ -931,6 +931,7 @@ def extract_expense_summary(
         if not existing:
             return pd.DataFrame(columns=list(expense_columns), index=df.index)
         subset = df[existing].copy()
+        subset = subset.apply(pd.to_numeric, errors="coerce").fillna(0.0)
         return subset
 
     monthly = _ordered_subset(financials.income_monthly)
