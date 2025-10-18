@@ -1113,15 +1113,16 @@ def _row_editor_form(
 
     original_row = df.loc[row_idx].copy()
 
-    if (
+    read_only_row = (
         table.name == "Direct Costs Monthly"
         and "Cost Category" in df.columns
         and _is_cassava_feedstock(df.at[row_idx, "Cost Category"])
-    ):
+    )
+
+    if read_only_row:
         st.info(
-            "Cassava feedstock costs are linked to scenario pricing and cannot be overridden here."
+            "Cassava feedstock costs are scenario-driven. Review the values below; they are locked for editing."
         )
-        return df, False, None
 
     month_range = pd.period_range(
         f"{int(projection.start_year):04d}-01",
@@ -1137,6 +1138,20 @@ def _row_editor_form(
     for column in table.columns:
         current_value = df.at[row_idx, column]
         widget_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}".replace(" ", "_").lower()
+
+        if read_only_row:
+            display_value = ""
+            if current_value is not None and not (
+                isinstance(current_value, float) and pd.isna(current_value)
+            ):
+                display_value = str(current_value)
+            st.text_input(
+                column,
+                value=display_value,
+                key=widget_key,
+                disabled=True,
+            )
+            continue
 
         if column in derived_columns:
             if table.name == "Production Monthly":
