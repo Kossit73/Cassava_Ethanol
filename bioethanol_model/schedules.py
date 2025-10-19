@@ -50,21 +50,67 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
 
     records = []
     capex_records = []
+    total_depreciation = []
+    annual_depreciations = []
     for _, row in initial_investment.iterrows():
-        life_years = row.get("Life (years)") or row.get("Life") or 10
+        raw_life = row.get("Life (years)")
+        if raw_life in (None, "") or (isinstance(raw_life, float) and np.isnan(raw_life)):
+            raw_life = row.get("Life")
+        try:
+            life_years = float(raw_life) if raw_life not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            life_years = 0.0
+
+        life_months = None
+        if life_years > 0:
+            life_months = int(np.ceil(life_years * 12))
+
         rate = row.get("Depreciation Rate")
+        try:
+            rate_value = float(rate)
+        except (TypeError, ValueError):
+            rate_value = float("nan")
+        if pd.isna(rate_value):
+            rate_value = 0.0
         cost = float(row["Cost"])
-        if rate in (None, 0, np.nan):
-            annual_dep = cost / life_years if life_years else 0
+        if rate_value == 0.0:
+            annual_dep = cost / life_years if life_years else 0.0
         else:
-            annual_dep = cost * float(rate)
+            annual_dep = cost * rate_value
+        if not np.isfinite(annual_dep):
+            annual_dep = 0.0
         monthly_dep = annual_dep / 12.0
         start_month_value = row.get("Start Month", f"{start_year}-01")
         start_month = pd.Period(start_month_value, freq="M").to_timestamp()
         capex_records.append({"Month": start_month, "Item": row["Item"], "Capex": cost})
+
+        item_total = 0.0
+        periods_taken = 0
+        depreciation_complete = False
         for month in months:
-            dep = monthly_dep if month >= start_month else 0.0
+            dep = 0.0
+            if month >= start_month and not depreciation_complete:
+                remaining = max(cost - item_total, 0.0)
+                if remaining <= 0.0:
+                    depreciation_complete = True
+                elif life_months is not None and periods_taken >= life_months:
+                    depreciation_complete = True
+                else:
+                    dep = min(monthly_dep, remaining)
+                    if dep > 0.0:
+                        item_total += dep
+                        periods_taken += 1
+                        if life_months is not None and periods_taken >= life_months:
+                            depreciation_complete = True
+                        if item_total >= cost - 1e-9:
+                            depreciation_complete = True
+                    else:
+                        # Zero monthly depreciation still respects the useful life.
+                        if life_months is not None and periods_taken >= life_months:
+                            depreciation_complete = True
             records.append({"Month": month, "Item": row["Item"], "Depreciation": dep})
+        total_depreciation.append(min(item_total, cost))
+        annual_depreciations.append(annual_dep)
 
     monthly_df = (
         pd.DataFrame(records)
@@ -83,13 +129,14 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
     annual_df.index = annual_df.index.year
 
     summary = initial_investment.copy()
-    summary["Annual Depreciation"] = summary.apply(
-        lambda r: (r["Cost"] / r.get("Life (years)") if r.get("Depreciation Rate") in (None, 0, np.nan) else r["Cost"] * r.get("Depreciation Rate")),
-        axis=1,
-    )
-    summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
-    summary["Accumulated Depreciation (Year %d)" % end_year] = summary["Annual Depreciation"] * (end_year - start_year + 1)
-    summary["Net Book Value"] = summary["Cost"] - summary["Accumulated Depreciation (Year %d)" % end_year]
+    summary["Cost"] = pd.to_numeric(summary.get("Cost"), errors="coerce").fillna(0.0)
+    annual_series = pd.Series(annual_depreciations, index=summary.index, dtype=float)
+    summary["Annual Depreciation"] = annual_series
+    summary["Monthly Depreciation"] = annual_series / 12.0
+    accumulated_column = f"Accumulated Depreciation (Year {end_year})"
+    accumulated_series = pd.Series(total_depreciation, index=summary.index, dtype=float)
+    summary[accumulated_column] = accumulated_series.clip(upper=summary["Cost"])
+    summary["Net Book Value"] = summary["Cost"] - summary[accumulated_column]
     return DepreciationOutput(monthly_df, annual_df, summary, capex_series)
 
 
@@ -869,7 +916,8 @@ def compute_financial_statements(
     balance_monthly["Cash"] = cashflow_monthly["Net Cash Flow"].cumsum()
     gross_ppe = capex.cumsum()
     accumulated_dep = dep.cumsum()
-    balance_monthly["Net PP&E"] = gross_ppe - accumulated_dep
+    accumulated_dep = accumulated_dep.clip(upper=gross_ppe)
+    balance_monthly["Net PP&E"] = (gross_ppe - accumulated_dep).clip(lower=0.0)
     balance_monthly["Accounts Receivable & Other Assets"] = accounts_receivable_other
     balance_monthly["Inventory"] = inventory
     balance_monthly["Accounts Payable"] = payables
