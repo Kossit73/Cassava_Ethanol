@@ -887,7 +887,7 @@ def compute_financial_statements(
     cashflow_monthly["Free Cash Flow"] = cashflow_monthly["Operating Cash Flow"] - capex
     cashflow_monthly["Debt Draws"] = debt_draws
     cashflow_monthly["Debt Service"] = debt_service
-    cashflow_monthly["Financing Cash Flow"] = debt_draws - debt_service
+    cashflow_monthly["Financing Cash Flow"] = debt_draws - principal
     cashflow_monthly["Equity Cash Flow"] = cashflow_monthly["Free Cash Flow"] + cashflow_monthly["Financing Cash Flow"]
     cashflow_monthly["Net Cash Flow"] = (
         cashflow_monthly["Operating Cash Flow"]
