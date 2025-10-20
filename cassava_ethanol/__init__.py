@@ -18,7 +18,12 @@ from .inputs import (
 )
 from .model import CassavaEthanolModel, CashFlowBreakdown, ModelResults
 from .scenario import Scenario, ScenarioResult, ScenarioRunner
-from .report import format_cash_flow_table, format_summary
+from .report import (
+    format_cash_flow_table,
+    format_currency,
+    format_percentage,
+    format_summary,
+)
 
 __all__ = [
     "CapitalPlan",
@@ -35,5 +40,7 @@ __all__ = [
     "ScenarioResult",
     "ScenarioRunner",
     "format_cash_flow_table",
+    "format_currency",
+    "format_percentage",
     "format_summary",
 ]
