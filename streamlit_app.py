@@ -9,6 +9,18 @@ from typing import Dict, List, Tuple
 import streamlit as st
 import yaml
 
+# When the app is executed as "python cassava_ethanol/streamlit_app.py" the
+# package root (one directory up) is not on ``sys.path`` which makes the
+# absolute imports below fail.  Guard against that execution mode so users do
+# not need to modify PYTHONPATH manually.  The check keeps environments where
+# the package is installed (and ``__package__`` is set) untouched.
+if __package__ in {None, ""}:  # pragma: no cover - runtime environment guard
+    import sys
+
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+
 from cassava_ethanol import (
     CassavaEthanolModel,
     Scenario,
