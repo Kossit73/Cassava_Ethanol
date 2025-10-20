@@ -1,0 +1,11 @@
+- name: High Feedstock Cost
+  overrides:
+    feedstock.cassava_price_per_ton: 85
+- name: Optimistic Pricing
+  overrides:
+    pricing.ethanol_price_per_liter: 1.05
+    pricing.price_escalation: 0.025
+- name: Efficiency Upgrade
+  overrides:
+    plant.ramp_up_profile: [0.7, 0.9, 1.05]
+    feedstock.cassava_required_per_liter_kg: 2.8

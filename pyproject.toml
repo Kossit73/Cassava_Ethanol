@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cassava-ethanol"
+version = "0.1.0"
+description = "Financial modeling toolkit for cassava-based ethanol projects"
+readme = "README.md"
+authors = [
+  { name = "Cassava Ethanol Team" }
+]
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.23",
+  "PyYAML>=6.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0"
+]
+app = [
+  "streamlit>=1.31"
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
