@@ -3,6 +3,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+try:  # pragma: no cover - exercised implicitly during imports
+    import numpy  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover - executed in offline environments
+    from tools.numpy_stub import install_numpy_stub
+
+    install_numpy_stub()
+
 # The heavy modelling stack depends on pandas/numpy/xlsxwriter.  Importing the
 # modules lazily inside ``run_standard_export`` lets us detect missing optional
 # dependencies and fall back to a lightweight workbook generator when the

@@ -7,10 +7,40 @@ from typing import List, Optional, Sequence, Tuple
 from xml.sax.saxutils import escape
 import zipfile
 
+try:  # pragma: no cover - lightweight shim for offline execution
+    import numpy  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover
+    from tools.numpy_stub import install_numpy_stub
+
+    install_numpy_stub()
+
 
 SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
-MONTHS = [f"2025-{month:02d}" for month in range(1, 13)]
-RAMP_UP_PROFILE: Sequence[float] = (
+MONTHS_PER_YEAR = 12
+ANALYSIS_HORIZON_YEARS = 10
+
+
+def _projection_months(
+    *, start_year: int = 2025, start_month: int = 1, years: int = ANALYSIS_HORIZON_YEARS
+) -> List[str]:
+    """Return ``YYYY-MM`` labels covering the full projection horizon."""
+
+    months: List[str] = []
+    year = start_year
+    month = start_month
+    total_months = years * MONTHS_PER_YEAR
+    for _ in range(total_months):
+        months.append(f"{year}-{month:02d}")
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return months
+
+
+MONTHS = _projection_months()
+
+_BASE_RAMP_UP_PROFILE: Sequence[float] = (
     0.60,
     0.70,
     0.80,
@@ -24,6 +54,19 @@ RAMP_UP_PROFILE: Sequence[float] = (
     1.00,
     1.00,
 )
+
+
+def _ramp_profile(months: Sequence[str]) -> List[float]:
+    """Extend the first-year ramp profile across the projection horizon."""
+
+    base = list(_BASE_RAMP_UP_PROFILE)
+    length = len(months)
+    if len(base) < length:
+        base.extend([1.0] * (length - len(base)))
+    return base[:length]
+
+
+RAMP_UP_PROFILE: Sequence[float] = tuple(_ramp_profile(MONTHS))
 
 ETHANOL_LITRES_PER_TON = 200.0
 ANIMAL_FEED_TON_PER_TON = 0.275
@@ -50,7 +93,6 @@ LOAN_INTEREST_RATE = 0.075
 LOAN_TERM_YEARS = 10
 MAINTENANCE_CAPEX_RATE = 0.03
 DISCOUNT_RATE = 0.12
-ANALYSIS_HORIZON_YEARS = 10
 BASE_CASSAVA_TON_PER_MONTH = 10_000.0
 ACCOUNTS_RECEIVABLE_DAYS = 45.0
 OTHER_ASSETS_DAYS = 15.0
@@ -65,6 +107,24 @@ CAPEX_ITEMS: Sequence[Tuple[str, float, float]] = (
     ("Farm Development", 3_000_000.0, 10.0),
     ("EPC & Others", 5_000_000.0, 8.0),
 )
+
+
+def _first_year(values: Sequence[float]) -> List[float]:
+    return list(values[:MONTHS_PER_YEAR])
+
+
+def _first_year_sum(values: Sequence[float]) -> float:
+    return sum(_first_year(values))
+
+
+def _extend_monthly_schedule(first_year_values: Sequence[float], months: Sequence[str]) -> List[float]:
+    values = list(first_year_values)
+    if not values:
+        return [0.0] * len(months)
+    last_value = values[-1]
+    while len(values) < len(months):
+        values.append(last_value)
+    return values[: len(months)]
 
 
 @dataclass(frozen=True)
@@ -203,17 +263,19 @@ def _spread_over_months(
     example).  The fixed and variable components always sum to ``total``.
     """
 
-    months = len(MONTHS)
-    if months == 0:
-        return []
+    if weights is None:
+        months = len(MONTHS)
+        weights = [1.0] * months
+    else:
+        months = len(weights)
+        if months == 0:
+            return []
+        weights = list(weights)
 
     base_share_clamped = min(max(base_share, 0.0), 1.0)
     base_total = total * base_share_clamped
     variable_total = total - base_total
     base_monthly = base_total / months if months else 0.0
-
-    if weights is None:
-        weights = [1.0] * months
 
     total_weight = sum(weights)
     if not math.isfinite(total_weight) or total_weight <= 0 or variable_total == 0:
@@ -402,31 +464,34 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
     monthly_feedstock_cost_schedule = [
         farm + purchase for farm, purchase in zip(farmland_feedstock_cost_schedule, purchased_feedstock_cost_schedule)
     ]
-    annual_other_direct_cost = DIRECT_COST_OTHER * len(MONTHS)
-    monthly_other_direct_cost_schedule = _compound_with_inflation_and_risk(
-        _spread_over_months(annual_other_direct_cost, RAMP_UP_PROFILE)
+    annual_other_direct_cost = DIRECT_COST_OTHER * MONTHS_PER_YEAR
+    first_year_other_direct = _spread_over_months(
+        annual_other_direct_cost,
+        _BASE_RAMP_UP_PROFILE,
     )
+    base_other_direct_schedule = _extend_monthly_schedule(first_year_other_direct, MONTHS)
+    monthly_other_direct_cost_schedule = _compound_with_inflation_and_risk(base_other_direct_schedule)
     monthly_cogs_schedule = [
         feedstock + other_direct
         for feedstock, other_direct in zip(monthly_feedstock_cost_schedule, monthly_other_direct_cost_schedule)
     ]
 
-    annual_staff_cost = (OPERATIONS_STAFF_COST + FARMING_STAFF_COST * farm_share) * len(MONTHS)
-    monthly_staff_cost_schedule = _compound_with_inflation_and_risk(
-        _spread_over_months(
-            annual_staff_cost,
-            RAMP_UP_PROFILE,
-            base_share=0.4,
-        )
+    first_year_staff_total = (OPERATIONS_STAFF_COST + FARMING_STAFF_COST * farm_share) * MONTHS_PER_YEAR
+    first_year_staff = _spread_over_months(
+        first_year_staff_total,
+        _BASE_RAMP_UP_PROFILE,
+        base_share=0.4,
     )
-    annual_other_opex = OTHER_OPEX_MONTHLY * len(MONTHS)
-    monthly_other_opex_schedule = _compound_with_inflation_and_risk(
-        _spread_over_months(
-            annual_other_opex,
-            RAMP_UP_PROFILE,
-            base_share=0.25,
-        )
+    base_staff_schedule = _extend_monthly_schedule(first_year_staff, MONTHS)
+    monthly_staff_cost_schedule = _compound_with_inflation_and_risk(base_staff_schedule)
+    first_year_other_opex_total = OTHER_OPEX_MONTHLY * MONTHS_PER_YEAR
+    first_year_other_opex = _spread_over_months(
+        first_year_other_opex_total,
+        _BASE_RAMP_UP_PROFILE,
+        base_share=0.25,
     )
+    base_other_opex_schedule = _extend_monthly_schedule(first_year_other_opex, MONTHS)
+    monthly_other_opex_schedule = _compound_with_inflation_and_risk(base_other_opex_schedule)
 
     monthly_ebitda_schedule = [
         revenue - cogs - staff - opex
@@ -470,19 +535,19 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
         change_in_nwc_schedule.append(current_nwc - previous_nwc)
         previous_nwc = current_nwc
 
-    annual_cassava_tons = sum(monthly_cassava_tons)
-    annual_ethanol_litres = sum(monthly_ethanol_litres)
-    annual_animal_feed_ton = sum(monthly_animal_feed_ton)
-    annual_ethanol_revenue = sum(monthly_ethanol_revenue)
-    annual_coproduct_revenue = sum(monthly_coproduct_revenue)
-    annual_revenue = sum(monthly_revenue_schedule)
-    annual_feedstock_cost_farm = sum(farmland_feedstock_cost_schedule)
-    annual_feedstock_cost_purchase = sum(purchased_feedstock_cost_schedule)
-    annual_direct_cost_other = sum(monthly_other_direct_cost_schedule)
-    annual_direct_cost = sum(monthly_cogs_schedule)
-    annual_staff_cost = sum(monthly_staff_cost_schedule)
-    annual_other_opex = sum(monthly_other_opex_schedule)
-    annual_ebitda = sum(monthly_ebitda_schedule)
+    annual_cassava_tons = _first_year_sum(monthly_cassava_tons)
+    annual_ethanol_litres = _first_year_sum(monthly_ethanol_litres)
+    annual_animal_feed_ton = _first_year_sum(monthly_animal_feed_ton)
+    annual_ethanol_revenue = _first_year_sum(monthly_ethanol_revenue)
+    annual_coproduct_revenue = _first_year_sum(monthly_coproduct_revenue)
+    annual_revenue = _first_year_sum(monthly_revenue_schedule)
+    annual_feedstock_cost_farm = _first_year_sum(farmland_feedstock_cost_schedule)
+    annual_feedstock_cost_purchase = _first_year_sum(purchased_feedstock_cost_schedule)
+    annual_direct_cost_other = _first_year_sum(monthly_other_direct_cost_schedule)
+    annual_direct_cost = _first_year_sum(monthly_cogs_schedule)
+    annual_staff_cost = _first_year_sum(monthly_staff_cost_schedule)
+    annual_other_opex = _first_year_sum(monthly_other_opex_schedule)
+    annual_ebitda = _first_year_sum(monthly_ebitda_schedule)
 
     depreciation_items: List[Tuple[str, float]] = []
     capex_total = 0.0
@@ -505,8 +570,13 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
 
     operating_cash_flow = net_income + annual_depreciation
     maintenance_capex = capex_total * MAINTENANCE_CAPEX_RATE
-    working_capital_investment = sum(change_in_nwc_schedule)
-    net_working_capital_end = net_working_capital_schedule[-1] if net_working_capital_schedule else 0.0
+    working_capital_investment = _first_year_sum(change_in_nwc_schedule)
+    if net_working_capital_schedule:
+        first_year_nwc_index = min(MONTHS_PER_YEAR, len(net_working_capital_schedule)) - 1
+        net_working_capital_end = net_working_capital_schedule[first_year_nwc_index]
+    else:
+        first_year_nwc_index = -1
+        net_working_capital_end = 0.0
     free_cash_flow = operating_cash_flow - maintenance_capex - working_capital_investment
 
     annual_debt_service = 0.0
@@ -635,8 +705,8 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
     monthly_rows.append(
         [
             "Annual Total",
-            sum(farmland_tons_schedule),
-            sum(purchased_tons_schedule),
+            _first_year_sum(farmland_tons_schedule),
+            _first_year_sum(purchased_tons_schedule),
             annual_cassava_tons,
             annual_ethanol_litres,
             annual_animal_feed_ton,
@@ -650,12 +720,14 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
             annual_staff_cost,
             annual_other_opex,
             annual_ebitda,
-            accounts_receivable_other_assets_schedule[-1],
-            inventory_schedule[-1],
-            accounts_payable_schedule[-1],
-            other_payables_schedule[-1],
-            net_working_capital_schedule[-1],
-            sum(change_in_nwc_schedule),
+            accounts_receivable_other_assets_schedule[first_year_nwc_index]
+            if first_year_nwc_index >= 0
+            else 0.0,
+            inventory_schedule[first_year_nwc_index] if first_year_nwc_index >= 0 else 0.0,
+            accounts_payable_schedule[first_year_nwc_index] if first_year_nwc_index >= 0 else 0.0,
+            other_payables_schedule[first_year_nwc_index] if first_year_nwc_index >= 0 else 0.0,
+            net_working_capital_end,
+            _first_year_sum(change_in_nwc_schedule),
         ]
     )
 
