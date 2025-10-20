@@ -1,0 +1,6 @@
+# Ignore generated Excel workbooks
+*.xlsx
+
+# Ignore Python cache artifacts
+__pycache__/
+*.py[cod]
