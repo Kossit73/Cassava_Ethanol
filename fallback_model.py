@@ -31,6 +31,11 @@ ETHANOL_PRICE = 0.70
 ANIMAL_FEED_PRICE = 120.0
 FARM_PRODUCTION_COST_PER_TON = 45.0
 PURCHASE_COST_PER_TON = 70.0
+# Inflation and risk adjustments are compounded monthly so the operating
+# schedules grow over the projection horizon instead of staying flat after the
+# ramp-up completes.
+ANNUAL_INFLATION_RATE = 0.05
+ANNUAL_RISK_RATE = 0.02
 # ``DIRECT_COST_OTHER`` represents conversion costs such as utilities and
 # enzymes that move broadly with production.  When constructing the monthly
 # schedules we distribute this bucket across the ramp-up profile instead of
@@ -218,6 +223,38 @@ def _spread_over_months(
     return [base_monthly + variable_total * (weight / total_weight) for weight in weights]
 
 
+def _compound_with_inflation_and_risk(
+    values: Sequence[float],
+    *,
+    annual_inflation_rate: float = ANNUAL_INFLATION_RATE,
+    annual_risk_rate: float = ANNUAL_RISK_RATE,
+) -> List[float]:
+    """Apply compounded monthly inflation and risk adjustments to ``values``."""
+
+    if not values:
+        return []
+
+    # Guard against negative rates that could collapse the schedule.
+    inflation_base = max(1.0 + annual_inflation_rate, 1e-6)
+    risk_base = max(1.0 + annual_risk_rate, 1e-6)
+
+    monthly_inflation = math.pow(inflation_base, 1.0 / 12.0) - 1.0
+    monthly_risk = math.pow(risk_base, 1.0 / 12.0) - 1.0
+    monthly_multiplier = (1.0 + monthly_inflation) * (1.0 + monthly_risk)
+    if not math.isfinite(monthly_multiplier) or monthly_multiplier <= 0:
+        monthly_multiplier = 1.0
+
+    compounded: List[float] = []
+    factor = 1.0
+    for idx, value in enumerate(values):
+        if idx == 0:
+            factor = 1.0
+        else:
+            factor *= monthly_multiplier
+        compounded.append(value * factor)
+    return compounded
+
+
 def _write_xlsx(path: Path, sheets: Sequence[Tuple[str, Sequence[Sequence[float | int | str | None]]]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -352,33 +389,43 @@ def _scenario_parameters(scenario: str) -> ScenarioData:
     monthly_ethanol_litres = [tons * ETHANOL_LITRES_PER_TON for tons in monthly_cassava_tons]
     monthly_animal_feed_ton = [tons * ANIMAL_FEED_TON_PER_TON for tons in monthly_cassava_tons]
 
-    monthly_ethanol_revenue = [litres * ETHANOL_PRICE for litres in monthly_ethanol_litres]
-    monthly_coproduct_revenue = [feed * ANIMAL_FEED_PRICE for feed in monthly_animal_feed_ton]
+    base_ethanol_revenue = [litres * ETHANOL_PRICE for litres in monthly_ethanol_litres]
+    base_coproduct_revenue = [feed * ANIMAL_FEED_PRICE for feed in monthly_animal_feed_ton]
+    monthly_ethanol_revenue = _compound_with_inflation_and_risk(base_ethanol_revenue)
+    monthly_coproduct_revenue = _compound_with_inflation_and_risk(base_coproduct_revenue)
     monthly_revenue_schedule = [eth + coproduct for eth, coproduct in zip(monthly_ethanol_revenue, monthly_coproduct_revenue)]
 
-    farmland_feedstock_cost_schedule = [tons * FARM_PRODUCTION_COST_PER_TON for tons in farmland_tons_schedule]
-    purchased_feedstock_cost_schedule = [tons * PURCHASE_COST_PER_TON for tons in purchased_tons_schedule]
+    base_farmland_feedstock_cost_schedule = [tons * FARM_PRODUCTION_COST_PER_TON for tons in farmland_tons_schedule]
+    base_purchased_feedstock_cost_schedule = [tons * PURCHASE_COST_PER_TON for tons in purchased_tons_schedule]
+    farmland_feedstock_cost_schedule = _compound_with_inflation_and_risk(base_farmland_feedstock_cost_schedule)
+    purchased_feedstock_cost_schedule = _compound_with_inflation_and_risk(base_purchased_feedstock_cost_schedule)
     monthly_feedstock_cost_schedule = [
         farm + purchase for farm, purchase in zip(farmland_feedstock_cost_schedule, purchased_feedstock_cost_schedule)
     ]
     annual_other_direct_cost = DIRECT_COST_OTHER * len(MONTHS)
-    monthly_other_direct_cost_schedule = _spread_over_months(annual_other_direct_cost, RAMP_UP_PROFILE)
+    monthly_other_direct_cost_schedule = _compound_with_inflation_and_risk(
+        _spread_over_months(annual_other_direct_cost, RAMP_UP_PROFILE)
+    )
     monthly_cogs_schedule = [
         feedstock + other_direct
         for feedstock, other_direct in zip(monthly_feedstock_cost_schedule, monthly_other_direct_cost_schedule)
     ]
 
     annual_staff_cost = (OPERATIONS_STAFF_COST + FARMING_STAFF_COST * farm_share) * len(MONTHS)
-    monthly_staff_cost_schedule = _spread_over_months(
-        annual_staff_cost,
-        RAMP_UP_PROFILE,
-        base_share=0.4,
+    monthly_staff_cost_schedule = _compound_with_inflation_and_risk(
+        _spread_over_months(
+            annual_staff_cost,
+            RAMP_UP_PROFILE,
+            base_share=0.4,
+        )
     )
     annual_other_opex = OTHER_OPEX_MONTHLY * len(MONTHS)
-    monthly_other_opex_schedule = _spread_over_months(
-        annual_other_opex,
-        RAMP_UP_PROFILE,
-        base_share=0.25,
+    monthly_other_opex_schedule = _compound_with_inflation_and_risk(
+        _spread_over_months(
+            annual_other_opex,
+            RAMP_UP_PROFILE,
+            base_share=0.25,
+        )
     )
 
     monthly_ebitda_schedule = [
