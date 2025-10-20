@@ -430,11 +430,14 @@ def compute_cost_tables(
                 fill_value=0.0,
             )
             .sort_index()
-            .reindex(months, fill_value=0.0)
+            .reindex(months)
         )
 
         # Forward-fill within the projection horizon so dated overrides continue
-        # to apply after their effective month.
+        # to apply after their effective month.  ``reindex`` intentionally keeps
+        # trailing rows as ``NaN`` instead of zero so the most recent user input
+        # flows through future months; otherwise the resample would zero-out the
+        # cost schedules once the explicit landing-page values stop.
         return pivot.ffill().fillna(0.0)
 
     direct = _prepare(direct_costs, category_col="Cost Category", value_column="Amount")

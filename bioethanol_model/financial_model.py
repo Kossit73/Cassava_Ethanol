@@ -61,10 +61,25 @@ class CassavaBioethanolModel:
         ]
         return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
+    def _table_frame(self, table: inputs.EditableTable) -> pd.DataFrame:
+        """Return the modelling frame, falling back to placeholder data."""
+
+        frame = table.model_frame
+        if frame is None:
+            frame = pd.DataFrame()
+        if not frame.empty:
+            return frame.copy()
+
+        raw = getattr(table, "data", None)
+        if isinstance(raw, pd.DataFrame) and not raw.empty:
+            return raw.copy()
+
+        return pd.DataFrame(columns=getattr(table, "columns", None) or [])
+
     def _prepare_page_for_scenario(self, scenario: str) -> inputs.InputLandingPage:
         page = copy.deepcopy(self.input_page)
         scenario = scenario.upper()
-        global_inputs = page.global_inputs.model_frame
+        global_inputs = self._table_frame(page.global_inputs)
         if not global_inputs.empty and "Parameter" in global_inputs.columns:
             lookup = global_inputs.set_index("Parameter")["Value"].to_dict()
         else:
@@ -81,7 +96,7 @@ class CassavaBioethanolModel:
         purchase_cost = _get_global("Cassava purchase cost per ton", 0.0)
         farm_share = float(np.clip(_get_global("Hybrid farm share", 0.0), 0.0, 1.0))
 
-        invest_df = page.initial_investment.model_frame
+        invest_df = self._table_frame(page.initial_investment)
         if not invest_df.empty and "Item" in invest_df.columns:
             farm_mask = invest_df["Item"].astype(str).str.contains("farm", case=False, na=False)
             numeric_costs = pd.to_numeric(invest_df.loc[farm_mask, "Cost"], errors="coerce").fillna(0.0)
@@ -95,7 +110,7 @@ class CassavaBioethanolModel:
                 mark_user = page.initial_investment.placeholder
                 page.initial_investment.set_data(invest_df, mark_user_input=mark_user)
 
-        staff_df = page.staff_costs_monthly.model_frame
+        staff_df = self._table_frame(page.staff_costs_monthly)
         if not staff_df.empty and "Department" in staff_df.columns:
             farm_staff = staff_df["Department"].astype(str).str.contains("farm", case=False, na=False)
             if farm_staff.any():
@@ -113,7 +128,7 @@ class CassavaBioethanolModel:
                 mark_user = page.staff_costs_monthly.placeholder or farm_staff.any()
                 page.staff_costs_monthly.set_data(staff_df, mark_user_input=mark_user)
 
-        positions_df = page.staff_positions.model_frame
+        positions_df = self._table_frame(page.staff_positions)
         if not positions_df.empty and "Department" in positions_df.columns:
             farm_positions = positions_df["Department"].astype(str).str.contains("farm", case=False, na=False)
             if farm_positions.any():
@@ -127,11 +142,11 @@ class CassavaBioethanolModel:
                 mark_user = page.staff_positions.placeholder or farm_positions.any()
                 page.staff_positions.set_data(positions_df, mark_user_input=mark_user)
 
-        direct_df = page.direct_costs_monthly.model_frame
+        direct_df = self._table_frame(page.direct_costs_monthly)
         if not direct_df.empty and "Cost Category" in direct_df.columns:
             feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
             if feed_mask.any():
-                prod_df = page.production_monthly.model_frame
+                prod_df = self._table_frame(page.production_monthly)
                 tons = pd.Series(dtype=float)
                 month_col = None
                 if not prod_df.empty:
@@ -167,9 +182,9 @@ class CassavaBioethanolModel:
     def _apply_staff_schedule(self, page: inputs.InputLandingPage):
         """Update monthly staff costs from the staff position salary schedule."""
 
-        schedule = compute_staff_schedule(page.staff_positions.model_frame)
+        schedule = compute_staff_schedule(self._table_frame(page.staff_positions))
 
-        staff_df = page.staff_costs_monthly.model_frame
+        staff_df = self._table_frame(page.staff_costs_monthly)
         if not staff_df.empty and "Department" in staff_df.columns:
             dept_salary = {}
             summary = schedule.department_summary
@@ -213,7 +228,7 @@ class CassavaBioethanolModel:
 
         projection = page.projection
         depreciation = compute_depreciation_schedule(
-            page.initial_investment.model_frame,
+            self._table_frame(page.initial_investment),
             projection.start_year,
             projection.end_year,
         )
@@ -221,7 +236,7 @@ class CassavaBioethanolModel:
         planning_start = projection.planning_start_timestamp
 
         production = compute_production_tables(
-            page.production_monthly.model_frame,
+            self._table_frame(page.production_monthly),
             projection.start_year,
             projection.end_year,
             planning_start=planning_start,
@@ -229,22 +244,22 @@ class CassavaBioethanolModel:
 
         revenue = compute_revenue_schedule(
             production,
-            page.revenue_inputs.model_frame,
-            page.inflation_schedule.model_frame,
+            self._table_frame(page.revenue_inputs),
+            self._table_frame(page.inflation_schedule),
             planning_start=planning_start,
         )
 
         cost_outputs = compute_cost_tables(
-            page.direct_costs_monthly.model_frame,
-            page.staff_costs_monthly.model_frame,
-            page.other_opex_monthly.model_frame,
-            page.inflation_schedule.model_frame,
+            self._table_frame(page.direct_costs_monthly),
+            self._table_frame(page.staff_costs_monthly),
+            self._table_frame(page.other_opex_monthly),
+            self._table_frame(page.inflation_schedule),
             projection.start_year,
             projection.end_year,
         )
 
         loan_schedule = compute_loan_schedule(
-            page.loan_schedule.model_frame,
+            self._table_frame(page.loan_schedule),
             projection.start_year,
             projection.end_year,
         )
@@ -252,11 +267,11 @@ class CassavaBioethanolModel:
         working_capital = compute_working_capital(
             revenue,
             cost_outputs,
-            page.accounts_receivable.model_frame,
-            page.inventory_payable.model_frame,
+            self._table_frame(page.accounts_receivable),
+            self._table_frame(page.inventory_payable),
         )
 
-        global_inputs = page.global_inputs.model_frame.set_index("Parameter")
+        global_inputs = self._table_frame(page.global_inputs).set_index("Parameter")
 
         def _get_global(parameter: str, default: float) -> float:
             if parameter in global_inputs.index:
@@ -284,7 +299,7 @@ class CassavaBioethanolModel:
         owner_share = _get_global("Owner share capital", float("nan"))
         if not np.isfinite(owner_share):
             owner_share = max(0.0, 1.0 - investor_share)
-        init_df = page.initial_investment.model_frame
+        init_df = self._table_frame(page.initial_investment)
         total_investment = float(init_df["Cost"].sum()) if "Cost" in init_df.columns else 0.0
 
         metrics = compute_key_metrics(
