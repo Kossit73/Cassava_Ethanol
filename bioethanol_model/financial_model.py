@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from . import inputs
+from .advanced_tools import AdvancedAnalyticsToolkit
 from .schedules import (
     compute_break_even,
     compute_cost_tables,
@@ -32,6 +33,7 @@ class CassavaBioethanolModel:
     input_page: inputs.InputLandingPage = field(default_factory=inputs.default_input_page)
     scenario: str = "FARM_ONLY"
     _scenario_cache: Dict[str, Tuple[str, Dict[str, object]]] = field(default_factory=dict, init=False, repr=False)
+    _advanced_tools: AdvancedAnalyticsToolkit | None = field(default=None, init=False, repr=False)
 
     SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
 
@@ -195,6 +197,17 @@ class CassavaBioethanolModel:
             page.staff_costs_monthly.set_data(staff_df, mark_user_input=mark_user)
 
         return schedule
+
+    # ------------------------------------------------------------------
+    # Advanced analytics extensions
+    # ------------------------------------------------------------------
+
+    def advanced_toolkit(self) -> AdvancedAnalyticsToolkit:
+        """Lazily instantiate the :class:`AdvancedAnalyticsToolkit` helper."""
+
+        if self._advanced_tools is None:
+            self._advanced_tools = AdvancedAnalyticsToolkit(self)
+        return self._advanced_tools
 
     def build(self, scenario: str | None = None) -> Dict[str, object]:
         scenario_name = (scenario or self.scenario or "FARM_ONLY").upper()
