@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import base64
+import logging
 import math
-from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
-from xml.sax.saxutils import escape
+import os
+import signal
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from dataclasses import dataclass
+from functools import wraps
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from xml.sax.saxutils import escape
 
 try:  # pragma: no cover - lightweight shim for offline execution
     import numpy  # noqa: F401
@@ -13,6 +21,122 @@ except ModuleNotFoundError:  # pragma: no cover
     from tools.numpy_stub import install_numpy_stub
 
     install_numpy_stub()
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+try:  # pragma: no cover - optional dependencies
+    import pandas as pd  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    pd = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    np = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import numpy_financial as npf  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    npf = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from scipy.stats import (  # type: ignore
+        norm,
+        lognorm,
+        uniform,
+        expon,
+        binom,
+        poisson,
+        geom,
+        bernoulli,
+        chi2,
+        gamma,
+        weibull_min,
+        hypergeom,
+        multinomial,
+        beta,
+        f,
+    )
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    (
+        norm,
+        lognorm,
+        uniform,
+        expon,
+        binom,
+        poisson,
+        geom,
+        bernoulli,
+        chi2,
+        gamma,
+        weibull_min,
+        hypergeom,
+        multinomial,
+        beta,
+        f,
+    ) = (None,) * 15
+
+try:  # pragma: no cover - optional dependencies
+    from scipy import stats  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    stats = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from scipy.optimize import minimize  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    minimize = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from sklearn.linear_model import LinearRegression  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    LinearRegression = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from sklearn.preprocessing import StandardScaler  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    StandardScaler = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from sklearn.neural_network import MLPRegressor  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    MLPRegressor = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from statsmodels.tsa.arima.model import ARIMA  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    ARIMA = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import networkx as nx  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    nx = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import plotly.graph_objects as go  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    go = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import matplotlib.pyplot as plt  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    plt = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from fastapi import HTTPException  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    HTTPException = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    import plotly.io as pio  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    pio = None  # type: ignore
+
+try:  # pragma: no cover - optional dependencies
+    from xlsxwriter.exceptions import DuplicateWorksheetName  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - optional dependencies
+    DuplicateWorksheetName = None  # type: ignore
 
 
 SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
