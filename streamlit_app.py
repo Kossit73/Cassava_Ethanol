@@ -183,9 +183,21 @@ YEARLY_INCREMENT_TABLES = {
     "Staff Costs Monthly": {
         "month_column": "Month",
         "id_columns": ["Department"],
-        "value_column": "Cost",
-        "label": "Monthly cost",
-        "value_step": 100.0,
+        "value_columns": {
+            "Headcount": {
+                "label": "Monthly headcount",
+                "value_step": 1.0,
+                "value_format": "%.0f",
+                "mode": "absolute",
+                "integer": True,
+            },
+            "Cost": {
+                "label": "Monthly cost",
+                "value_step": 500.0,
+                "value_format": "%.2f",
+                "mode": "percent",
+            },
+        },
     },
     "Other Opex Monthly": {
         "month_column": "Month",
@@ -1381,12 +1393,50 @@ def _render_yearly_increment_helper(
 
     month_column = config.get("month_column")
     value_column = config.get("value_column")
+    value_columns_config: Dict[str, Dict[str, object]] | None = config.get("value_columns")
     id_columns: List[str] = list(config.get("id_columns", []))
 
-    if month_column not in df.columns or value_column not in df.columns:
+    if not month_column or month_column not in df.columns:
         st.warning("The selected table does not support yearly increments.")
         st.session_state.pop(state_key, None)
         return False, None
+
+    if value_columns_config:
+        column_configs = {col: dict(settings) for col, settings in value_columns_config.items()}
+    else:
+        if not value_column or value_column not in df.columns:
+            st.warning("The selected table does not support yearly increments.")
+            st.session_state.pop(state_key, None)
+            return False, None
+        column_configs = {
+            value_column: {
+                "label": config.get("label", value_column),
+                "value_step": config.get("value_step", 1.0),
+                "value_format": config.get("value_format", "%.2f"),
+                "mode": config.get("mode", "percent"),
+            }
+        }
+
+    if not column_configs:
+        st.warning("No editable columns were found for yearly increments.")
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    missing_columns = [col for col in column_configs if col not in df.columns]
+    if missing_columns:
+        st.warning(
+            "Unable to locate the required columns in the selected table: "
+            + ", ".join(missing_columns)
+        )
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    for column, settings in column_configs.items():
+        settings.setdefault("label", column)
+        settings.setdefault("value_step", 1.0)
+        settings.setdefault("value_format", "%.2f")
+        settings.setdefault("mode", config.get("mode", "percent"))
+        settings.setdefault("integer", False)
 
     present_id_columns = [col for col in id_columns if col in df.columns]
     if not present_id_columns:
@@ -1415,8 +1465,6 @@ def _render_yearly_increment_helper(
 
     label_parts = [part for part in (_label_for_value(row.get(col)) for col in present_id_columns) if part]
     identifier = " / ".join(label_parts) if label_parts else f"Row {row_idx + 1}"
-    helper_label = config.get("label", value_column)
-
     mask = pd.Series(True, index=df.index)
     for column, value in id_values.items():
         if column not in df.columns:
@@ -1427,7 +1475,7 @@ def _render_yearly_increment_helper(
             mask &= df[column] == value
 
     relevant = df.loc[mask].copy()
-    existing_amounts: Dict[int, float] = {}
+    existing_amounts: Dict[str, Dict[int, float]] = {column: {} for column in column_configs}
     if not relevant.empty:
         month_periods = pd.to_datetime(
             relevant[month_column].astype(str), errors="coerce"
@@ -1437,88 +1485,120 @@ def _render_yearly_increment_helper(
         month_periods = month_periods[valid_mask]
         if not relevant.empty:
             relevant["__helper_year"] = month_periods.dt.year
-            relevant["__helper_amount"] = pd.to_numeric(relevant[value_column], errors="coerce")
+            for column in column_configs:
+                helper_column = f"__helper_amount_{column}"
+                relevant[helper_column] = pd.to_numeric(relevant[column], errors="coerce")
             for year, group in relevant.groupby("__helper_year"):
-                values = group["__helper_amount"].dropna()
-                if not values.empty:
-                    existing_amounts[int(year)] = float(values.iloc[-1])
+                for column in column_configs:
+                    values = group[f"__helper_amount_{column}"].dropna()
+                    if not values.empty:
+                        existing_amounts[column][int(year)] = float(values.iloc[-1])
 
-    numeric_default = pd.to_numeric(pd.Series([row.get(value_column)]), errors="coerce").dropna()
-    baseline_default = existing_amounts.get(years[0])
-    if baseline_default is None and not numeric_default.empty:
-        baseline_default = float(numeric_default.iloc[-1])
-    if baseline_default is None:
-        baseline_default = 0.0
+    baseline_defaults: Dict[str, float] = {}
+    increment_defaults: Dict[str, List[float]] = {}
+    for column in column_configs:
+        numeric_default = pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").dropna()
+        baseline_default = existing_amounts[column].get(years[0])
+        if baseline_default is None and not numeric_default.empty:
+            baseline_default = float(numeric_default.iloc[-1])
+        if baseline_default is None:
+            baseline_default = 0.0
+        baseline_defaults[column] = float(baseline_default)
 
-    increment_defaults: List[float] = []
-    previous_amount = baseline_default
-    for year in years[1:]:
-        current_amount = existing_amounts.get(year)
-        if current_amount is not None and previous_amount not in (None, 0):
-            try:
-                increment_defaults.append(float((current_amount / previous_amount) - 1.0) * 100.0)
-                previous_amount = current_amount
-            except ZeroDivisionError:
-                increment_defaults.append(0.0)
-        else:
-            increment_defaults.append(0.0)
-            if current_amount is not None:
-                previous_amount = current_amount
-
-    value_step = float(config.get("value_step", 1.0))
-    value_format = str(config.get("value_format", "%.2f"))
-    mode = str(config.get("mode", "percent")).lower()
+        increments: List[float] = []
+        previous_amount = baseline_default
+        for year in years[1:]:
+            current_amount = existing_amounts[column].get(year)
+            if current_amount is not None and previous_amount not in (None, 0):
+                try:
+                    increments.append(float((current_amount / previous_amount) - 1.0) * 100.0)
+                    previous_amount = current_amount
+                except ZeroDivisionError:
+                    increments.append(0.0)
+            else:
+                increments.append(0.0)
+                if current_amount is not None:
+                    previous_amount = current_amount
+        increment_defaults[column] = increments
 
     st.markdown(f"**Yearly profile for {identifier}**")
-    if mode == "absolute":
+    modes = {str(column_configs[column].get("mode", "percent")).lower() for column in column_configs}
+    if modes == {"absolute"}:
         st.caption(
-            "Enter the monthly value that should apply at the start of each year. "
+            "Enter the monthly values that should apply at the start of each year. "
             "The helper will expand these yearly settings across all months in the projection horizon."
         )
-    else:
+    elif modes == {"percent"}:
         st.caption(
             "Set the baseline monthly value for the first projection year and specify the "
             "percentage change that applies at the start of each subsequent year. The "
             "helper will regenerate monthly rows for this cost item across the horizon."
         )
+    else:
+        st.caption(
+            "Configure the yearly profile for each metric below. Absolute sections capture the "
+            "monthly values to use at the start of each year, while percentage sections apply "
+            "growth rates to the prior year's monthly figure."
+        )
 
     form_key = f"{state_key}_form"
+    form_state: Dict[str, Dict[str, object]] = {}
     with st.form(form_key):
-        if mode == "absolute":
-            year_inputs: List[float] = []
-            default_amount = baseline_default
-            for idx, year in enumerate(years):
-                if idx == 0:
-                    default_amount = baseline_default
-                else:
-                    default_amount = existing_amounts.get(year, year_inputs[-1] if year_inputs else baseline_default)
-                year_inputs.append(
-                    st.number_input(
-                        f"{year} {helper_label}",
-                        value=float(default_amount),
-                        step=value_step,
-                        format=value_format,
-                    )
-                )
-        else:
-            baseline_input = st.number_input(
-                f"{years[0]} {helper_label}",
-                value=float(baseline_default),
-                step=value_step,
-                format=value_format,
-            )
+        for column, settings in column_configs.items():
+            label = str(settings.get("label", column))
+            mode = str(settings.get("mode", "percent")).lower()
+            value_step = float(settings.get("value_step", 1.0))
+            value_format = str(settings.get("value_format", "%.2f"))
+            key_prefix = f"{form_key}_{column}"
 
-            increment_inputs: List[float] = []
-            for idx, year in enumerate(years[1:]):
-                default_increment = increment_defaults[idx] if idx < len(increment_defaults) else 0.0
-                increment_inputs.append(
-                    st.number_input(
-                        f"{year} yearly increment (%)",
-                        value=float(default_increment),
-                        step=0.10,
-                        format="%.2f",
+            st.markdown(f"**{label}**")
+
+            if mode == "absolute":
+                year_inputs: List[float] = []
+                default_amount = baseline_defaults[column]
+                for idx, year in enumerate(years):
+                    if idx == 0:
+                        default_amount = baseline_defaults[column]
+                    else:
+                        previous_inputs = year_inputs[-1] if year_inputs else baseline_defaults[column]
+                        default_amount = existing_amounts[column].get(year, previous_inputs)
+                    year_inputs.append(
+                        st.number_input(
+                            f"{year} {label}",
+                            value=float(default_amount),
+                            step=value_step,
+                            format=value_format,
+                            key=f"{key_prefix}_{year}",
+                        )
                     )
+                form_state[column] = {"mode": "absolute", "inputs": year_inputs}
+            else:
+                baseline_input = st.number_input(
+                    f"{years[0]} {label}",
+                    value=float(baseline_defaults[column]),
+                    step=value_step,
+                    format=value_format,
+                    key=f"{key_prefix}_baseline",
                 )
+
+                increment_inputs: List[float] = []
+                defaults = increment_defaults.get(column, [])
+                for idx, year in enumerate(years[1:]):
+                    default_increment = defaults[idx] if idx < len(defaults) else 0.0
+                    increment_inputs.append(
+                        st.number_input(
+                            f"{year} yearly increment (%)",
+                            value=float(default_increment),
+                            step=0.10,
+                            format="%.2f",
+                            key=f"{key_prefix}_inc_{year}",
+                        )
+                    )
+                form_state[column] = {
+                    "mode": "percent",
+                    "baseline": baseline_input,
+                    "increments": increment_inputs,
+                }
 
         applied = st.form_submit_button("Apply yearly profile")
 
@@ -1528,42 +1608,60 @@ def _render_yearly_increment_helper(
     if not applied:
         return False, None
 
-    year_amounts: Dict[int, float] = {}
-    if mode == "absolute":
-        for year, value in zip(years, year_inputs):
-            amount = float(value) if np.isfinite(value) else 0.0
-            year_amounts[int(year)] = amount
-        last_amount = float(year_inputs[-1]) if year_inputs else 0.0
-    else:
-        baseline_value = float(baseline_input) if np.isfinite(baseline_input) else 0.0
-        last_amount = float(baseline_value)
-
-        for offset, year in enumerate(years):
-            if offset == 0:
+    column_year_amounts: Dict[str, Dict[int, float]] = {}
+    last_amounts: Dict[str, float] = {}
+    for column, settings in column_configs.items():
+        state = form_state.get(column, {})
+        mode = str(settings.get("mode", "percent")).lower()
+        if mode == "absolute":
+            inputs = [float(value) if np.isfinite(value) else 0.0 for value in state.get("inputs", [])]
+            year_amounts = {}
+            last_amount = 0.0
+            for year, value in zip(years, inputs):
+                amount = float(value) if np.isfinite(value) else 0.0
+                year_amounts[int(year)] = amount
+                last_amount = amount
+            column_year_amounts[column] = year_amounts
+            last_amounts[column] = last_amount
+        else:
+            baseline_value_raw = state.get("baseline", baseline_defaults.get(column, 0.0))
+            baseline_value = float(baseline_value_raw) if np.isfinite(baseline_value_raw) else 0.0
+            increments_raw = state.get("increments", [])
+            increments = [float(value) if np.isfinite(value) else 0.0 for value in increments_raw]
+            year_amounts = {}
+            last_amount = float(baseline_value)
+            for offset, year in enumerate(years):
+                if offset == 0:
+                    year_amounts[int(year)] = last_amount
+                    continue
+                increment_value = increments[offset - 1] if offset - 1 < len(increments) else 0.0
+                rate = float(increment_value) / 100.0
+                last_amount = float(last_amount) * (1.0 + rate)
+                if not np.isfinite(last_amount):
+                    last_amount = 0.0
                 year_amounts[int(year)] = last_amount
-                continue
-
-            increment_raw = increment_inputs[offset - 1] if offset - 1 < len(increment_inputs) else 0.0
-            increment_value = float(increment_raw) if np.isfinite(increment_raw) else 0.0
-            rate = increment_value / 100.0
-            last_amount = float(last_amount) * (1.0 + rate)
-            if not np.isfinite(last_amount):
-                last_amount = 0.0
-            year_amounts[int(year)] = last_amount
+            column_year_amounts[column] = year_amounts
+            last_amounts[column] = last_amount
 
     periods = pd.period_range(f"{years[0]}-01", f"{years[-1]}-12", freq="M")
     template = {column: row.get(column) for column in df.columns if column != month_column}
 
     new_records = []
-    fallback_amount = year_amounts.get(int(years[-1]), last_amount if np.isfinite(last_amount) else 0.0)
     for period in periods:
         record = template.copy()
         record[month_column] = period.strftime("%Y-%m")
-        record[value_column] = year_amounts.get(int(period.year), fallback_amount)
+        for column, year_amounts in column_year_amounts.items():
+            fallback = year_amounts.get(int(years[-1]), last_amounts.get(column, 0.0))
+            record[column] = year_amounts.get(int(period.year), fallback)
         new_records.append(record)
 
     new_rows = pd.DataFrame(new_records, columns=df.columns)
-    new_rows[value_column] = pd.to_numeric(new_rows[value_column], errors="coerce").fillna(0.0)
+    for column, settings in column_configs.items():
+        numeric_series = pd.to_numeric(new_rows[column], errors="coerce").fillna(0.0)
+        if settings.get("integer"):
+            new_rows[column] = numeric_series.round().astype(int)
+        else:
+            new_rows[column] = numeric_series
 
     remaining = df.loc[~mask].copy()
     combined = pd.concat([remaining, new_rows], ignore_index=True)
