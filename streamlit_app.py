@@ -171,6 +171,30 @@ CHANGE_BUTTON_CONFIG = {
     },
 }
 
+YEARLY_INCREMENT_TABLES = {
+    "Direct Costs Monthly": {
+        "month_column": "Month",
+        "id_columns": ["Cost Category"],
+        "value_column": "Amount",
+        "label": "Monthly amount",
+        "value_step": 1000.0,
+    },
+    "Staff Costs Monthly": {
+        "month_column": "Month",
+        "id_columns": ["Department"],
+        "value_column": "Cost",
+        "label": "Monthly cost",
+        "value_step": 100.0,
+    },
+    "Other Opex Monthly": {
+        "month_column": "Month",
+        "id_columns": ["Category"],
+        "value_column": "Amount",
+        "label": "Monthly amount",
+        "value_step": 500.0,
+    },
+}
+
 DEFAULT_SENSITIVITY_SCENARIOS: List[SensitivityScenario] = [
     SensitivityScenario("Corporate tax +1pp", "Corporate tax rate", 0.01),
     SensitivityScenario("Corporate tax -1pp", "Corporate tax rate", -0.01),
@@ -1336,6 +1360,185 @@ def _row_editor_form(
     return df, updated, derived_metrics
 
 
+def _render_yearly_increment_helper(
+    page: InputLandingPage,
+    table: EditableTable,
+    df: pd.DataFrame,
+    row_idx: int,
+    config: Dict[str, object],
+    state_key: str,
+) -> tuple[bool, pd.DataFrame | None]:
+    """Render the yearly increment editor for a cost item.
+
+    Returns ``(applied, dataframe)`` where ``dataframe`` contains the updated table
+    contents when ``applied`` is ``True``.
+    """
+
+    month_column = config.get("month_column")
+    value_column = config.get("value_column")
+    id_columns: List[str] = list(config.get("id_columns", []))
+
+    if month_column not in df.columns or value_column not in df.columns:
+        st.warning("The selected table does not support yearly increments.")
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    present_id_columns = [col for col in id_columns if col in df.columns]
+    if not present_id_columns:
+        st.warning("Unable to identify the cost item for yearly editing.")
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    if row_idx not in df.index:
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    years = list(range(page.projection.start_year, page.projection.end_year + 1))
+    if not years:
+        st.warning("Projection horizon has no years to edit.")
+        st.session_state.pop(state_key, None)
+        return False, None
+
+    row = df.loc[row_idx]
+    id_values = {column: row.get(column) for column in present_id_columns}
+
+    def _label_for_value(value: object) -> str:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ""
+        text = str(value).strip()
+        return text
+
+    label_parts = [part for part in (_label_for_value(row.get(col)) for col in present_id_columns) if part]
+    identifier = " / ".join(label_parts) if label_parts else f"Row {row_idx + 1}"
+    helper_label = config.get("label", value_column)
+
+    mask = pd.Series(True, index=df.index)
+    for column, value in id_values.items():
+        if column not in df.columns:
+            continue
+        if pd.isna(value):
+            mask &= df[column].isna()
+        else:
+            mask &= df[column] == value
+
+    relevant = df.loc[mask].copy()
+    existing_amounts: Dict[int, float] = {}
+    if not relevant.empty:
+        month_periods = pd.to_datetime(relevant[month_column].astype(str), errors="coerce").dt.to_period("M")
+        valid_mask = month_periods.notna()
+        relevant = relevant.loc[valid_mask].copy()
+        month_periods = month_periods[valid_mask]
+        if not relevant.empty:
+            relevant["__helper_year"] = month_periods.year
+            relevant["__helper_amount"] = pd.to_numeric(relevant[value_column], errors="coerce")
+            for year, group in relevant.groupby("__helper_year"):
+                values = group["__helper_amount"].dropna()
+                if not values.empty:
+                    existing_amounts[int(year)] = float(values.iloc[-1])
+
+    numeric_default = pd.to_numeric(pd.Series([row.get(value_column)]), errors="coerce").dropna()
+    baseline_default = existing_amounts.get(years[0])
+    if baseline_default is None and not numeric_default.empty:
+        baseline_default = float(numeric_default.iloc[-1])
+    if baseline_default is None:
+        baseline_default = 0.0
+
+    increment_defaults: List[float] = []
+    previous_amount = baseline_default
+    for year in years[1:]:
+        current_amount = existing_amounts.get(year)
+        if current_amount is not None and previous_amount not in (None, 0):
+            try:
+                increment_defaults.append(float((current_amount / previous_amount) - 1.0) * 100.0)
+                previous_amount = current_amount
+            except ZeroDivisionError:
+                increment_defaults.append(0.0)
+        else:
+            increment_defaults.append(0.0)
+            if current_amount is not None:
+                previous_amount = current_amount
+
+    value_step = float(config.get("value_step", 1.0))
+    value_format = str(config.get("value_format", "%.2f"))
+
+    st.markdown(f"**Yearly profile for {identifier}**")
+    st.caption(
+        "Set the baseline monthly value for the first projection year and specify the "
+        "percentage change that applies at the start of each subsequent year. The "
+        "helper will regenerate monthly rows for this cost item across the horizon."
+    )
+
+    form_key = f"{state_key}_form"
+    with st.form(form_key):
+        baseline_input = st.number_input(
+            f"{years[0]} {helper_label}",
+            value=float(baseline_default),
+            step=value_step,
+            format=value_format,
+        )
+
+        increment_inputs: List[float] = []
+        for idx, year in enumerate(years[1:]):
+            default_increment = increment_defaults[idx] if idx < len(increment_defaults) else 0.0
+            increment_inputs.append(
+                st.number_input(
+                    f"{year} yearly increment (%)",
+                    value=float(default_increment),
+                    step=0.10,
+                    format="%.2f",
+                )
+            )
+
+        applied = st.form_submit_button("Apply yearly profile")
+
+    if st.button("Close yearly helper", key=f"close_{state_key}"):
+        st.session_state.pop(state_key, None)
+
+    if not applied:
+        return False, None
+
+    baseline_value = float(baseline_input) if np.isfinite(baseline_input) else 0.0
+    year_amounts: Dict[int, float] = {years[0]: float(baseline_value)}
+
+    previous_amount = float(baseline_value)
+    for year, increment in zip(years[1:], increment_inputs):
+        increment_value = float(increment) if np.isfinite(increment) else 0.0
+        rate = increment_value / 100.0
+        previous_amount = float(previous_amount) * (1.0 + rate)
+        year_amounts[int(year)] = previous_amount
+
+    periods = pd.period_range(f"{years[0]}-01", f"{years[-1]}-12", freq="M")
+    template = {column: row.get(column) for column in df.columns if column != month_column}
+
+    new_records = []
+    for period in periods:
+        record = template.copy()
+        record[month_column] = period.strftime("%Y-%m")
+        record[value_column] = year_amounts.get(int(period.year), previous_amount)
+        new_records.append(record)
+
+    new_rows = pd.DataFrame(new_records, columns=df.columns)
+    new_rows[value_column] = pd.to_numeric(new_rows[value_column], errors="coerce")
+
+    remaining = df.loc[~mask].copy()
+    combined = pd.concat([remaining, new_rows], ignore_index=True)
+    if month_column in combined.columns:
+        combined["__sort_month"] = pd.to_datetime(combined[month_column].astype(str), errors="coerce")
+        sort_cols = ["__sort_month"]
+        for column in present_id_columns:
+            if column in combined.columns:
+                sort_cols.append(column)
+        combined = combined.sort_values(sort_cols).drop(columns="__sort_month")
+        combined[month_column] = combined[month_column].astype(str)
+
+    combined = combined[df.columns]
+
+    st.success("Yearly increments applied to monthly rows.")
+    st.session_state.pop(state_key, None)
+
+    return True, combined
+
+
 def _modify_default_inputs(page: InputLandingPage) -> None:
     """Allow users to tweak any default input/figure via focused controls."""
 
@@ -1397,6 +1600,8 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
 
     cascade_applied = False
     cascade_metrics: Tuple[float, float] | None = None
+    helper_applied = False
+    yearly_helper_config = YEARLY_INCREMENT_TABLES.get(table.name)
 
     if table.name == "Production Monthly":
         _display_production_metrics(derived_metrics)
@@ -1436,8 +1641,37 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
             if cascade_metrics is not None:
                 derived_metrics = cascade_metrics
 
+    elif yearly_helper_config is not None:
+        st.markdown("---")
+        st.markdown("**Cascade yearly increments to monthly rows**")
+        st.caption(
+            "Use the helper to set yearly percentage changes for this cost item. The model will "
+            "rebuild the monthly schedule using the projected values across the full horizon."
+        )
+        helper_state_key = f"yearly_increment_open_{table.name.replace(' ', '_')}_{row_idx}"
+        open_button_key = f"open_yearly_helper_{table.name.replace(' ', '_')}_{row_idx}"
+        if st.button("Edit yearly profile", key=open_button_key):
+            st.session_state[helper_state_key] = True
+
+        if st.session_state.get(helper_state_key):
+            applied, helper_df = _render_yearly_increment_helper(
+                page,
+                table,
+                df_updated,
+                row_idx,
+                yearly_helper_config,
+                helper_state_key,
+            )
+            if applied and helper_df is not None:
+                df_updated = helper_df
+                helper_applied = True
+
     st.caption("Updates are applied immediately. Use the section tables below for bulk edits or row management.")
-    if cascade_applied:
+    if helper_applied:
+        table.set_data(df_updated, mark_user_input=True)
+        _mark_inputs_dirty()
+        _update_table_editor_state(table)
+    elif cascade_applied:
         df = table.data.copy()
         if not df.equals(df_updated):
             table.set_data(df, mark_user_input=True)
