@@ -48,15 +48,15 @@ class EditableTable:
             ignored; missing columns are added with ``None`` values.
         mark_user_input:
             When ``True`` the table is flagged as containing user-provided data
-            (placeholders are disabled). ``False`` keeps the existing
-            placeholder flag, and ``None`` leaves the flag unchanged.
+            (placeholders are disabled). ``False`` resets the table to placeholder
+            mode, and ``None`` leaves the flag unchanged.
         """
 
         self._set_data(df)
         if mark_user_input is True:
             self.placeholder = False
         elif mark_user_input is False:
-            self.placeholder = self.placeholder
+            self.placeholder = True
 
     def mark_placeholder(self, value: bool) -> None:
         self.placeholder = bool(value)
@@ -121,6 +121,10 @@ class ProjectionHorizon:
     planning_start: str | None = None
 
     def __post_init__(self) -> None:
+        if self.start_year > self.end_year:
+            raise ValueError(
+                f"Projection horizon start year {self.start_year} cannot exceed end year {self.end_year}."
+            )
         if not self.planning_start:
             self.planning_start = f"{self.start_year:04d}-01"
         self.clamp_planning_start()
