@@ -47,6 +47,72 @@ def _coerce_numeric_series(
     return coerced
 
 
+def _build_inflation_factors(
+    months: pd.DatetimeIndex, inflation_schedule: pd.DataFrame
+) -> pd.Series:
+    """Return cumulative inflation multipliers aligned to *months*."""
+
+    if months.empty:
+        return pd.Series(dtype=float)
+
+    factors = pd.Series(1.0, index=months)
+    if inflation_schedule is None or inflation_schedule.empty:
+        return factors
+
+    schedule = inflation_schedule.copy()
+    if "Year" not in schedule.columns:
+        return factors
+
+    year_series = _coerce_numeric_series(schedule["Year"], "Year").dropna()
+    if year_series.empty:
+        return factors
+
+    if "CPI" in schedule.columns:
+        cpi_series = _coerce_numeric_series(schedule["CPI"], "CPI", fill_value=0.0)
+    else:
+        cpi_series = pd.Series(0.0, index=schedule.index, dtype=float)
+
+    inflation_rates: Dict[int, float] = {}
+    for idx, year_value in year_series.items():
+        try:
+            year = int(round(float(year_value)))
+        except (TypeError, ValueError):
+            continue
+        if year in inflation_rates:
+            continue
+        rate_raw = float(cpi_series.loc[idx]) if idx in cpi_series.index else 0.0
+        if not pd.isna(rate_raw):
+            rate = float(rate_raw)
+            if abs(rate) > 1.0 and abs(rate) <= 100.0:
+                rate = rate / 100.0
+        else:
+            rate = 0.0
+        inflation_rates[year] = rate
+
+    if not inflation_rates:
+        return factors
+
+    horizon_years = sorted({month.year for month in months})
+    if not horizon_years:
+        return factors
+
+    cumulative = 1.0
+    last_rate = inflation_rates.get(horizon_years[0], 0.0)
+    for idx, year in enumerate(horizon_years):
+        if idx == 0:
+            if year in inflation_rates:
+                last_rate = inflation_rates[year]
+            factors.loc[factors.index.year == year] = 1.0
+            continue
+
+        rate = inflation_rates.get(year, last_rate)
+        last_rate = rate
+        cumulative *= 1.0 + rate
+        factors.loc[factors.index.year == year] = cumulative
+
+    return factors
+
+
 @dataclass
 class DepreciationOutput:
     monthly: pd.DataFrame
@@ -497,12 +563,15 @@ def compute_cost_tables(
     end_year: int,
 ) -> Dict[str, CostOutput]:
     months = year_month_range(start_year, end_year)
+    inflation_factors = _build_inflation_factors(months, inflation_schedule)
 
     def _prepare(
         df: pd.DataFrame,
         *,
         category_col: str,
         value_column: str,
+        carry_forward: bool = True,
+        apply_inflation: bool = False,
     ) -> pd.DataFrame:
         """Convert a landing-page table into a monthly cost matrix.
 
@@ -543,11 +612,22 @@ def compute_cost_tables(
             .reindex(months, fill_value=0.0)
         )
 
-        # Forward-fill within the projection horizon so dated overrides continue
-        # to apply after their effective month.
-        return pivot.ffill().fillna(0.0)
+        if carry_forward:
+            pivot = pivot.ffill()
+        pivot = pivot.fillna(0.0)
 
-    direct = _prepare(direct_costs, category_col="Cost Category", value_column="Amount")
+        if apply_inflation and not inflation_factors.empty:
+            pivot = pivot.mul(inflation_factors, axis=0)
+
+        return pivot
+
+    direct = _prepare(
+        direct_costs,
+        category_col="Cost Category",
+        value_column="Amount",
+        carry_forward=True,
+        apply_inflation=True,
+    )
     staff = _prepare(staff_costs, category_col="Department", value_column="Cost")
     other = _prepare(other_opex, category_col="Category", value_column="Amount")
 
