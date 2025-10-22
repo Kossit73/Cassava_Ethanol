@@ -178,6 +178,7 @@ YEARLY_INCREMENT_TABLES = {
         "value_column": "Amount",
         "label": "Monthly amount",
         "value_step": 1000.0,
+        "mode": "absolute",
     },
     "Staff Costs Monthly": {
         "month_column": "Month",
@@ -1466,34 +1467,58 @@ def _render_yearly_increment_helper(
 
     value_step = float(config.get("value_step", 1.0))
     value_format = str(config.get("value_format", "%.2f"))
+    mode = str(config.get("mode", "percent")).lower()
 
     st.markdown(f"**Yearly profile for {identifier}**")
-    st.caption(
-        "Set the baseline monthly value for the first projection year and specify the "
-        "percentage change that applies at the start of each subsequent year. The "
-        "helper will regenerate monthly rows for this cost item across the horizon."
-    )
+    if mode == "absolute":
+        st.caption(
+            "Enter the monthly value that should apply at the start of each year. "
+            "The helper will expand these yearly settings across all months in the projection horizon."
+        )
+    else:
+        st.caption(
+            "Set the baseline monthly value for the first projection year and specify the "
+            "percentage change that applies at the start of each subsequent year. The "
+            "helper will regenerate monthly rows for this cost item across the horizon."
+        )
 
     form_key = f"{state_key}_form"
     with st.form(form_key):
-        baseline_input = st.number_input(
-            f"{years[0]} {helper_label}",
-            value=float(baseline_default),
-            step=value_step,
-            format=value_format,
-        )
-
-        increment_inputs: List[float] = []
-        for idx, year in enumerate(years[1:]):
-            default_increment = increment_defaults[idx] if idx < len(increment_defaults) else 0.0
-            increment_inputs.append(
-                st.number_input(
-                    f"{year} yearly increment (%)",
-                    value=float(default_increment),
-                    step=0.10,
-                    format="%.2f",
+        if mode == "absolute":
+            year_inputs: List[float] = []
+            default_amount = baseline_default
+            for idx, year in enumerate(years):
+                if idx == 0:
+                    default_amount = baseline_default
+                else:
+                    default_amount = existing_amounts.get(year, year_inputs[-1] if year_inputs else baseline_default)
+                year_inputs.append(
+                    st.number_input(
+                        f"{year} {helper_label}",
+                        value=float(default_amount),
+                        step=value_step,
+                        format=value_format,
+                    )
                 )
+        else:
+            baseline_input = st.number_input(
+                f"{years[0]} {helper_label}",
+                value=float(baseline_default),
+                step=value_step,
+                format=value_format,
             )
+
+            increment_inputs: List[float] = []
+            for idx, year in enumerate(years[1:]):
+                default_increment = increment_defaults[idx] if idx < len(increment_defaults) else 0.0
+                increment_inputs.append(
+                    st.number_input(
+                        f"{year} yearly increment (%)",
+                        value=float(default_increment),
+                        step=0.10,
+                        format="%.2f",
+                    )
+                )
 
         applied = st.form_submit_button("Apply yearly profile")
 
@@ -1503,22 +1528,28 @@ def _render_yearly_increment_helper(
     if not applied:
         return False, None
 
-    baseline_value = float(baseline_input) if np.isfinite(baseline_input) else 0.0
     year_amounts: Dict[int, float] = {}
-    last_amount = float(baseline_value)
+    if mode == "absolute":
+        for year, value in zip(years, year_inputs):
+            amount = float(value) if np.isfinite(value) else 0.0
+            year_amounts[int(year)] = amount
+        last_amount = float(year_inputs[-1]) if year_inputs else 0.0
+    else:
+        baseline_value = float(baseline_input) if np.isfinite(baseline_input) else 0.0
+        last_amount = float(baseline_value)
 
-    for offset, year in enumerate(years):
-        if offset == 0:
+        for offset, year in enumerate(years):
+            if offset == 0:
+                year_amounts[int(year)] = last_amount
+                continue
+
+            increment_raw = increment_inputs[offset - 1] if offset - 1 < len(increment_inputs) else 0.0
+            increment_value = float(increment_raw) if np.isfinite(increment_raw) else 0.0
+            rate = increment_value / 100.0
+            last_amount = float(last_amount) * (1.0 + rate)
+            if not np.isfinite(last_amount):
+                last_amount = 0.0
             year_amounts[int(year)] = last_amount
-            continue
-
-        increment_raw = increment_inputs[offset - 1] if offset - 1 < len(increment_inputs) else 0.0
-        increment_value = float(increment_raw) if np.isfinite(increment_raw) else 0.0
-        rate = increment_value / 100.0
-        last_amount = float(last_amount) * (1.0 + rate)
-        if not np.isfinite(last_amount):
-            last_amount = 0.0
-        year_amounts[int(year)] = last_amount
 
     periods = pd.period_range(f"{years[0]}-01", f"{years[-1]}-12", freq="M")
     template = {column: row.get(column) for column in df.columns if column != month_column}
