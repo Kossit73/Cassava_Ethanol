@@ -1424,12 +1424,14 @@ def _render_yearly_increment_helper(
     relevant = df.loc[mask].copy()
     existing_amounts: Dict[int, float] = {}
     if not relevant.empty:
-        month_periods = pd.to_datetime(relevant[month_column].astype(str), errors="coerce").dt.to_period("M")
+        month_periods = pd.to_datetime(
+            relevant[month_column].astype(str), errors="coerce"
+        ).dt.to_period("M")
         valid_mask = month_periods.notna()
         relevant = relevant.loc[valid_mask].copy()
         month_periods = month_periods[valid_mask]
         if not relevant.empty:
-            relevant["__helper_year"] = month_periods.year
+            relevant["__helper_year"] = month_periods.dt.year
             relevant["__helper_amount"] = pd.to_numeric(relevant[value_column], errors="coerce")
             for year, group in relevant.groupby("__helper_year"):
                 values = group["__helper_amount"].dropna()
