@@ -13,6 +13,40 @@ ETHANOL_LITRES_PER_TON = 200.0
 ANIMAL_FEED_TON_PER_TON = 0.275
 
 
+def _coerce_numeric_series(
+    series: pd.Series | None,
+    column_name: str,
+    *,
+    fill_value: float | None = None,
+) -> pd.Series:
+    """Return a numeric view of *series* with helpful validation errors."""
+
+    if series is None:
+        return pd.Series(dtype=float)
+
+    working = series.astype(object).copy()
+    if working.empty:
+        return pd.Series(dtype=float, index=working.index)
+
+    cleaned = working.apply(lambda value: value.replace(",", "") if isinstance(value, str) else value)
+    coerced = pd.to_numeric(cleaned, errors="coerce")
+
+    stringified = working.astype(str).str.strip().str.lower()
+    missing_mask = working.isna() | stringified.eq("") | stringified.isin({"nan", "none", "null"})
+    invalid_mask = coerced.isna() & ~missing_mask
+    if invalid_mask.any():
+        invalid_values = working[invalid_mask].astype(str).unique().tolist()
+        preview = ", ".join(invalid_values[:5])
+        if len(invalid_values) > 5:
+            preview += ", …"
+        raise ValueError(f"Column '{column_name}' contains non-numeric values: {preview}")
+
+    if fill_value is not None:
+        coerced = coerced.fillna(fill_value)
+
+    return coerced
+
+
 @dataclass
 class DepreciationOutput:
     monthly: pd.DataFrame
@@ -48,23 +82,49 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
         capex_series = pd.Series(0.0, index=months, name="Capex")
         return DepreciationOutput(empty_monthly, empty_annual, empty_summary, capex_series)
 
+    working = initial_investment.copy()
+    if "Cost" in working.columns:
+        working["Cost"] = _coerce_numeric_series(working["Cost"], "Cost").fillna(0.0)
+    else:
+        working["Cost"] = 0.0
+    if "Depreciation Rate" in working.columns:
+        working["Depreciation Rate"] = _coerce_numeric_series(
+            working["Depreciation Rate"], "Depreciation Rate", fill_value=0.0
+        )
+    else:
+        working["Depreciation Rate"] = 0.0
+    if "Life (years)" in working.columns:
+        working["Life (years)"] = _coerce_numeric_series(working["Life (years)"], "Life (years)")
+    if "Life" in working.columns:
+        working["Life"] = _coerce_numeric_series(working["Life"], "Life")
+
     records = []
     capex_records = []
-    for _, row in initial_investment.iterrows():
-        life_years = row.get("Life (years)") or row.get("Life") or 10
-        rate = row.get("Depreciation Rate")
-        cost = float(row["Cost"])
-        if rate in (None, 0, np.nan):
-            annual_dep = cost / life_years if life_years else 0
+    for _, row in working.iterrows():
+        life_years_value = row.get("Life (years)")
+        if life_years_value is None or pd.isna(life_years_value) or life_years_value == 0:
+            life_years_value = row.get("Life")
+        if life_years_value is None or pd.isna(life_years_value) or life_years_value == 0:
+            life_years_value = 10.0
+
+        rate_value = row.get("Depreciation Rate")
+        if rate_value is None or pd.isna(rate_value) or rate_value == 0:
+            annual_dep = row.get("Cost", 0.0) / life_years_value if life_years_value else 0.0
         else:
-            annual_dep = cost * float(rate)
+            annual_dep = row.get("Cost", 0.0) * float(rate_value)
         monthly_dep = annual_dep / 12.0
-        start_month_value = row.get("Start Month", f"{start_year}-01")
-        start_month = pd.Period(start_month_value, freq="M").to_timestamp()
-        capex_records.append({"Month": start_month, "Item": row["Item"], "Capex": cost})
+
+        start_month_value = row.get("Start Month") or row.get("Month") or f"{start_year:04d}-01"
+        try:
+            start_period = pd.Period(str(start_month_value), freq="M")
+        except Exception:
+            start_period = pd.Period(f"{start_year:04d}-01", freq="M")
+        start_month = start_period.to_timestamp()
+
+        capex_records.append({"Month": start_month, "Item": row.get("Item"), "Capex": row.get("Cost", 0.0)})
         for month in months:
             dep = monthly_dep if month >= start_month else 0.0
-            records.append({"Month": month, "Item": row["Item"], "Depreciation": dep})
+            records.append({"Month": month, "Item": row.get("Item"), "Depreciation": dep})
 
     monthly_df = (
         pd.DataFrame(records)
@@ -82,14 +142,30 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
     annual_df = monthly_df.resample("Y").sum()
     annual_df.index = annual_df.index.year
 
-    summary = initial_investment.copy()
-    summary["Annual Depreciation"] = summary.apply(
-        lambda r: (r["Cost"] / r.get("Life (years)") if r.get("Depreciation Rate") in (None, 0, np.nan) else r["Cost"] * r.get("Depreciation Rate")),
-        axis=1,
-    )
-    summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
-    summary["Accumulated Depreciation (Year %d)" % end_year] = summary["Annual Depreciation"] * (end_year - start_year + 1)
-    summary["Net Book Value"] = summary["Cost"] - summary["Accumulated Depreciation (Year %d)" % end_year]
+    summary = working.copy()
+    if "Life (years)" not in summary.columns and "Life" in summary.columns:
+        summary["Life (years)"] = summary["Life"]
+    if "Depreciation Rate" not in summary.columns:
+        summary["Depreciation Rate"] = 0.0
+    summary["Depreciation Rate"] = summary["Depreciation Rate"].fillna(0.0)
+    summary["Cost"] = summary["Cost"].fillna(0.0)
+
+    life_years = summary.get("Life (years)")
+    if life_years is None:
+        life_years = pd.Series(10.0, index=summary.index)
+    life_years = life_years.fillna(0.0)
+    life_years = life_years.replace({0.0: np.nan})
+
+    rate_series = summary["Depreciation Rate"].fillna(0.0)
+    use_rate = rate_series.ne(0.0)
+    annual_dep = summary["Cost"] * rate_series
+    annual_dep = annual_dep.where(use_rate, summary["Cost"] / life_years)
+    annual_dep = annual_dep.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    summary["Annual Depreciation"] = annual_dep
+    summary["Monthly Depreciation"] = annual_dep / 12.0
+    summary[f"Accumulated Depreciation (Year {end_year})"] = annual_dep * (end_year - start_year + 1)
+    summary["Net Book Value"] = summary["Cost"] - summary[f"Accumulated Depreciation (Year {end_year})"]
     return DepreciationOutput(monthly_df, annual_df, summary, capex_series)
 
 
@@ -266,14 +342,48 @@ def compute_revenue_schedule(
         monthly.index = pd.to_datetime(monthly.index, errors="coerce")
         monthly = monthly[~monthly.index.isna()]
         monthly.index.name = "Month"
-    prices = {}
-    for _, row in revenue_inputs.iterrows():
-        product = row["Product"]
-        base_price = row["Base Price"]
-        escalation = row.get("Escalation", 0.0)
-        prices[product] = (base_price, escalation)
+    prices: Dict[str, Tuple[float, float]] = {}
+    if revenue_inputs is not None and not revenue_inputs.empty:
+        revenue_data = revenue_inputs.copy()
+        if "Base Price" in revenue_data.columns:
+            revenue_data["Base Price"] = _coerce_numeric_series(
+                revenue_data["Base Price"], "Base Price", fill_value=0.0
+            )
+        else:
+            revenue_data["Base Price"] = 0.0
+        if "Escalation" in revenue_data.columns:
+            revenue_data["Escalation"] = _coerce_numeric_series(
+                revenue_data["Escalation"], "Escalation", fill_value=0.0
+            )
+        else:
+            revenue_data["Escalation"] = 0.0
 
-    inflation = inflation_schedule.set_index("Year")["CPI"].to_dict()
+        for _, row in revenue_data.iterrows():
+            product = row.get("Product")
+            if not product or pd.isna(product):
+                continue
+            prices[str(product)] = (float(row.get("Base Price", 0.0)), float(row.get("Escalation", 0.0)))
+
+    inflation: Dict[int, float] = {}
+    if inflation_schedule is not None and not inflation_schedule.empty:
+        inflation_data = inflation_schedule.copy()
+        cpi_series = (
+            _coerce_numeric_series(inflation_data.get("CPI"), "CPI", fill_value=0.0)
+            if "CPI" in inflation_data.columns
+            else pd.Series(0.0, index=inflation_data.index)
+        )
+        if "Year" in inflation_data.columns:
+            year_series = _coerce_numeric_series(inflation_data["Year"], "Year")
+        else:
+            year_series = pd.Series(dtype=float, index=inflation_data.index)
+        for idx in inflation_data.index:
+            year = year_series.loc[idx] if idx in year_series.index else np.nan
+            cpi = cpi_series.loc[idx] if idx in cpi_series.index else 0.0
+            if pd.notna(year):
+                try:
+                    inflation[int(round(float(year)))] = float(cpi)
+                except (TypeError, ValueError):
+                    continue
 
     if planning_start is not None:
         if isinstance(planning_start, str):
