@@ -1117,7 +1117,11 @@ def _key_assumptions_controls(table: EditableTable) -> None:
             if not np.isclose(original_value, float(current_value)):
                 updated = True
                 _mark_inputs_dirty()
-    table.set_data(df, mark_user_input=updated)
+    if updated:
+        table.set_data(df, mark_user_input=True)
+    else:
+        table.set_data(df, mark_user_input=None)
+
     if not df.equals(original_df):
         _update_table_editor_state(table)
 
@@ -2020,7 +2024,10 @@ def _render_table(
             if not new_data.equals(table.data):
                 data_changed = True
 
-        table.set_data(new_data, mark_user_input=data_changed)
+        if data_changed:
+            table.set_data(new_data, mark_user_input=True)
+        else:
+            table.set_data(new_data, mark_user_input=None)
         if (data_changed or change_applied) and table.name == "Production Monthly":
             st.session_state[PRODUCTION_EDIT_FLAG] = True
         _update_table_editor_state(table)
