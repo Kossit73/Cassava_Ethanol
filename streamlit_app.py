@@ -1500,27 +1500,35 @@ def _render_yearly_increment_helper(
         return False, None
 
     baseline_value = float(baseline_input) if np.isfinite(baseline_input) else 0.0
-    year_amounts: Dict[int, float] = {years[0]: float(baseline_value)}
+    year_amounts: Dict[int, float] = {}
+    last_amount = float(baseline_value)
 
-    previous_amount = float(baseline_value)
-    for year, increment in zip(years[1:], increment_inputs):
-        increment_value = float(increment) if np.isfinite(increment) else 0.0
+    for offset, year in enumerate(years):
+        if offset == 0:
+            year_amounts[int(year)] = last_amount
+            continue
+
+        increment_raw = increment_inputs[offset - 1] if offset - 1 < len(increment_inputs) else 0.0
+        increment_value = float(increment_raw) if np.isfinite(increment_raw) else 0.0
         rate = increment_value / 100.0
-        previous_amount = float(previous_amount) * (1.0 + rate)
-        year_amounts[int(year)] = previous_amount
+        last_amount = float(last_amount) * (1.0 + rate)
+        if not np.isfinite(last_amount):
+            last_amount = 0.0
+        year_amounts[int(year)] = last_amount
 
     periods = pd.period_range(f"{years[0]}-01", f"{years[-1]}-12", freq="M")
     template = {column: row.get(column) for column in df.columns if column != month_column}
 
     new_records = []
+    fallback_amount = year_amounts.get(int(years[-1]), last_amount if np.isfinite(last_amount) else 0.0)
     for period in periods:
         record = template.copy()
         record[month_column] = period.strftime("%Y-%m")
-        record[value_column] = year_amounts.get(int(period.year), previous_amount)
+        record[value_column] = year_amounts.get(int(period.year), fallback_amount)
         new_records.append(record)
 
     new_rows = pd.DataFrame(new_records, columns=df.columns)
-    new_rows[value_column] = pd.to_numeric(new_rows[value_column], errors="coerce")
+    new_rows[value_column] = pd.to_numeric(new_rows[value_column], errors="coerce").fillna(0.0)
 
     remaining = df.loc[~mask].copy()
     combined = pd.concat([remaining, new_rows], ignore_index=True)
