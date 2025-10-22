@@ -7,6 +7,7 @@ from typing import Dict, Iterable, Tuple
 import hashlib
 import numpy as np
 import pandas as pd
+from pandas.api import types as ptypes
 
 from . import inputs
 from .schedules import (
@@ -43,9 +44,39 @@ class CassavaBioethanolModel:
         if df is None or getattr(df, "empty", True):
             return "empty"
         normalised = df.copy()
-        normalised.index = normalised.index.astype(str)
-        normalised = normalised.fillna(0)
-        return hashlib.sha1(normalised.to_csv().encode("utf-8")).hexdigest()
+        normalised.columns = normalised.columns.map(str)
+        normalised = normalised.sort_index(axis=1)
+        normalised = normalised.sort_index()
+        normalised.index = normalised.index.map(str)
+
+        for column in normalised.columns:
+            series = normalised[column]
+            if ptypes.is_numeric_dtype(series):
+                normalised[column] = pd.to_numeric(series, errors="coerce")
+            elif ptypes.is_bool_dtype(series):
+                normalised[column] = series.fillna(False).astype(bool)
+            elif ptypes.is_datetime64_any_dtype(series):
+                normalised[column] = pd.to_datetime(series, errors="coerce")
+            elif ptypes.is_period_dtype(series):
+                normalised[column] = series.astype("object").apply(
+                    lambda value: value.to_timestamp() if isinstance(value, pd.Period) else value
+                )
+            else:
+                normalised[column] = series.astype(object)
+
+        def _format_value(value: object) -> str:
+            if pd.isna(value):
+                return ""
+            if isinstance(value, pd.Timestamp):
+                return value.isoformat()
+            if isinstance(value, np.datetime64):
+                return pd.Timestamp(value).isoformat()
+            if isinstance(value, pd.Period):
+                return value.to_timestamp().isoformat()
+            return str(value)
+
+        stringified = normalised.applymap(_format_value)
+        return hashlib.sha1(stringified.to_csv().encode("utf-8")).hexdigest()
 
     def _input_signature(self) -> str:
         return self.input_page.signature()
