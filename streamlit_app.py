@@ -8,7 +8,7 @@ import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -312,13 +312,33 @@ def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> 
     return json.dumps(payload, sort_keys=True)
 
 
-def _monte_carlo_column_config() -> Dict[str, st.column_config.Column]:
+def _monte_carlo_parameter_options(page: InputLandingPage | None) -> List[str]:
+    """Return the ordered list of Monte Carlo parameters sourced from inputs."""
+
+    options: List[str] = []
+    if isinstance(page, InputLandingPage):
+        table = getattr(page, "global_inputs", None)
+        if isinstance(table, EditableTable):
+            column = table.data.get("Parameter") if not table.data.empty else None
+            if isinstance(column, pd.Series):
+                for value in column.tolist():
+                    if pd.isna(value):
+                        continue
+                    text = str(value).strip()
+                    if text and text not in options:
+                        options.append(text)
+    return options
+
+
+def _monte_carlo_column_config(parameter_options: Sequence[str]) -> Dict[str, st.column_config.Column]:
     options = available_monte_carlo_distributions()
     config: Dict[str, st.column_config.Column] = {
-        "Parameter": st.column_config.TextColumn(
+        "Parameter": st.column_config.SelectboxColumn(
             "Parameter",
+            options=list(parameter_options) if parameter_options else [""],
             help="Name of the global input parameter to sample."
             " It must match the parameter name in the Modify Default Inputs table.",
+            required=False,
         ),
         "Distribution": st.column_config.SelectboxColumn(
             "Distribution",
@@ -2271,6 +2291,10 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     _ensure_monte_carlo_state()
     current_version = _current_model_version()
     current_scenario = model.scenario
+    parameter_source = results.get("input_page_snapshot") if isinstance(results, dict) else None
+    if not isinstance(parameter_source, InputLandingPage):
+        parameter_source = model.input_page
+    parameter_options = _monte_carlo_parameter_options(parameter_source)
 
     iterations = st.number_input(
         "Iterations",
@@ -2295,10 +2319,17 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     )
 
     current_params = st.session_state[MC_PARAMETER_STATE_KEY]
+    if "Parameter" in current_params:
+        for raw_value in current_params["Parameter"].tolist():
+            if pd.isna(raw_value):
+                continue
+            text = str(raw_value).strip()
+            if text and text not in parameter_options:
+                parameter_options.append(text)
     edited_params = st.data_editor(
         current_params,
         key="mc_parameter_editor",
-        column_config=_monte_carlo_column_config(),
+        column_config=_monte_carlo_column_config(parameter_options),
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
