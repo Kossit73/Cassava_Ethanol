@@ -2,8 +2,9 @@ import importlib.util
 from pathlib import Path
 import sys
 
-import pandas as pd
 import pytest
+
+pd = pytest.importorskip("pandas")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = PROJECT_ROOT / "bioethanol_model" / "schedules.py"

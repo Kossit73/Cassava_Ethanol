@@ -1,5 +1,7 @@
-import pandas as pd
-import pandas.testing as pdt
+import pytest
+
+pd = pytest.importorskip("pandas")
+pdt = pytest.importorskip("pandas.testing")
 
 from bioethanol_model.financial_model import CassavaBioethanolModel
 

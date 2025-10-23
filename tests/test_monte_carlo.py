@@ -1,6 +1,8 @@
 import copy
 
-import pandas as pd
+import pytest
+
+pd = pytest.importorskip("pandas")
 
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.inputs import default_input_page
