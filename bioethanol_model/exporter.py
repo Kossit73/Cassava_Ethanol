@@ -10,7 +10,15 @@ import pandas as pd
 from .financial_model import CassavaBioethanolModel
 from .inputs import InputLandingPage
 from .scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
-from .sensitivity import SensitivityScenario, monte_carlo_simulation, run_sensitivity, tornado_chart_inputs
+from .sensitivity import (
+    DEFAULT_MONTE_CARLO_ITERATIONS,
+    DEFAULT_MONTE_CARLO_SEED,
+    SensitivityScenario,
+    default_monte_carlo_parameters,
+    monte_carlo_simulation,
+    run_sensitivity,
+    tornado_chart_inputs,
+)
 from .schedules import ExpenseSummary
 
 
@@ -832,23 +840,29 @@ def _write_sensitivity_page(
         sensitivity_results = pd.DataFrame(columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"])
     next_row = _write_table(writer, sheet, sensitivity_results, "Simulation Results", startrow=next_row)
 
-    mc_parameter_std = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
-    mc_iterations = 200
-    mc_seed = 42
+    mc_iterations = DEFAULT_MONTE_CARLO_ITERATIONS
+    mc_seed = DEFAULT_MONTE_CARLO_SEED
+    mc_params = default_monte_carlo_parameters()
 
-    mc_config_rows = (
-        [{"Setting": "Iterations", "Value": mc_iterations}, {"Setting": "Random Seed", "Value": mc_seed}]
-        + [
-            {"Setting": f"Std Dev - {param}", "Value": std}
-            for param, std in mc_parameter_std.items()
+    settings_df = pd.DataFrame(
+        [
+            {"Setting": "Iterations", "Value": mc_iterations},
+            {"Setting": "Random Seed", "Value": mc_seed},
         ]
     )
-    mc_config_df = pd.DataFrame(mc_config_rows)
     next_row = _write_table(
         writer,
         sheet,
-        mc_config_df,
-        "Monte Carlo Simulation Configuration",
+        settings_df,
+        "Monte Carlo Simulation Settings",
+        startrow=next_row,
+        index=False,
+    )
+    next_row = _write_table(
+        writer,
+        sheet,
+        mc_params,
+        "Monte Carlo Parameter Configuration",
         startrow=next_row,
         index=False,
     )
@@ -856,7 +870,7 @@ def _write_sensitivity_page(
     mc_model = _scenario_model()
     mc_results = monte_carlo_simulation(
         mc_model,
-        parameter_std=mc_parameter_std,
+        parameter_configs=mc_params,
         iterations=mc_iterations,
         random_seed=mc_seed,
     )

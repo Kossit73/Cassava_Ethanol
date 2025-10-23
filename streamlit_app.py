@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import tempfile
 from collections import OrderedDict
@@ -30,7 +31,12 @@ from bioethanol_model.schedules import (
     compute_staff_schedule,
 )
 from bioethanol_model.sensitivity import (
+    DEFAULT_MONTE_CARLO_ITERATIONS,
+    DEFAULT_MONTE_CARLO_SEED,
+    MONTE_CARLO_PARAMETER_COLUMNS,
     SensitivityScenario,
+    available_monte_carlo_distributions,
+    default_monte_carlo_parameters,
     monte_carlo_simulation,
     run_sensitivity,
     tornado_chart_inputs,
@@ -197,9 +203,9 @@ TORNADO_DRIVERS: List[Tuple[str, float]] = [
     ("Discount rate", 1.0),
 ]
 
-MONTE_CARLO_STD = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
-MONTE_CARLO_ITERATIONS = 250
-MONTE_CARLO_SEED = 42
+MC_PARAMETER_STATE_KEY = "mc_parameter_config"
+MC_ITERATION_STATE_KEY = "mc_iteration_setting"
+MC_SEED_STATE_KEY = "mc_random_seed"
 
 PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
 
@@ -255,6 +261,74 @@ def _reset_table_widget(table: EditableTable) -> None:
     widget_key = _table_widget_key(table)
     if widget_key in st.session_state:
         del st.session_state[widget_key]
+
+
+def _ensure_monte_carlo_state() -> None:
+    if MC_PARAMETER_STATE_KEY not in st.session_state or not isinstance(
+        st.session_state[MC_PARAMETER_STATE_KEY], pd.DataFrame
+    ):
+        st.session_state[MC_PARAMETER_STATE_KEY] = default_monte_carlo_parameters()
+
+    df = st.session_state[MC_PARAMETER_STATE_KEY]
+    missing = [col for col in MONTE_CARLO_PARAMETER_COLUMNS if col not in df.columns]
+    if missing:
+        for column in missing:
+            df[column] = np.nan
+    st.session_state[MC_PARAMETER_STATE_KEY] = df[list(MONTE_CARLO_PARAMETER_COLUMNS)]
+
+    if MC_ITERATION_STATE_KEY not in st.session_state:
+        st.session_state[MC_ITERATION_STATE_KEY] = DEFAULT_MONTE_CARLO_ITERATIONS
+    if MC_SEED_STATE_KEY not in st.session_state:
+        st.session_state[MC_SEED_STATE_KEY] = DEFAULT_MONTE_CARLO_SEED
+
+
+def _monte_carlo_parameters() -> pd.DataFrame:
+    _ensure_monte_carlo_state()
+    return st.session_state[MC_PARAMETER_STATE_KEY].copy()
+
+
+def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> str:
+    filtered = (
+        config.replace("", np.nan)
+        .dropna(subset=["Parameter", "Distribution"], how="any")
+        .fillna("<nan>")
+    )
+    ordered = filtered.sort_values(["Parameter", "Distribution"]).reset_index(drop=True)
+    payload = {
+        "iterations": int(iterations),
+        "seed": int(seed),
+        "config": ordered.to_dict(orient="records"),
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _monte_carlo_column_config() -> Dict[str, st.column_config.Column]:
+    options = available_monte_carlo_distributions()
+    config: Dict[str, st.column_config.Column] = {
+        "Parameter": st.column_config.TextColumn(
+            "Parameter",
+            help="Name of the global input parameter to sample."
+            " It must match the parameter name in the Modify Default Inputs table.",
+        ),
+        "Distribution": st.column_config.SelectboxColumn(
+            "Distribution",
+            options=options,
+            help="Probability distribution used for sampling during the Monte Carlo run.",
+        ),
+        "pvals": st.column_config.TextColumn(
+            "pvals",
+            help="Comma-separated probabilities (e.g. 0.2,0.3,0.5) for the Multinomial distribution.",
+        ),
+    }
+
+    numeric_columns = {
+        column
+        for column in MONTE_CARLO_PARAMETER_COLUMNS
+        if column not in {"Parameter", "Distribution", "pvals"}
+    }
+    for column in numeric_columns:
+        config[column] = st.column_config.NumberColumn(column, format="%.6f")
+    return config
 
 
 def _projection_month_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[str]:
@@ -2066,11 +2140,19 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
         st.dataframe(sensitivity_results, use_container_width=True)
 
     st.subheader("Monte Carlo Simulation Configuration")
-    mc_rows = (
-        [{"Setting": "Iterations", "Value": MONTE_CARLO_ITERATIONS}, {"Setting": "Random Seed", "Value": MONTE_CARLO_SEED}]
-        + [{"Setting": f"Std Dev - {param}", "Value": std} for param, std in MONTE_CARLO_STD.items()]
+    _ensure_monte_carlo_state()
+    settings_df = pd.DataFrame(
+        [
+            {"Setting": "Iterations", "Value": int(st.session_state[MC_ITERATION_STATE_KEY])},
+            {"Setting": "Random Seed", "Value": int(st.session_state[MC_SEED_STATE_KEY])},
+        ]
     )
-    st.dataframe(pd.DataFrame(mc_rows), use_container_width=True, hide_index=True)
+    st.dataframe(settings_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        _monte_carlo_parameters(),
+        use_container_width=True,
+        hide_index=True,
+    )
 
     st.subheader("Tornado Drivers")
     tornado_model = _scenario_model()
@@ -2176,37 +2258,81 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("Monte Carlo Simulation")
 
+    _ensure_monte_carlo_state()
     current_version = _current_model_version()
     current_scenario = model.scenario
+
+    iterations = st.number_input(
+        "Iterations",
+        min_value=1,
+        value=int(st.session_state[MC_ITERATION_STATE_KEY]),
+        step=1,
+        format="%d",
+    )
+    st.session_state[MC_ITERATION_STATE_KEY] = int(iterations)
+
+    seed = st.number_input(
+        "Random Seed",
+        value=int(st.session_state[MC_SEED_STATE_KEY]),
+        step=1,
+        format="%d",
+    )
+    st.session_state[MC_SEED_STATE_KEY] = int(seed)
+
+    st.caption(
+        "Configure the stochastic inputs for the simulation. Choose a distribution for each parameter"
+        " and provide the relevant shape/location values."
+    )
+
+    current_params = st.session_state[MC_PARAMETER_STATE_KEY]
+    edited_params = st.data_editor(
+        current_params,
+        key="mc_parameter_editor",
+        column_config=_monte_carlo_column_config(),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+    )
+    edited_params = edited_params.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+    st.session_state[MC_PARAMETER_STATE_KEY] = edited_params
+
+    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed))
+
     cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(MC_CACHE_KEY, {})
     cached_entry = cache.get(current_scenario)
+    if cached_entry and (
+        cached_entry.get("version") != current_version
+        or cached_entry.get("signature") != config_signature
+    ):
+        cache.pop(current_scenario, None)
+        st.session_state[MC_CACHE_KEY] = cache
+        cached_entry = None
 
     run_requested = st.button(
         "Run Monte Carlo Simulation",
         key=f"mc_run_{current_scenario.lower()}",
     )
 
-    if run_requested or not cached_entry or cached_entry.get("version") != current_version:
-        if run_requested:
-            base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
-            with st.spinner("Running Monte Carlo simulation..."):
-                mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
-                mc_model.scenario = current_scenario
-                mc_results = monte_carlo_simulation(
-                    mc_model,
-                    parameter_std=MONTE_CARLO_STD,
-                    iterations=MONTE_CARLO_ITERATIONS,
-                    random_seed=MONTE_CARLO_SEED,
-                )
-            cache[current_scenario] = {"version": current_version, "results": mc_results}
-            st.session_state[MC_CACHE_KEY] = cache
-            cached_entry = cache[current_scenario]
-        else:
-            st.info("Click 'Run Monte Carlo Simulation' to generate results for this scenario.")
-            return
-
-    if not cached_entry or cached_entry.get("results") is None:
-        st.info("Monte Carlo results are not available. Click the run button to generate them.")
+    if run_requested:
+        base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        with st.spinner("Running Monte Carlo simulation..."):
+            mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
+            mc_model.scenario = current_scenario
+            mc_results = monte_carlo_simulation(
+                mc_model,
+                parameter_configs=edited_params,
+                iterations=int(iterations),
+                random_seed=int(seed),
+            )
+        cache[current_scenario] = {
+            "version": current_version,
+            "signature": config_signature,
+            "results": mc_results,
+        }
+        st.session_state[MC_CACHE_KEY] = cache
+        cached_entry = cache[current_scenario]
+    elif cached_entry is None:
+        st.info("Monte Carlo results are not available. Click 'Run Monte Carlo Simulation' to generate them.")
         return
 
     mc_results = cached_entry["results"]
