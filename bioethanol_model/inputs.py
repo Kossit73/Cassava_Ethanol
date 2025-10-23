@@ -392,6 +392,7 @@ def default_input_page() -> InputLandingPage:
             [
                 {"Month": "2025-01", "Cost Category": "Cassava Feedstock", "Amount": 600_000},
                 {"Month": "2025-01", "Cost Category": "Enzymes & Chemicals", "Amount": 150_000},
+                {"Month": "2025-01", "Cost Category": "Energy Cost", "Amount": 180_000},
             ]
         ),
         placeholder=True,

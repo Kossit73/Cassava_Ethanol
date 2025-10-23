@@ -53,15 +53,6 @@ DERIVED_COLUMN_MAP = {
 }
 
 
-def _is_cassava_feedstock(value: object) -> bool:
-    """Return True when *value* refers to the cassava feedstock cost row."""
-
-    if value is None:
-        return False
-    text = str(value).strip().lower()
-    return "cassava" in text and "feedstock" in text
-
-
 # Predefined category options surfaced in the "Modify Default Inputs & Figures"
 # editor. Users can still supply custom values by selecting the explicit custom
 # option exposed by the editor for each table.
@@ -72,30 +63,45 @@ DIRECT_COST_CATEGORY_OPTIONS = [
 ]
 
 CATEGORY_SELECT_OPTIONS = {
-    ("Direct Costs Monthly", "Cost Category"): DIRECT_COST_CATEGORY_OPTIONS,
-    ("Other Opex Monthly", "Category"): [
-        "Service Contracts",
-        "General Administration",
-        "Research & Development",
-        "Energy Cost",
-        "Sales & Marketing",
-    ],
+    ("Direct Costs Monthly", "Cost Category"): {
+        "options": DIRECT_COST_CATEGORY_OPTIONS,
+        "allow_custom": False,
+    },
+    (
+        "Other Opex Monthly",
+        "Category",
+    ): {
+        "options": [
+            "Service Contracts",
+            "General Administration",
+            "Research & Development",
+            "Energy Cost",
+            "Sales & Marketing",
+        ],
+        "allow_custom": True,
+    },
     (
         "Accounts Receivable & Other Assets",
         "Metric",
-    ): [
-        "Receivables days",
-        "Inventory days",
-        "Prepaid expense days",
-        "Other assets percent of revenue",
-    ],
+    ): {
+        "options": [
+            "Receivables days",
+            "Inventory days",
+            "Prepaid expense days",
+            "Other assets percent of revenue",
+        ],
+        "allow_custom": True,
+    },
     (
         "Accounts Payable",
         "Metric",
-    ): [
-        "Payables days",
-        "Other payable days",
-    ],
+    ): {
+        "options": [
+            "Payables days",
+            "Other payable days",
+        ],
+        "allow_custom": True,
+    },
 }
 
 CHANGE_BUTTON_CONFIG = {
@@ -948,85 +954,6 @@ def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
     page.staff_costs_monthly.set_data(staff_df, mark_user_input=True)
 
 
-def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
-    """Recalculate cassava feedstock costs using the active scenario pricing."""
-
-    if page.direct_costs_monthly.data.empty or page.direct_costs_monthly.placeholder:
-        return
-
-    direct_df = page.direct_costs_monthly.data.copy()
-    if direct_df.empty or "Cost Category" not in direct_df.columns:
-        return
-
-    feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
-    if not feed_mask.any():
-        return
-
-    global_df = page.global_inputs.data
-    if global_df.empty or "Parameter" not in global_df.columns:
-        return
-
-    lookup = global_df.set_index("Parameter")["Value"].to_dict()
-
-    def _get_global(name: str, default: float) -> float:
-        try:
-            return float(lookup.get(name, default))
-        except (TypeError, ValueError):
-            return default
-
-    farm_cost = _get_global("Cassava farm cost per ton", 45.0)
-    purchase_cost = _get_global("Cassava purchase cost per ton", 70.0)
-    farm_share = float(np.clip(_get_global("Hybrid farm share", 0.5), 0.0, 1.0))
-
-    scenario = (scenario or "FARM_ONLY").upper()
-    if scenario == "FARM_ONLY":
-        cost_per_ton = farm_cost
-    elif scenario == "BUY_ONLY":
-        cost_per_ton = purchase_cost
-    else:
-        cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
-
-    production_source = page.production_monthly.model_frame
-    if production_source.empty:
-        return
-
-    production = compute_production_tables(
-        production_source,
-        page.projection.start_year,
-        page.projection.end_year,
-        planning_start=page.projection.planning_start_timestamp,
-    )
-    cassava_series = pd.to_numeric(
-        production.monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce"
-    ).fillna(method="ffill").fillna(method="bfill")
-    if cassava_series.empty:
-        return
-
-    cassava_series.index = cassava_series.index.to_period("M").to_timestamp()
-    fallback = float(cassava_series.mean()) if not cassava_series.empty else 0.0
-
-    def _month_to_timestamp(value: object) -> pd.Timestamp | None:
-        try:
-            return pd.Period(str(value), freq="M").to_timestamp()
-        except Exception:  # pragma: no cover - defensive parsing guard
-            return None
-
-    direct_df = direct_df.copy()
-    month_stamps = direct_df["Month"].apply(_month_to_timestamp)
-    updated_amounts = []
-    for is_feed, month, current in zip(feed_mask, month_stamps, direct_df["Amount"]):
-        if not is_feed:
-            updated_amounts.append(current)
-            continue
-        tons = fallback
-        if month is not None and month in cassava_series.index:
-            tons = float(cassava_series.loc[month])
-        updated_amounts.append(tons * cost_per_ton)
-
-    direct_df["Amount"] = updated_amounts
-    page.direct_costs_monthly.set_data(direct_df, mark_user_input=True)
-
-
 def _sync_working_capital_tables(page: InputLandingPage) -> None:
     """Refresh the Accounts Payable editor state after landing-page edits."""
 
@@ -1040,12 +967,11 @@ def _sync_working_capital_tables(page: InputLandingPage) -> None:
     _update_table_editor_state(inv_table)
 
 
-def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
+def _apply_dependent_updates(page: InputLandingPage) -> None:
     """Ensure derived landing-page tables stay synchronised with inputs."""
 
     _auto_compound_production(page)
     _update_staff_costs_from_positions(page)
-    _update_feedstock_costs(page, scenario)
     _sync_working_capital_tables(page)
 
 
@@ -1146,17 +1072,6 @@ def _row_editor_form(
 
     original_row = df.loc[row_idx].copy()
 
-    read_only_row = (
-        table.name == "Direct Costs Monthly"
-        and "Cost Category" in df.columns
-        and _is_cassava_feedstock(df.at[row_idx, "Cost Category"])
-    )
-
-    if read_only_row:
-        st.info(
-            "Cassava feedstock costs are scenario-driven. Review the values below; they are locked for editing."
-        )
-
     month_range = pd.period_range(
         f"{int(projection.start_year):04d}-01",
         f"{int(projection.end_year):04d}-12",
@@ -1171,20 +1086,6 @@ def _row_editor_form(
     for column in table.columns:
         current_value = df.at[row_idx, column]
         widget_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}".replace(" ", "_").lower()
-
-        if read_only_row:
-            display_value = ""
-            if current_value is not None and not (
-                isinstance(current_value, float) and pd.isna(current_value)
-            ):
-                display_value = str(current_value)
-            st.text_input(
-                column,
-                value=display_value,
-                key=widget_key,
-                disabled=True,
-            )
-            continue
 
         if column in derived_columns:
             if table.name == "Production Monthly":
@@ -1238,23 +1139,30 @@ def _row_editor_form(
 
         category_key = (table.name, column)
         if category_key in CATEGORY_SELECT_OPTIONS:
-            options = list(CATEGORY_SELECT_OPTIONS[category_key])
+            config = CATEGORY_SELECT_OPTIONS[category_key]
+            options = list(config.get("options", []))
+            allow_custom = bool(config.get("allow_custom", True))
             current_str = (
                 ""
                 if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
                 else str(current_value)
             )
-            if current_str and current_str not in options:
+            if current_str and current_str not in options and allow_custom:
                 options.append(current_str)
-            custom_label = "Custom value"
-            if custom_label not in options:
-                options.append(custom_label)
 
-            default_index = 0
-            if current_str and current_str in options:
-                default_index = options.index(current_str)
-            elif custom_label in options and current_str and current_str not in CATEGORY_SELECT_OPTIONS[category_key]:
-                default_index = options.index(current_str)
+            if allow_custom:
+                custom_label = "Custom value"
+                if custom_label not in options:
+                    options.append(custom_label)
+
+            if options:
+                if current_str and current_str in options:
+                    default_index = options.index(current_str)
+                else:
+                    default_index = 0
+            else:
+                options = [""]
+                default_index = 0
 
             selection = st.selectbox(
                 column,
@@ -1263,16 +1171,18 @@ def _row_editor_form(
                 key=widget_key,
             )
 
-            if selection == custom_label:
+            if allow_custom and selection == "Custom value":
                 custom_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}_custom".replace(" ", "_").lower()
                 custom_value = st.text_input(
                     f"Specify {column.lower()}",
-                    value=current_str if current_str not in CATEGORY_SELECT_OPTIONS[category_key] else "",
+                    value=current_str if current_str not in config.get("options", []) else "",
                     key=custom_key,
                 )
                 new_value = custom_value.strip() if custom_value.strip() else None
             else:
                 new_value = selection
+                if not allow_custom and new_value not in config.get("options", []):
+                    new_value = config.get("options", [None])[0]
 
             df.at[row_idx, column] = new_value
             if (current_str or None) != (new_value or None):
@@ -1375,7 +1285,8 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         ):
             category = table.data.at[idx, "Cost Category"]
             if category and not pd.isna(category):
-                label = f"{label} – {category}"
+                return str(category)
+            return f"Row {idx + 1}"
 
         return f"{idx + 1}. {label}"
 
@@ -1671,15 +1582,8 @@ def _render_table(
             )
             if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
                 idx = int(remove_index)
-                if (
-                    table.name == "Direct Costs Monthly"
-                    and "Cost Category" in table.data.columns
-                    and _is_cassava_feedstock(table.data.at[idx, "Cost Category"])
-                ):
-                    st.warning("Cassava feedstock costs are scenario-driven and cannot be removed.")
-                else:
-                    table.remove_row(idx)
-                    data_changed = True
+                table.remove_row(idx)
+                data_changed = True
         else:
             controls[1].markdown("&nbsp;")
 
@@ -1699,6 +1603,17 @@ def _render_table(
                     help="Calculated automatically from other inputs.",
                 )
 
+        for (table_name, column), config in CATEGORY_SELECT_OPTIONS.items():
+            if (
+                table_name == table.name
+                and column in table.columns
+                and not config.get("allow_custom", True)
+            ):
+                column_config[column] = st.column_config.SelectboxColumn(
+                    label=column,
+                    options=list(config.get("options", [])),
+                )
+
         if table.name == "Production Monthly":
             st.caption(
                 "Edit **Cassava ton** (and optional Growth %) for any month. The model will automatically recompute the matching "
@@ -1713,68 +1628,20 @@ def _render_table(
         if cache_key not in st.session_state:
             st.session_state[cache_key] = table.data.copy()
 
-        if table.name == "Direct Costs Monthly" and "Cost Category" in table.data.columns:
-            auto_mask = table.data["Cost Category"].apply(_is_cassava_feedstock)
-            auto_rows = table.data.loc[auto_mask].copy()
-            manual_rows = table.data.loc[~auto_mask].copy()
+        edited = st.data_editor(
+            table.data,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=widget_key,
+            column_config=column_config or None,
+        )
+        if isinstance(edited, pd.DataFrame):
+            new_data = edited[table.columns].copy()
+        else:  # pragma: no cover - safety for older Streamlit returning list of dicts
+            new_data = pd.DataFrame(edited, columns=table.columns)
 
-            if not auto_rows.empty:
-                auto_rows = auto_rows.sort_index().reset_index(drop=True)
-                st.caption(
-                    "Cassava feedstock costs are scenario-driven and locked. Adjust other "
-                    "direct-cost rows using the editor below."
-                )
-                st.data_editor(
-                    auto_rows,
-                    use_container_width=True,
-                    key=f"{widget_key}_auto",
-                    disabled=True,
-                    column_config=column_config or None,
-                )
-
-            display_manual = manual_rows.reset_index(drop=True)
-
-            if display_manual.empty:
-                st.info("No editable direct-cost rows are available. Use **Add row** to insert a new item.")
-                manual_result = display_manual.copy()
-            else:
-                manual_column_config = dict(column_config)
-                if "Cost Category" in display_manual.columns:
-                    manual_column_config["Cost Category"] = st.column_config.SelectboxColumn(
-                        label="Cost Category",
-                        options=list(DIRECT_COST_CATEGORY_OPTIONS),
-                    )
-                edited_manual = st.data_editor(
-                    display_manual,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"{widget_key}_manual",
-                    column_config=manual_column_config or None,
-                )
-                if isinstance(edited_manual, pd.DataFrame):
-                    manual_result = edited_manual[display_manual.columns].copy()
-                else:  # pragma: no cover
-                    manual_result = pd.DataFrame(edited_manual, columns=display_manual.columns)
-                if not manual_result.equals(display_manual):
-                    data_changed = True
-
-            combined = pd.concat([auto_rows, manual_result], axis=0, ignore_index=True)
-            new_data = combined[table.columns]
-        else:
-            edited = st.data_editor(
-                table.data,
-                num_rows="dynamic",
-                use_container_width=True,
-                key=widget_key,
-                column_config=column_config or None,
-            )
-            if isinstance(edited, pd.DataFrame):
-                new_data = edited[table.columns].copy()
-            else:  # pragma: no cover - safety for older Streamlit returning list of dicts
-                new_data = pd.DataFrame(edited, columns=table.columns)
-
-            if not new_data.equals(table.data):
-                data_changed = True
+        if not new_data.equals(table.data):
+            data_changed = True
 
         table.set_data(new_data, mark_user_input=data_changed)
         if (data_changed or change_applied) and table.name == "Production Monthly":
@@ -2417,7 +2284,7 @@ def main() -> None:
         _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)
-        _apply_dependent_updates(input_page, selected_scenario)
+        _apply_dependent_updates(input_page)
         _editable_tables(input_page)
 
     snapshot = st.session_state.get("input_snapshot")
