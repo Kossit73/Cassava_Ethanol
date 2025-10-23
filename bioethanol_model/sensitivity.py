@@ -148,6 +148,12 @@ MONTE_CARLO_PARAMETER_COLUMNS: Tuple[str, ...] = (
     "dfd",
 )
 
+MONTE_CARLO_TEXT_COLUMNS: Tuple[str, ...] = (
+    "Parameter",
+    "Distribution",
+    "pvals",
+)
+
 DEFAULT_MONTE_CARLO_ITERATIONS = 250
 DEFAULT_MONTE_CARLO_SEED = 42
 
@@ -177,7 +183,13 @@ def default_monte_carlo_parameters() -> pd.DataFrame:
     df = pd.DataFrame(data)
     for column in MONTE_CARLO_PARAMETER_COLUMNS:
         if column not in df.columns:
-            df[column] = np.nan
+            if column in MONTE_CARLO_TEXT_COLUMNS:
+                df[column] = ""
+            else:
+                df[column] = np.nan
+
+    for column in MONTE_CARLO_TEXT_COLUMNS:
+        df[column] = df[column].astype("string").fillna("").astype(object)
     return df[list(MONTE_CARLO_PARAMETER_COLUMNS)]
 
 

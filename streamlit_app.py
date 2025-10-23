@@ -34,6 +34,7 @@ from bioethanol_model.sensitivity import (
     DEFAULT_MONTE_CARLO_ITERATIONS,
     DEFAULT_MONTE_CARLO_SEED,
     MONTE_CARLO_PARAMETER_COLUMNS,
+    MONTE_CARLO_TEXT_COLUMNS,
     SensitivityScenario,
     available_monte_carlo_distributions,
     default_monte_carlo_parameters,
@@ -273,8 +274,17 @@ def _ensure_monte_carlo_state() -> None:
     missing = [col for col in MONTE_CARLO_PARAMETER_COLUMNS if col not in df.columns]
     if missing:
         for column in missing:
-            df[column] = np.nan
-    st.session_state[MC_PARAMETER_STATE_KEY] = df[list(MONTE_CARLO_PARAMETER_COLUMNS)]
+            if column in MONTE_CARLO_TEXT_COLUMNS:
+                df[column] = ""
+            else:
+                df[column] = np.nan
+
+    df = df[list(MONTE_CARLO_PARAMETER_COLUMNS)]
+
+    for column in MONTE_CARLO_TEXT_COLUMNS:
+        df[column] = df[column].astype("string").fillna("").astype(object)
+
+    st.session_state[MC_PARAMETER_STATE_KEY] = df
 
     if MC_ITERATION_STATE_KEY not in st.session_state:
         st.session_state[MC_ITERATION_STATE_KEY] = DEFAULT_MONTE_CARLO_ITERATIONS
