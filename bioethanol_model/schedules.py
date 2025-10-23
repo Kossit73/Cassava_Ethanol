@@ -427,10 +427,9 @@ def compute_cost_tables(
                 columns=category_col,
                 values=value_column,
                 aggfunc="sum",
-                fill_value=0.0,
             )
             .sort_index()
-            .reindex(months, fill_value=0.0)
+            .reindex(months)
         )
 
         # Forward-fill within the projection horizon so dated overrides continue
@@ -450,7 +449,7 @@ def compute_cost_tables(
         if table.empty:
             annual = pd.DataFrame(columns=[])
         else:
-            annual = table.resample("Y").sum()
+            annual = table.resample("YE").sum()
             annual.index = annual.index.year
         outputs[name] = CostOutput(table, annual)
     return outputs

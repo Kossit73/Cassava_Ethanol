@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, TYPE_CHECKING
 
 import hashlib
 import numpy as np
 import pandas as pd
 
 from . import inputs
-from .advanced_tools import AdvancedAnalyticsToolkit
+if TYPE_CHECKING:
+    from .advanced_tools import AdvancedAnalyticsToolkit
+
 from .schedules import (
     compute_break_even,
     compute_cost_tables,
@@ -33,7 +35,7 @@ class CassavaBioethanolModel:
     input_page: inputs.InputLandingPage = field(default_factory=inputs.default_input_page)
     scenario: str = "FARM_ONLY"
     _scenario_cache: Dict[str, Tuple[str, Dict[str, object]]] = field(default_factory=dict, init=False, repr=False)
-    _advanced_tools: AdvancedAnalyticsToolkit | None = field(default=None, init=False, repr=False)
+    _advanced_tools: "AdvancedAnalyticsToolkit" | None = field(default=None, init=False, repr=False)
 
     SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
 
@@ -202,10 +204,12 @@ class CassavaBioethanolModel:
     # Advanced analytics extensions
     # ------------------------------------------------------------------
 
-    def advanced_toolkit(self) -> AdvancedAnalyticsToolkit:
+    def advanced_toolkit(self) -> "AdvancedAnalyticsToolkit":
         """Lazily instantiate the :class:`AdvancedAnalyticsToolkit` helper."""
 
         if self._advanced_tools is None:
+            from .advanced_tools import AdvancedAnalyticsToolkit
+
             self._advanced_tools = AdvancedAnalyticsToolkit(self)
         return self._advanced_tools
 
