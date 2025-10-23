@@ -131,41 +131,6 @@ class CassavaBioethanolModel:
                 mark_user = page.staff_positions.placeholder or farm_positions.any()
                 page.staff_positions.set_data(positions_df, mark_user_input=mark_user)
 
-        direct_df = page.direct_costs_monthly.model_frame
-        if not direct_df.empty and "Cost Category" in direct_df.columns:
-            feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
-            if feed_mask.any():
-                prod_df = page.production_monthly.model_frame
-                tons = pd.Series(dtype=float)
-                month_col = None
-                if not prod_df.empty:
-                    if "Month" in prod_df.columns:
-                        month_col = "Month"
-                    elif "Start Month" in prod_df.columns:
-                        month_col = "Start Month"
-                if month_col and "Cassava ton" in prod_df.columns:
-                    prod_df[month_col] = prod_df[month_col].astype(str)
-                    tons = pd.to_numeric(prod_df.set_index(month_col)["Cassava ton"], errors="coerce")
-                default_ton = float(tons.mean()) if not tons.dropna().empty else 0.0
-
-                def _tons(month: str) -> float:
-                    if month in tons.index and pd.notna(tons.loc[month]):
-                        return float(tons.loc[month])
-                    return default_ton
-
-                if scenario == "FARM_ONLY":
-                    cost_per_ton = farm_cost
-                elif scenario == "BUY_ONLY":
-                    cost_per_ton = purchase_cost
-                else:
-                    cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
-
-                direct_df.loc[feed_mask, "Amount"] = direct_df.loc[feed_mask, "Month"].astype(str).apply(
-                    lambda month: _tons(month) * cost_per_ton
-                )
-                mark_user = page.direct_costs_monthly.placeholder or feed_mask.any()
-                page.direct_costs_monthly.set_data(direct_df, mark_user_input=mark_user)
-
         return page
 
     def _apply_staff_schedule(self, page: inputs.InputLandingPage):
