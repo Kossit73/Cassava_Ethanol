@@ -2121,6 +2121,40 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     if isinstance(break_even_df, pd.DataFrame) and not break_even_df.empty:
         st.dataframe(_reset_period_index(break_even_df, "Month"), use_container_width=True)
 
+        break_even_monthly = break_even_df.copy()
+        if isinstance(break_even_monthly.index, pd.PeriodIndex):
+            break_even_monthly.index = break_even_monthly.index.to_timestamp()
+        elif not isinstance(break_even_monthly.index, pd.DatetimeIndex):
+            converted_index = pd.to_datetime(break_even_monthly.index, errors="coerce")
+            valid_mask = converted_index.notna()
+            break_even_monthly = break_even_monthly.loc[valid_mask]
+            break_even_monthly.index = converted_index[valid_mask]
+
+        numeric_columns = [
+            column
+            for column in ("Monthly Margin", "Cumulative Margin")
+            if column in break_even_monthly.columns
+        ]
+
+        if numeric_columns:
+            monthly_chart = break_even_monthly[numeric_columns]
+            if not monthly_chart.empty:
+                st.markdown("#### Monthly Break-even Trend")
+                st.line_chart(monthly_chart)
+
+                aggregation: Dict[str, str] = {}
+                if "Monthly Margin" in monthly_chart.columns:
+                    aggregation["Monthly Margin"] = "sum"
+                if "Cumulative Margin" in monthly_chart.columns:
+                    aggregation["Cumulative Margin"] = "last"
+                annual_break_even = (
+                    monthly_chart.resample("Y").agg(aggregation).dropna(how="all") if aggregation else pd.DataFrame()
+                )
+                if not annual_break_even.empty:
+                    annual_break_even.index = annual_break_even.index.to_period("Y").astype(str)
+                    st.markdown("#### Annual Break-even Trend")
+                    st.line_chart(annual_break_even)
+
 def _render_financial_performance(results: Dict[str, object]) -> None:
     financials = results["financials"]
     expenses_summary: ExpenseSummary | None = (
