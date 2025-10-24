@@ -178,6 +178,18 @@ YEARLY_INCREMENT_CONFIG = {
     },
 }
 
+
+def _increment_horizon_value(config: Dict[str, object], projection: ProjectionHorizon) -> object | None:
+    """Return the terminal period for yearly increments based on *projection*."""
+
+    frequency = str(config.get("frequency", "")).upper()
+    if frequency.startswith("M"):
+        return f"{projection.end_year:04d}-12"
+    if frequency.startswith("Y"):
+        return projection.end_year
+    return None
+
+
 CHANGE_BUTTON_CONFIG = {
     "Production Monthly": {
         "type": "month",
@@ -1535,6 +1547,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
                     value_columns=available_columns,
                     increments=rates,
                     match_columns=increment_config.get("match_columns", []),
+                    horizon_end=_increment_horizon_value(increment_config, page.projection),
                 )
                 if table.name.startswith("Production"):
                     incremented = _sync_production_outputs(incremented)

@@ -66,6 +66,16 @@ def _match_mask(series: pd.Series, value: object) -> pd.Series:
     return series.fillna("<NA>").astype(str) == str(value)
 
 
+def _matching_rows(df: pd.DataFrame, columns: Sequence[str] | None, anchor_row: pd.Series) -> pd.Series:
+    """Return a boolean mask of rows matching *anchor_row* for *columns*."""
+
+    mask = pd.Series(True, index=df.index)
+    for column in columns or []:
+        if column in df.columns:
+            mask &= _match_mask(df[column], anchor_row.get(column))
+    return mask
+
+
 def _base_value(row: pd.Series, column: str) -> float | None:
     """Return ``row[column]`` as ``float`` when possible."""
 
@@ -82,6 +92,40 @@ def _base_value(row: pd.Series, column: str) -> float | None:
     return float(numeric)
 
 
+def _format_period_value(period: pd.Period, sample: object, frequency: str) -> object:
+    """Return a representation of *period* aligned with the type of *sample*."""
+
+    if isinstance(sample, pd.Period):
+        try:
+            return period.asfreq(sample.freq)
+        except Exception:  # pragma: no cover - defensive guard
+            return period
+
+    if isinstance(sample, pd.Timestamp):
+        return period.to_timestamp()
+
+    if isinstance(sample, (int, np.integer)):
+        return int(period.year)
+
+    if isinstance(sample, (float, np.floating)) and frequency.upper().startswith("Y"):
+        return float(period.year)
+
+    text = str(sample or "").strip()
+    if frequency.upper().startswith("Y"):
+        if text.isdigit():
+            return int(period.year)
+        return int(period.year)
+
+    if frequency.upper().startswith("M"):
+        if len(text) == 6 and text.isdigit():
+            return period.strftime("%Y%m")
+        if len(text) >= 7 and "-" in text:
+            return period.strftime("%Y-%m")
+        return period.strftime("%Y-%m")
+
+    return period.strftime("%Y-%m")
+
+
 def apply_yearly_increment(
     df: pd.DataFrame,
     base_index: int,
@@ -91,6 +135,7 @@ def apply_yearly_increment(
     value_columns: Sequence[str],
     increments: Mapping[str, float],
     match_columns: Sequence[str] | None = None,
+    horizon_end: object | None = None,
 ) -> pd.DataFrame:
     """Return *df* with annual percentage adjustments applied.
 
@@ -112,6 +157,11 @@ def apply_yearly_increment(
     match_columns:
         Optional sequence of columns whose values must match the anchor row for
         the increment to apply (e.g. category or department identifiers).
+    horizon_end:
+        Optional calendar boundary that indicates the final period that should
+        receive incremented rows. When provided, the helper creates yearly rows
+        up to this boundary so the adjustments cascade across the full
+        projection horizon even if future overrides are absent.
     """
 
     if df.empty or base_index not in df.index:
@@ -133,12 +183,56 @@ def apply_yearly_increment(
     if not filtered_increments:
         return df.copy()
 
-    mask = pd.Series(True, index=df.index)
-    for column in match_columns or []:
-        if column in df.columns:
-            mask &= _match_mask(df[column], anchor_row.get(column))
-
     result = df.copy()
+    mask = _matching_rows(result, match_columns, anchor_row)
+
+    max_period = _coerce_period(horizon_end, frequency) if horizon_end is not None else None
+    if max_period is not None and max_period.year > anchor_period.year:
+        existing_periods = [
+            _coerce_period(result.at[idx, date_column], frequency)
+            for idx in result.index[mask]
+        ]
+        existing_years = {period.year for period in existing_periods if period is not None}
+        new_rows = []
+        for year in range(anchor_period.year, max_period.year + 1):
+            if year in existing_years or year < anchor_period.year:
+                continue
+
+            if frequency.upper().startswith("M"):
+                try:
+                    target_period = pd.Period(year=year, month=anchor_period.month, freq="M")
+                except Exception:  # pragma: no cover - defensive guard
+                    continue
+            else:
+                try:
+                    target_period = pd.Period(year, freq=frequency)
+                except Exception:  # pragma: no cover - defensive guard
+                    continue
+
+            formatted = _format_period_value(target_period, anchor_row.get(date_column), frequency)
+            new_row = anchor_row.copy()
+            new_row[date_column] = formatted
+            new_rows.append(new_row)
+            existing_years.add(year)
+
+        if new_rows:
+            result = pd.concat([result, pd.DataFrame(new_rows)], ignore_index=True)
+            mask = _matching_rows(result, match_columns, anchor_row)
+
+    try:
+        order_series = result[date_column].apply(lambda value: _coerce_period(value, frequency))
+        if order_series.notna().any():
+            result = (
+                result.assign(_order=order_series)
+                .sort_values("_order")
+                .drop(columns="_order")
+                .reset_index(drop=True)
+            )
+            mask = _matching_rows(result, match_columns, anchor_row)
+    except Exception:  # pragma: no cover - defensive ordering guard
+        result = result.reset_index(drop=True)
+        mask = _matching_rows(result, match_columns, anchor_row)
+
     for idx in result.index[mask]:
         target_period = _coerce_period(result.at[idx, date_column], frequency)
         if target_period is None:
@@ -163,5 +257,5 @@ def apply_yearly_increment(
             if current_val is None or not np.isclose(current_val, new_value, rtol=1e-9, atol=1e-9):
                 result.at[idx, column] = new_value
 
-    return result
+    return result[df.columns]
 

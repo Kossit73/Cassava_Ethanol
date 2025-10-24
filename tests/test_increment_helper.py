@@ -98,3 +98,32 @@ def test_apply_yearly_increment_handles_missing_columns():
 
     assert updated.loc[1, "Headcount"] == pytest.approx(10)
     assert updated.loc[1, "Cost"] == pytest.approx(1200.0)
+
+
+def test_apply_yearly_increment_extends_rows_to_horizon():
+    df = pd.DataFrame(
+        [
+            {"Month": "2025-01", "Cost Category": "Cassava Feedstock", "Amount": 100.0},
+        ]
+    )
+
+    updated = apply_yearly_increment(
+        df,
+        0,
+        date_column="Month",
+        frequency="M",
+        value_columns=["Amount"],
+        increments={"Amount": 0.1},
+        match_columns=["Cost Category"],
+        horizon_end="2027-12",
+    )
+
+    cassava_rows = (
+        updated.loc[updated["Cost Category"] == "Cassava Feedstock"]
+        .reset_index(drop=True)
+    )
+
+    assert list(cassava_rows["Month"]) == ["2025-01", "2026-01", "2027-01"]
+    assert cassava_rows.loc[0, "Amount"] == pytest.approx(100.0)
+    assert cassava_rows.loc[1, "Amount"] == pytest.approx(110.0)
+    assert cassava_rows.loc[2, "Amount"] == pytest.approx(121.0)
