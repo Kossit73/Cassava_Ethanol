@@ -503,6 +503,37 @@ def compute_loan_schedule(
 
     amount_columns = ["Loan Amount", "Amount", "Drawdown"]
 
+    def _normalise_interest_rate(value: float | str | None) -> float:
+        """Return a decimal interest rate from user input.
+
+        The landing page captures rates as percentages (``7.5`` or ``"7.5%"``)
+        while tests feed decimals (``0.075``).  Streamline both by treating
+        values greater than ``1`` as percentages and gracefully handling
+        strings with a trailing percent sign.
+        """
+
+        if value is None or (isinstance(value, float) and not np.isfinite(value)):
+            return 0.0
+
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.endswith("%"):
+                cleaned = cleaned[:-1]
+            try:
+                numeric = float(cleaned)
+            except ValueError:
+                return 0.0
+        else:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        if not np.isfinite(numeric):
+            return 0.0
+
+        return numeric / 100.0 if abs(numeric) > 1 else numeric
+
     for _, loan in loan_inputs.iterrows():
         amount = None
         for column in amount_columns:
@@ -519,10 +550,7 @@ def compute_loan_schedule(
 
         tenor_years = int(loan.get("Tenor Years", 8))
         grace_years = int(loan.get("Grace Years", 1))
-        try:
-            rate = float(loan.get("Interest Rate", 0.08))
-        except (TypeError, ValueError):
-            rate = 0.0
+        rate = _normalise_interest_rate(loan.get("Interest Rate", 0.08))
         amortization = str(loan.get("Amortization", "Annuity") or "Annuity")
         monthly_rate = rate / 12.0
         tenor_months = max(tenor_years, 0) * 12
