@@ -459,6 +459,7 @@ def compute_cost_tables(
 class LoanScheduleOutput:
     schedule: pd.DataFrame
     summary: pd.DataFrame
+    annual: pd.DataFrame
 
 
 def compute_loan_schedule(
@@ -485,6 +486,19 @@ def compute_loan_schedule(
         return LoanScheduleOutput(
             empty_schedule,
             pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"]),
+            pd.DataFrame(
+                columns=[
+                    "Loan",
+                    "Year",
+                    "Interest Rate",
+                    "Yearly Remaining Balance",
+                    "Monthly Interest (Balance × Rate / 12)",
+                    "Interest Paid",
+                    "Principal Paid",
+                    "Total Payment",
+                    "Year-End Balance",
+                ]
+            ),
         )
 
     amount_columns = ["Loan Amount", "Amount", "Drawdown"]
@@ -572,15 +586,70 @@ def compute_loan_schedule(
                     "Principal": principal,
                     "Closing Balance": balance,
                     "Payment": interest + principal,
+                    "Interest Rate": rate,
                 }
             )
 
     schedule = pd.DataFrame(schedule_rows)
     if schedule.empty:
         summary = pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"])
+        annual = pd.DataFrame(
+            columns=[
+                "Loan",
+                "Year",
+                "Interest Rate",
+                "Yearly Remaining Balance",
+                "Monthly Interest (Balance × Rate / 12)",
+                "Interest Paid",
+                "Principal Paid",
+                "Total Payment",
+                "Year-End Balance",
+            ]
+        )
     else:
+        schedule = schedule.sort_values(["Loan", "Month"]).reset_index(drop=True)
+        schedule["Month"] = pd.to_datetime(schedule["Month"], errors="coerce")
         summary = schedule.groupby("Loan").agg({"Draw": "sum", "Interest": "sum", "Principal": "sum", "Payment": "sum"})
-    return LoanScheduleOutput(schedule, summary)
+        schedule["Year"] = schedule["Month"].dt.year
+        annual = (
+            schedule.groupby(["Loan", "Year"]).agg(
+                Interest_Rate=("Interest Rate", "first"),
+                Yearly_Remaining_Balance=("Opening Balance", "first"),
+                Interest_Paid=("Interest", "sum"),
+                Principal_Paid=("Principal", "sum"),
+                Total_Payment=("Payment", "sum"),
+                Year_End_Balance=("Closing Balance", "last"),
+            )
+            .reset_index()
+            .sort_values(["Loan", "Year"])
+        )
+        annual["Monthly Interest (Balance × Rate / 12)"] = (
+            annual["Yearly_Remaining_Balance"] * annual["Interest_Rate"] / 12.0
+        )
+        annual = annual.rename(
+            columns={
+                "Interest_Rate": "Interest Rate",
+                "Yearly_Remaining_Balance": "Yearly Remaining Balance",
+                "Interest_Paid": "Interest Paid",
+                "Principal_Paid": "Principal Paid",
+                "Total_Payment": "Total Payment",
+                "Year_End_Balance": "Year-End Balance",
+            }
+        )
+        annual = annual[
+            [
+                "Loan",
+                "Year",
+                "Interest Rate",
+                "Yearly Remaining Balance",
+                "Monthly Interest (Balance × Rate / 12)",
+                "Interest Paid",
+                "Principal Paid",
+                "Total Payment",
+                "Year-End Balance",
+            ]
+        ]
+    return LoanScheduleOutput(schedule, summary, annual)
 
 
 @dataclass

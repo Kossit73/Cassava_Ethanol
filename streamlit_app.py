@@ -2094,6 +2094,28 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     if not debt_payments.empty:
         st.area_chart(debt_payments)
 
+    st.markdown("### Yearly Loan Amortisation")
+    yearly_amortisation = getattr(loan_schedule, "annual", pd.DataFrame())
+    if isinstance(yearly_amortisation, pd.DataFrame) and not yearly_amortisation.empty:
+        amort_display = yearly_amortisation.copy()
+        rate_column = "Interest Rate"
+        currency_columns = [
+            "Yearly Remaining Balance",
+            "Monthly Interest (Balance × Rate / 12)",
+            "Interest Paid",
+            "Principal Paid",
+            "Total Payment",
+            "Year-End Balance",
+        ]
+        if rate_column in amort_display.columns:
+            amort_display[rate_column] = amort_display[rate_column].apply(_format_rate)
+        for col in currency_columns:
+            if col in amort_display.columns:
+                amort_display[col] = amort_display[col].apply(_format_currency)
+        st.dataframe(amort_display, use_container_width=True)
+    else:
+        st.info("No loan amortisation data available for the current projection.")
+
     st.markdown("### Break-even Analysis")
     break_even_df = results.get("break_even")
     if isinstance(break_even_df, pd.DataFrame) and not break_even_df.empty:
