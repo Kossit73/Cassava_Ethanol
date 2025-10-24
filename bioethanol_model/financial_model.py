@@ -274,7 +274,13 @@ class CassavaBioethanolModel:
             discount_rate=discount_rate,
             investor_share=investor_share,
             owner_share=owner_share,
+            revenue=revenue,
         )
+        loan_summary = loan_schedule.summary if hasattr(loan_schedule, "summary") else pd.DataFrame()
+        if isinstance(loan_summary, pd.DataFrame) and not loan_summary.empty:
+            total_loan_draw = float(pd.to_numeric(loan_summary.get("Draw"), errors="coerce").fillna(0.0).sum())
+        else:
+            total_loan_draw = 0.0
         metrics.update(
             {
                 "Corporate Tax Rate": tax_rate,
@@ -283,7 +289,11 @@ class CassavaBioethanolModel:
                 "Terminal Growth Rate": _get_global("Terminal growth", 0.0),
                 "Capital Gains Tax Rate": _get_global("Capital gains tax rate", 0.0),
                 "Discount Rate": discount_rate,
-                "Total Initial Investment": total_investment,
+                "Total Initial Investment": metrics.get("Initial Project Outlay", total_investment),
+                "Initial Loan Funding": metrics.get("Initial Loan Draw", total_loan_draw),
+                "Initial Equity Investment": metrics.get(
+                    "Initial Equity Investment", total_investment - total_loan_draw
+                ),
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
             }
@@ -292,7 +302,11 @@ class CassavaBioethanolModel:
             metrics["Payback Period (years)"] = metrics["Payback Period (months)"] / 12.0
 
         break_even = compute_break_even(revenue, cost_outputs)
-        payback = compute_payback(financials.cashflow_monthly)
+        payback = compute_payback(
+            financials,
+            revenue,
+            initial_project_outlay=metrics.get("Initial Project Outlay"),
+        )
 
         results = {
             "depreciation": depreciation,

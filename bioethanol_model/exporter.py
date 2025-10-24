@@ -254,6 +254,8 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
                 _get_metric("Terminal Growth Rate"),
                 _get_metric("Capital Gains Tax Rate"),
                 _get_metric("Total Initial Investment"),
+                _get_metric("Initial Equity Investment"),
+                _get_metric("Initial Loan Funding"),
             ]
         },
         index=[
@@ -265,6 +267,8 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
             "Terminal Growth Rate",
             "Capital Gains Tax Rate",
             "Total Initial Investment",
+            "Initial Equity Investment",
+            "Initial Loan Funding",
         ],
     )
 

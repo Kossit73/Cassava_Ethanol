@@ -1964,6 +1964,8 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 "Terminal Growth Rate",
                 "Capital Gains Tax Rate",
                 "Total Initial Investment",
+                "Initial Equity Investment",
+                "Initial Loan Funding",
             ],
             "Value": [
                 _format_rate(metrics.get("Corporate Tax Rate")),
@@ -1973,6 +1975,8 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 _format_rate(metrics.get("Terminal Growth Rate")),
                 _format_rate(metrics.get("Capital Gains Tax Rate")),
                 _format_currency(metrics.get("Total Initial Investment")),
+                _format_currency(metrics.get("Initial Equity Investment")),
+                _format_currency(metrics.get("Initial Loan Funding")),
             ],
         }
     )
