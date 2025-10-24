@@ -16,6 +16,7 @@ import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
+from bioethanol_model.increment import apply_yearly_increment
 from bioethanol_model.inputs import (
     EditableTable,
     InputLandingPage,
@@ -108,6 +109,72 @@ CATEGORY_SELECT_OPTIONS = {
             "Other payable days",
         ],
         "allow_custom": True,
+    },
+}
+
+YEARLY_INCREMENT_CONFIG = {
+    "Production Monthly": {
+        "date_column": "Start Month",
+        "frequency": "M",
+        "value_columns": ["Cassava ton"],
+        "match_columns": [],
+        "description": "Apply an annual growth/decline to cassava tonnage.",
+    },
+    "Production Annual": {
+        "date_column": "Year",
+        "frequency": "Y",
+        "value_columns": ["Cassava ton"],
+        "match_columns": [],
+        "description": "Scale annual cassava tonnage by a yearly percentage.",
+    },
+    "Direct Costs Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Amount"],
+        "match_columns": ["Cost Category"],
+        "description": "Increase or decrease the selected cost category each year.",
+    },
+    "Staff Costs Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Headcount", "Cost"],
+        "match_columns": ["Department"],
+        "description": "Apply annual changes to staffing levels or department spend.",
+    },
+    "Other Opex Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Amount"],
+        "match_columns": ["Category"],
+        "description": "Cascade the yearly percentage to this operating expense.",
+    },
+    "Accounts Receivable & Other Assets": {
+        "date_column": "Effective Month",
+        "frequency": "M",
+        "value_columns": ["Value"],
+        "match_columns": ["Metric"],
+        "description": "Roll forward the working-capital metric with an annual rate.",
+    },
+    "Accounts Payable": {
+        "date_column": "Effective Month",
+        "frequency": "M",
+        "value_columns": ["Value"],
+        "match_columns": ["Metric"],
+        "description": "Apply the yearly percentage to the payable policy value.",
+    },
+    "Inflation Schedule": {
+        "date_column": "Year",
+        "frequency": "Y",
+        "value_columns": ["CPI", "FX Index", "Tariff Escalation"],
+        "match_columns": [],
+        "description": "Project inflation indices with an annual growth rate.",
+    },
+    "Loan Schedule": {
+        "date_column": "Start Month",
+        "frequency": "M",
+        "value_columns": ["Loan Amount"],
+        "match_columns": ["Loan"],
+        "description": "Escalate the selected facility amount year over year.",
     },
 }
 
@@ -1161,6 +1228,31 @@ def _display_production_metrics(derived_metrics: Tuple[float, float] | None) -> 
     )
 
 
+def _production_metrics_from_row(df: pd.DataFrame, row_idx: int) -> Tuple[float, float] | None:
+    if "Cassava ton" not in df.columns or row_idx not in df.index:
+        return None
+
+    cassava_val = pd.to_numeric(pd.Series([df.at[row_idx, "Cassava ton"]]), errors="coerce").iloc[0]
+    if pd.isna(cassava_val):
+        return None
+
+    ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
+    feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
+    return ethanol_val, feed_val
+
+
+def _sync_production_outputs(df: pd.DataFrame) -> pd.DataFrame:
+    if "Cassava ton" not in df.columns:
+        return df
+
+    cassava_series = pd.to_numeric(df["Cassava ton"], errors="coerce")
+    if "Ethanol litres" in df.columns:
+        df.loc[:, "Ethanol litres"] = cassava_series * ETHANOL_LITRES_PER_TON
+    if "Animal Feed ton" in df.columns:
+        df.loc[:, "Animal Feed ton"] = cassava_series * ANIMAL_FEED_TON_PER_TON
+    return df
+
+
 def _row_editor_form(
     table: EditableTable,
     row_idx: int,
@@ -1409,6 +1501,47 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         page.projection,
         widget_prefix="default_edit",
     )
+
+    increment_config = YEARLY_INCREMENT_CONFIG.get(table.name)
+    if increment_config:
+        available_columns = [col for col in increment_config["value_columns"] if col in df_updated.columns]
+        if available_columns:
+            st.markdown("---")
+            st.markdown("**Yearly increment adjustments (%)**")
+            description = increment_config.get("description")
+            if description:
+                st.caption(description)
+
+            rates: Dict[str, float] = {}
+            for column in available_columns:
+                rate_input = st.number_input(
+                    f"{column} annual change (%)",
+                    value=0.0,
+                    step=0.1,
+                    format="%.2f",
+                    key=f"yearly_increment_{table.name.replace(' ', '_').lower()}_{row_idx}_{column}",
+                )
+                rates[column] = float(rate_input) / 100.0
+
+            if st.button(
+                "Apply yearly increment",
+                key=f"apply_yearly_increment_{table.name.replace(' ', '_').lower()}_{row_idx}",
+            ):
+                incremented = apply_yearly_increment(
+                    df_updated,
+                    row_idx,
+                    date_column=increment_config["date_column"],
+                    frequency=increment_config["frequency"],
+                    value_columns=available_columns,
+                    increments=rates,
+                    match_columns=increment_config.get("match_columns", []),
+                )
+                if table.name.startswith("Production"):
+                    incremented = _sync_production_outputs(incremented)
+                    derived_metrics = _production_metrics_from_row(incremented, row_idx)
+                if not incremented.equals(df_updated):
+                    df_updated = incremented
+                    updated = True
 
     cascade_applied = False
     cascade_metrics: Tuple[float, float] | None = None
