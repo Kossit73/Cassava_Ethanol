@@ -2375,21 +2375,6 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
     else:
         st.dataframe(sensitivity_results, use_container_width=True)
 
-    st.subheader("Monte Carlo Simulation Configuration")
-    _ensure_monte_carlo_state()
-    settings_df = pd.DataFrame(
-        [
-            {"Setting": "Iterations", "Value": int(st.session_state[MC_ITERATION_STATE_KEY])},
-            {"Setting": "Random Seed", "Value": int(st.session_state[MC_SEED_STATE_KEY])},
-        ]
-    )
-    st.dataframe(settings_df, use_container_width=True, hide_index=True)
-    st.dataframe(
-        _monte_carlo_parameters(),
-        use_container_width=True,
-        hide_index=True,
-    )
-
     st.subheader("Tornado Drivers")
     tornado_model = _scenario_model()
     tornado_df = tornado_chart_inputs(tornado_model, TORNADO_DRIVERS, scale=0.1)
@@ -2495,6 +2480,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     st.subheader("Monte Carlo Simulation")
 
     _ensure_monte_carlo_state()
+    st.subheader("Monte Carlo Simulation Configuration")
     current_version = _current_model_version()
     current_scenario = model.scenario
     parameter_source = results.get("input_page_snapshot") if isinstance(results, dict) else None
