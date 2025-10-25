@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
@@ -2722,15 +2723,48 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
         return
 
     st.subheader("Summary Statistics")
-    summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T
-    st.dataframe(summary, use_container_width=True)
+    summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T.reset_index()
+    summary = summary.rename(columns={"index": "Metric"})
+    stat_columns = [
+        column
+        for column in summary.columns
+        if column != "Metric" and summary[column].notna().any()
+    ]
+    if stat_columns:
+        summary_melt = summary.melt(
+            id_vars="Metric",
+            value_vars=stat_columns,
+            var_name="Statistic",
+            value_name="Value",
+        )
+        summary_chart = px.bar(
+            summary_melt,
+            x="Statistic",
+            y="Value",
+            color="Statistic",
+            facet_col="Metric",
+            facet_col_wrap=2,
+            title="Monte Carlo summary statistics by metric",
+        )
+        summary_chart.update_layout(showlegend=False)
+        st.plotly_chart(summary_chart, use_container_width=True)
+    else:
+        st.info("Summary statistics are not available for the current simulation results.")
 
-    st.subheader("NPV Distribution (sorted path)")
-    st.line_chart(mc_results["Project NPV"].sort_values().reset_index(drop=True))
-
-    if "Project IRR" in mc_results:
-        st.subheader("IRR Distribution (sorted path)")
-        st.line_chart(mc_results["Project IRR"].sort_values().reset_index(drop=True))
+    numeric_columns = mc_results.select_dtypes(include=[np.number]).columns.tolist()
+    if numeric_columns:
+        st.subheader("Distribution Visualisations")
+        for column in numeric_columns:
+            distribution_chart = px.histogram(
+                mc_results,
+                x=column,
+                nbins=min(50, max(10, int(np.sqrt(len(mc_results))))),
+                marginal="box",
+                title=f"Distribution for {column}",
+            )
+            st.plotly_chart(distribution_chart, use_container_width=True)
+    else:
+        st.info("Monte Carlo results do not contain numeric metrics to plot.")
 
 def main() -> None:
     st.title("Cassava_Bioethanol Financial Model")
