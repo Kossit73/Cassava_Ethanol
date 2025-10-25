@@ -224,6 +224,24 @@ def _values_equal(a: float, b: float) -> bool:
     return np.isclose(a, b, equal_nan=False)
 
 
+SCENARIO_PARAMETER_NAMES: Tuple[str, ...] = (
+    "Production monthly",
+    "Loan Schedule",
+    "Marketing",
+    "Cassava feedstock",
+    "Enzymes & Chemical",
+    "Energy cost",
+    "Staff Monthly",
+    "Insurance",
+    "Service Contracts",
+    "General Administration",
+    "Research & Development",
+    "Sales & Marketing",
+    "Revenue Inputs",
+    "Initial Investment",
+)
+
+
 MONTE_CARLO_PARAMETER_ADAPTERS: Dict[str, MonteCarloParameterAdapter] = {
     "Production monthly": MonteCarloParameterAdapter(
         table_attr="production_monthly",
@@ -358,30 +376,13 @@ def available_monte_carlo_distributions() -> List[str]:
 def default_monte_carlo_parameters() -> pd.DataFrame:
     """Seed Monte Carlo configuration with the standard project parameters."""
 
-    parameter_names = [
-        "Production monthly",
-        "Loan Schedule",
-        "Marketing",
-        "Cassava feedstock",
-        "Enzymes & Chemical",
-        "Energy cost",
-        "Staff Monthly",
-        "Insurance",
-        "Service Contracts",
-        "General Administration",
-        "Research & Development",
-        "Sales & Marketing",
-        "Revenue Inputs",
-        "Initial Investment",
-    ]
-
     data = [
         {
             "Parameter": name,
             "Distribution": "Normal",
             "scale": 0.05,
         }
-        for name in parameter_names
+        for name in SCENARIO_PARAMETER_NAMES
     ]
 
     df = pd.DataFrame(data)

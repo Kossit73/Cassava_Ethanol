@@ -24,7 +24,12 @@ from bioethanol_model.inputs import (
     ProjectionHorizon,
     default_input_page,
 )
-from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
+from bioethanol_model.scenario import (
+    ScenarioConfig,
+    goal_seek_to_target,
+    scenario_comparison,
+    scenario_parameter_catalog,
+)
 from bioethanol_model.schedules import (
     ANIMAL_FEED_TON_PER_TON,
     ETHANOL_LITRES_PER_TON,
@@ -40,6 +45,7 @@ from bioethanol_model.sensitivity import (
     MONTE_CARLO_PARAMETER_ADAPTERS,
     MONTE_CARLO_PARAMETER_COLUMNS,
     MONTE_CARLO_TEXT_COLUMNS,
+    SCENARIO_PARAMETER_NAMES,
     SensitivityScenario,
     available_monte_carlo_distributions,
     default_monte_carlo_parameters,
@@ -292,6 +298,11 @@ MC_SELECTED_PARAMETER_STATE_KEY = "mc_selected_parameters"
 MC_ITERATION_STATE_KEY = "mc_iteration_setting"
 MC_SEED_STATE_KEY = "mc_random_seed"
 
+SCENARIO_DEFINITIONS_KEY = "scenario_definitions"
+SCENARIO_SELECTION_STATE_KEY = "scenario_builder_selection"
+SCENARIO_VALUE_STATE_KEY = "scenario_builder_values"
+SCENARIO_NAME_STATE_KEY = "scenario_builder_name"
+
 PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
 
 
@@ -303,6 +314,31 @@ def _trigger_rerun() -> None:
         rerun = getattr(st, "experimental_rerun", None)
     if rerun is not None:
         rerun()
+
+
+def _normalise_json_value(value: object) -> object:
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return float(value)
+    return value
+
+
+def _scenario_definition_signature(definitions: Iterable[Dict[str, object]]) -> str:
+    normalised: List[Dict[str, object]] = []
+    for entry in definitions:
+        normalised.append(
+            {
+                "name": entry.get("name"),
+                "overrides": {
+                    key: _normalise_json_value(val) for key, val in entry.get("overrides", {}).items()
+                },
+                "deltas": {
+                    key: _normalise_json_value(val) for key, val in entry.get("deltas", {}).items()
+                },
+            }
+        )
+    return json.dumps(normalised, sort_keys=True)
 
 
 def _load_session_inputs() -> InputLandingPage:
@@ -2404,20 +2440,157 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
     st.dataframe(tornado_df, use_container_width=True)
 
 def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
-    st.subheader("Scenario/Is Configuration")
-    scenario_df = pd.DataFrame([{"Scenario": cfg.name, **cfg.overrides} for cfg in DEFAULT_SCENARIO_CONFIGS]) if DEFAULT_SCENARIO_CONFIGS else pd.DataFrame(columns=["Scenario"])
-    st.dataframe(scenario_df, use_container_width=True)
-
-    st.subheader("Scenario Tool Configuration")
-    tool_df = model.input_page.global_inputs.model_frame.rename(columns={"Value": "Base Value"}).copy()
-    numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
-    tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
-    tool_df["High Bound"] = np.where(numeric_values.notna(), numeric_values * 1.2, np.nan)
-    desired_order = ["Parameter", "Base Value", "Units", "Low Bound", "High Bound"]
-    tool_df = tool_df[[c for c in desired_order if c in tool_df.columns]]
-    st.dataframe(tool_df, use_container_width=True, hide_index=True)
-
     base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+    parameter_catalog = scenario_parameter_catalog(base_page)
+
+    st.subheader("Scenario Parameter Library")
+    if parameter_catalog.empty:
+        st.info("No scenario-compatible parameters are available for the current inputs.")
+    else:
+        catalog_display = parameter_catalog.copy()
+        st.dataframe(catalog_display, use_container_width=True, hide_index=True)
+
+    options = parameter_catalog["Parameter"].tolist()
+    scenario_definitions = st.session_state.setdefault(SCENARIO_DEFINITIONS_KEY, [])
+    selected_defaults = st.session_state.setdefault(SCENARIO_SELECTION_STATE_KEY, [])
+    selected_parameters = st.multiselect(
+        "Select parameters to configure",
+        options=options,
+        default=[value for value in selected_defaults if value in options],
+    )
+    st.session_state[SCENARIO_SELECTION_STATE_KEY] = selected_parameters
+
+    builder_values = st.session_state.setdefault(SCENARIO_VALUE_STATE_KEY, {})
+    catalog_lookup = {row["Parameter"]: row for row in parameter_catalog.to_dict("records")}
+
+    if selected_parameters:
+        st.subheader("Scenario Builder")
+
+    for parameter in selected_parameters:
+        info = catalog_lookup.get(parameter, {})
+        base_value = float(info.get("Base Value", np.nan)) if info else np.nan
+        units = info.get("Units", "")
+        source = info.get("Source", "")
+        base_label = f"{base_value:,.2f}" if np.isfinite(base_value) else "n/a"
+        expander_label = f"{parameter} — Base {base_label}{f' {units}' if units else ''}"
+        with st.expander(expander_label, expanded=False):
+            if source:
+                st.caption(f"Source: {source}")
+            default_mode = "percent" if np.isfinite(base_value) and not np.isclose(base_value, 0.0) else "absolute"
+            state = builder_values.get(parameter, {"mode": default_mode})
+            mode = st.selectbox(
+                "Adjustment mode",
+                ["Percent", "Absolute"],
+                index=0 if state.get("mode", default_mode) == "percent" else 1,
+                key=f"scenario_mode_{parameter}",
+            )
+            state["mode"] = "percent" if mode == "Percent" else "absolute"
+            if state["mode"] == "percent" and np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                percent_default = float(state.get("percent", 0.0))
+                percent_value = st.number_input(
+                    "Percent change (%)",
+                    key=f"scenario_percent_{parameter}",
+                    value=percent_default,
+                    step=0.5,
+                    format="%.2f",
+                )
+                state["percent"] = percent_value
+            else:
+                if not np.isfinite(base_value):
+                    st.info("Base value unavailable; specify a target value explicitly.")
+                absolute_default = state.get("absolute")
+                if absolute_default is None:
+                    absolute_default = base_value if np.isfinite(base_value) else 0.0
+                absolute_value = st.number_input(
+                    f"Target value ({units})" if units else "Target value",
+                    key=f"scenario_absolute_{parameter}",
+                    value=float(absolute_default),
+                    step=100.0,
+                    format="%.2f",
+                )
+                state["absolute"] = absolute_value
+            builder_values[parameter] = state
+
+    st.session_state[SCENARIO_VALUE_STATE_KEY] = builder_values
+
+    scenario_name = st.text_input("Scenario name", key=SCENARIO_NAME_STATE_KEY)
+    if st.button("Save Scenario", key="save_scenario_definition"):
+        if not scenario_name.strip():
+            st.warning("Please provide a scenario name before saving.")
+        elif not selected_parameters:
+            st.warning("Select at least one parameter to configure.")
+        else:
+            overrides: Dict[str, float] = {}
+            deltas: Dict[str, float | None] = {}
+            for parameter in selected_parameters:
+                info = catalog_lookup.get(parameter, {})
+                base_value = float(info.get("Base Value", np.nan)) if info else np.nan
+                state = builder_values.get(parameter, {})
+                mode = state.get("mode", "percent")
+                if mode == "percent" and np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                    percent = float(state.get("percent", 0.0))
+                    target_value = base_value * (1 + percent / 100.0)
+                    overrides[parameter] = float(target_value)
+                    deltas[parameter] = float(percent)
+                else:
+                    absolute = state.get("absolute")
+                    if absolute is None:
+                        absolute = base_value if np.isfinite(base_value) else 0.0
+                    absolute = float(absolute)
+                    overrides[parameter] = absolute
+                    if np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                        change = (absolute / base_value - 1.0) * 100.0
+                        deltas[parameter] = float(change)
+                    else:
+                        deltas[parameter] = None
+
+            new_entry = {
+                "name": scenario_name.strip(),
+                "overrides": overrides,
+                "deltas": deltas,
+            }
+            existing_index = next(
+                (
+                    idx
+                    for idx, entry in enumerate(scenario_definitions)
+                    if entry["name"].casefold() == scenario_name.strip().casefold()
+                ),
+                None,
+            )
+            if existing_index is not None:
+                scenario_definitions[existing_index] = new_entry
+            else:
+                scenario_definitions.append(new_entry)
+            st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+            st.session_state[SCENARIO_NAME_STATE_KEY] = ""
+            st.success(f"Scenario '{scenario_name}' saved.")
+            _trigger_rerun()
+
+    if scenario_definitions:
+        st.subheader("Configured Scenarios")
+        summary_rows: List[Dict[str, object]] = []
+        for entry in scenario_definitions:
+            for parameter, target in entry.get("overrides", {}).items():
+                delta_value = entry.get("deltas", {}).get(parameter)
+                summary_rows.append(
+                    {
+                        "Scenario": entry["name"],
+                        "Parameter": parameter,
+                        "Target Value": float(target),
+                        "Delta (%)": None if delta_value is None else float(delta_value),
+                    }
+                )
+        summary_df = pd.DataFrame(summary_rows)
+        if not summary_df.empty:
+            if "Delta (%)" in summary_df.columns:
+                summary_df["Delta (%)"] = summary_df["Delta (%)"].round(2)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        for idx, entry in enumerate(scenario_definitions):
+            if st.button(f"Remove {entry['name']}", key=f"remove_scenario_{idx}"):
+                scenario_definitions.pop(idx)
+                st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+                _trigger_rerun()
+                return
 
     def _scenario_model() -> CassavaBioethanolModel:
         clone = CassavaBioethanolModel(copy.deepcopy(base_page))
@@ -2425,34 +2598,217 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         return clone
 
     comparison_model = _scenario_model()
+    scenario_configs = [ScenarioConfig(entry["name"], entry["overrides"]) for entry in scenario_definitions]
     scenario_cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(SCENARIO_CACHE_KEY, {})
     cached_entry = scenario_cache.get(model.scenario)
+    signature = _scenario_definition_signature(scenario_definitions)
     comparison_button = st.button(
         "Run Scenario Comparison",
         key=f"run_scenario_cmp_{model.scenario.lower()}",
     )
 
-    if comparison_button or not cached_entry or cached_entry.get("version") != _current_model_version():
-        if DEFAULT_SCENARIO_CONFIGS:
-            with st.spinner("Evaluating scenario overrides..."):
-                comparison_df = scenario_comparison(comparison_model, DEFAULT_SCENARIO_CONFIGS)
-        else:
-            comparison_df = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
+    needs_refresh = (
+        comparison_button
+        or cached_entry is None
+        or cached_entry.get("version") != _current_model_version()
+        or cached_entry.get("signature") != signature
+    )
+
+    if needs_refresh:
+        with st.spinner("Evaluating scenario overrides..."):
+            base_result = comparison_model.build()
+            base_metrics = base_result.get("metrics", {})
+            if scenario_configs:
+                comparison_df = scenario_comparison(comparison_model, scenario_configs)
+            else:
+                comparison_df = pd.DataFrame(columns=["Scenario"])
         scenario_cache[model.scenario] = {
             "version": _current_model_version(),
+            "signature": signature,
             "comparison": comparison_df,
+            "base_metrics": base_metrics,
         }
         st.session_state[SCENARIO_CACHE_KEY] = scenario_cache
         cached_entry = scenario_cache[model.scenario]
-    else:
-        comparison_df = (
-            cached_entry.get("comparison") if cached_entry else pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
-        )
+
+    comparison_df = cached_entry.get("comparison", pd.DataFrame()) if cached_entry else pd.DataFrame()
+    base_metrics = cached_entry.get("base_metrics", {}) if cached_entry else {}
+
+    base_row = {"Scenario": "Base Case"}
+    base_row.update(base_metrics)
+    base_df = pd.DataFrame([base_row])
+    comparison_display = comparison_df.copy()
+    for metric in ["Project NPV", "Project IRR", "Equity IRR", "Payback Period (years)"]:
+        if metric in comparison_display.columns and metric in base_metrics:
+            comparison_display[f"{metric} Δ"] = comparison_display[metric] - base_metrics[metric]
+
+    combined_df = pd.concat([base_df, comparison_display], ignore_index=True, sort=False)
+    for metric in ["Project NPV", "Project IRR", "Equity IRR", "Payback Period (years)"]:
+        delta_col = f"{metric} Δ"
+        if delta_col in combined_df.columns:
+            combined_df.loc[combined_df["Scenario"] == "Base Case", delta_col] = 0.0
+
     st.subheader("Scenario Comparison")
-    if comparison_df.empty:
-        st.info("Click 'Run Scenario Comparison' to evaluate the configured overrides.")
+    if combined_df.empty:
+        st.info("Configure scenarios and click 'Run Scenario Comparison' to evaluate impacts.")
     else:
-        st.dataframe(comparison_df, use_container_width=True)
+        preferred_cols = [
+            "Scenario",
+            "Project NPV",
+            "Project NPV Δ",
+            "Project IRR",
+            "Project IRR Δ",
+            "Equity IRR",
+            "Equity IRR Δ",
+            "Payback Period (years)",
+            "Payback Period (years) Δ",
+        ]
+        display_cols = [col for col in preferred_cols if col in combined_df.columns]
+        display_df = combined_df[display_cols] if display_cols else combined_df
+        st.dataframe(display_df, use_container_width=True)
+
+    toolkit = comparison_model.advanced_toolkit()
+    analysis_df = pd.DataFrame()
+    feature_cols: List[str] = []
+    if scenario_definitions and not comparison_df.empty:
+        feature_rows: List[Dict[str, object]] = []
+        for entry in scenario_definitions:
+            row: Dict[str, object] = {"Scenario": entry["name"]}
+            for parameter in SCENARIO_PARAMETER_NAMES:
+                delta_value = entry.get("deltas", {}).get(parameter)
+                row[parameter] = 0.0 if delta_value is None else float(delta_value)
+            feature_rows.append(row)
+        features_df = pd.DataFrame(feature_rows).set_index("Scenario") if feature_rows else pd.DataFrame()
+        metrics_df = comparison_df.set_index("Scenario") if not comparison_df.empty else pd.DataFrame()
+        if not features_df.empty and not metrics_df.empty:
+            analysis_df = features_df.join(metrics_df, how="inner")
+            if "Project NPV" in analysis_df.columns and "Project NPV" in metrics_df.columns:
+                base_npv = base_metrics.get("Project NPV")
+                if base_npv is not None:
+                    analysis_df["Project NPV Change"] = analysis_df["Project NPV"] - base_npv
+            if "Equity IRR" in analysis_df.columns and "Equity IRR" in metrics_df.columns:
+                base_equity = base_metrics.get("Equity IRR")
+                if base_equity is not None:
+                    analysis_df["Equity IRR Change"] = analysis_df["Equity IRR"] - base_equity
+            feature_cols = [param for param in SCENARIO_PARAMETER_NAMES if param in analysis_df.columns]
+            if feature_cols:
+                analysis_df[feature_cols] = analysis_df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    st.subheader("Predictive Scenario Tools")
+    regression_tab, tree_tab, time_series_tab, revolver_tab = st.tabs(
+        ["Regression", "Decision Tree", "Time Series", "Revolver"]
+    )
+
+    with regression_tab:
+        if len(analysis_df) >= 2 and feature_cols and "Project NPV Change" in analysis_df.columns:
+            regression_input = analysis_df[feature_cols + ["Project NPV Change"]].reset_index(drop=True)
+            try:
+                regression_result = toolkit.linear_regression(regression_input, "Project NPV Change")
+            except Exception as exc:  # pragma: no cover - display feedback only
+                st.warning(f"Regression analysis failed: {exc}")
+            else:
+                metric_cols = st.columns(2)
+                metric_cols[0].metric("R²", f"{regression_result.score:.3f}")
+                metric_cols[1].metric("Intercept", f"{regression_result.intercept:,.2f}")
+                coeff_df = (
+                    pd.DataFrame(
+                        [
+                            {"Parameter": name, "Coefficient": coeff}
+                            for name, coeff in regression_result.coefficients.items()
+                        ]
+                    )
+                    .sort_values("Coefficient", key=lambda s: s.abs(), ascending=False)
+                )
+                st.dataframe(coeff_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Add at least two scenarios to run regression analysis.")
+
+    with tree_tab:
+        if len(analysis_df) >= 2 and feature_cols and "Project NPV Change" in analysis_df.columns:
+            tree_input = analysis_df[feature_cols + ["Project NPV Change"]].reset_index(drop=True)
+            try:
+                tree_result = toolkit.decision_tree_regression(
+                    tree_input,
+                    "Project NPV Change",
+                    max_depth=min(4, len(feature_cols)),
+                )
+            except Exception as exc:  # pragma: no cover - display feedback only
+                st.warning(f"Decision tree analysis failed: {exc}")
+            else:
+                metric_cols = st.columns(2)
+                score_value = tree_result.score if np.isfinite(tree_result.score) else float("nan")
+                metric_cols[0].metric("R²", f"{score_value:.3f}" if np.isfinite(score_value) else "n/a")
+                metric_cols[1].metric("Depth", str(tree_result.depth))
+                importance_df = (
+                    pd.DataFrame(
+                        [
+                            {"Parameter": name, "Importance": importance}
+                            for name, importance in tree_result.feature_importances.items()
+                        ]
+                    )
+                    .sort_values("Importance", ascending=False)
+                )
+                st.dataframe(importance_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Add at least two scenarios to explore decision tree splits.")
+
+    with time_series_tab:
+        financials = results.get("financials") if isinstance(results, dict) else None
+        annual_cf = getattr(financials, "cashflow_annual", None) if financials is not None else None
+        if isinstance(annual_cf, pd.DataFrame) and "Free Cash Flow" in annual_cf.columns:
+            series = annual_cf["Free Cash Flow"]
+            if isinstance(series, pd.Series) and not series.empty:
+                periods = st.slider("Forecast periods", min_value=1, max_value=10, value=5, step=1)
+                try:
+                    forecast = toolkit.arima_forecast(series, periods=periods)
+                except Exception as exc:  # pragma: no cover - display feedback only
+                    st.warning(f"Time-series forecast failed: {exc}")
+                else:
+                    actual_df = series.to_frame(name="Value").reset_index().rename(columns={series.index.name or "index": "Period"})
+                    actual_df["Type"] = "Actual"
+                    forecast_df = forecast.to_frame(name="Value").reset_index().rename(columns={forecast.index.name or "index": "Period"})
+                    forecast_df["Type"] = "Forecast"
+                    chart_df = pd.concat([actual_df, forecast_df], ignore_index=True)
+                    chart_df["Period"] = chart_df["Period"].astype(str)
+                    fig = px.line(chart_df, x="Period", y="Value", color="Type", title="Free Cash Flow Forecast")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Free cash flow history is required for time-series forecasting.")
+        else:
+            st.info("Run the model to generate free cash flow before forecasting.")
+
+    with revolver_tab:
+        financials = results.get("financials") if isinstance(results, dict) else None
+        monthly_cf = getattr(financials, "cashflow_monthly", None) if financials is not None else None
+        if isinstance(monthly_cf, pd.DataFrame) and "Free Cash Flow" in monthly_cf.columns:
+            series = monthly_cf["Free Cash Flow"]
+            if isinstance(series, pd.Series) and not series.empty:
+                window = st.slider("Rolling window (months)", min_value=3, max_value=24, value=12, step=1)
+                revolver_df = toolkit.revolver_projection(series, window=window)
+                if not revolver_df.empty:
+                    viz_df = revolver_df.reset_index().rename(columns={series.index.name or "index": "Period"})
+                    viz_df["Period"] = viz_df["Period"].astype(str)
+                    melted = viz_df.melt(
+                        id_vars=["Period"],
+                        value_vars=["Value", "Rolling Mean"],
+                        var_name="Measure",
+                        value_name="Amount",
+                    )
+                    fig = px.line(
+                        melted,
+                        x="Period",
+                        y="Amount",
+                        color="Measure",
+                        title="Rolling Free Cash Flow (Revolver)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption("Rolling standard deviation provides a volatility view of the revolver balance.")
+                    std_chart = viz_df.set_index("Period")["Rolling Std"].rename("Rolling Std Dev")
+                    st.line_chart(std_chart)
+            else:
+                st.info("Monthly free cash flow is required to analyse the revolver trajectory.")
+        else:
+            st.info("Run the model to generate monthly free cash flow before analysing the revolver.")
 
     st.subheader("Goal Seek Results")
     goal_seek_parameter = "Corporate tax rate"

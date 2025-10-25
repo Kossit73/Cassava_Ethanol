@@ -56,6 +56,7 @@ from scipy.stats import (
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeRegressor
 from statsmodels.tsa.arima.model import ARIMA
 from xlsxwriter.exceptions import DuplicateWorksheetName
 
@@ -144,6 +145,13 @@ class RegressionResult:
     score: float
 
 
+@dataclass
+class DecisionTreeResult:
+    feature_importances: Dict[str, float]
+    depth: int
+    score: float
+
+
 class AdvancedAnalyticsToolkit:
     """Bundle of utilities that expose advanced modelling techniques."""
 
@@ -191,6 +199,22 @@ class AdvancedAnalyticsToolkit:
             score=score,
         )
 
+    def decision_tree_regression(
+        self,
+        df: pd.DataFrame,
+        target: str,
+        max_depth: int | None = None,
+        random_state: int | None = 0,
+    ) -> DecisionTreeResult:
+        """Fit a decision tree regressor and return feature importances."""
+
+        X, y, feature_names = _ensure_numeric_frame(df, target)
+        tree = DecisionTreeRegressor(max_depth=max_depth, random_state=random_state)
+        tree.fit(X, y)
+        score = float(tree.score(X, y)) if X.size else float("nan")
+        importances = {name: float(val) for name, val in zip(feature_names, tree.feature_importances_)}
+        return DecisionTreeResult(feature_importances=importances, depth=int(tree.get_depth()), score=score)
+
     # ------------------------------------------------------------------
     # Time-series forecasting
     # ------------------------------------------------------------------
@@ -203,6 +227,22 @@ class AdvancedAnalyticsToolkit:
         fitted = model.fit()
         forecast = fitted.get_forecast(steps=periods)
         return forecast.predicted_mean
+
+    def revolver_projection(self, series: pd.Series, window: int = 12) -> pd.DataFrame:
+        """Return rolling statistics that approximate revolver utilisation."""
+
+        if not isinstance(series, pd.Series) or series.empty:
+            return pd.DataFrame(columns=["Value", "Rolling Mean", "Rolling Std"])
+
+        numeric = pd.to_numeric(series, errors="coerce").dropna()
+        if numeric.empty:
+            return pd.DataFrame(columns=["Value", "Rolling Mean", "Rolling Std"])
+
+        window = max(int(window), 1)
+        frame = pd.DataFrame({"Value": numeric})
+        frame["Rolling Mean"] = frame["Value"].rolling(window=window, min_periods=1).mean()
+        frame["Rolling Std"] = frame["Value"].rolling(window=window, min_periods=1).std().fillna(0.0)
+        return frame
 
     # ------------------------------------------------------------------
     # Financial helpers
