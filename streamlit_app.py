@@ -8,7 +8,7 @@ import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -285,6 +285,7 @@ TORNADO_DRIVERS: List[Tuple[str, float]] = [
 ]
 
 MC_PARAMETER_STATE_KEY = "mc_parameter_config"
+MC_SELECTED_PARAMETER_STATE_KEY = "mc_selected_parameters"
 MC_ITERATION_STATE_KEY = "mc_iteration_setting"
 MC_SEED_STATE_KEY = "mc_random_seed"
 
@@ -392,22 +393,50 @@ def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> 
     return json.dumps(payload, sort_keys=True)
 
 
+def _monte_carlo_parameter_library(page: InputLandingPage | None) -> pd.DataFrame:
+    """Return a catalog of candidate Monte Carlo parameters from the inputs."""
+
+    records: List[Dict[str, object]] = []
+    if isinstance(page, InputLandingPage):
+        table = getattr(page, "global_inputs", None)
+        if isinstance(table, EditableTable) and not table.data.empty:
+            for _, row in table.data.iterrows():
+                parameter = str(row.get("Parameter", "")).strip()
+                if not parameter:
+                    continue
+                records.append(
+                    {
+                        "Parameter": parameter,
+                        "Base Value": row.get("Value"),
+                        "Units": row.get("Units", ""),
+                    }
+                )
+
+    return pd.DataFrame(records, columns=["Parameter", "Base Value", "Units"])
+
+
 def _monte_carlo_parameter_options(page: InputLandingPage | None) -> List[str]:
     """Return the ordered list of Monte Carlo parameters sourced from inputs."""
 
-    options: List[str] = []
-    if isinstance(page, InputLandingPage):
-        table = getattr(page, "global_inputs", None)
-        if isinstance(table, EditableTable):
-            column = table.data.get("Parameter") if not table.data.empty else None
-            if isinstance(column, pd.Series):
-                for value in column.tolist():
-                    if pd.isna(value):
-                        continue
-                    text = str(value).strip()
-                    if text and text not in options:
-                        options.append(text)
-    return options
+    library = _monte_carlo_parameter_library(page)
+    if library.empty:
+        return []
+    return library["Parameter"].tolist()
+
+
+def _monte_carlo_distribution_table() -> pd.DataFrame:
+    """Return a help table describing supported distributions and parameters."""
+
+    rows: List[Dict[str, str]] = []
+    for name, spec in MONTE_CARLO_DISTRIBUTIONS.items():
+        parts: List[str] = []
+        if spec.shape_params:
+            parts.append(", ".join(spec.shape_params))
+        if spec.keyword_params:
+            parts.append(", ".join(spec.keyword_params))
+        parameter_list = ", ".join(parts) if parts else "None"
+        rows.append({"Distribution": name, "Required Parameters": parameter_list})
+    return pd.DataFrame(rows)
 
 
 def _monte_carlo_column_config(parameter_options: Sequence[str]) -> Dict[str, st.column_config.Column]:
@@ -2500,7 +2529,13 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     parameter_source = results.get("input_page_snapshot") if isinstance(results, dict) else None
     if not isinstance(parameter_source, InputLandingPage):
         parameter_source = model.input_page
-    parameter_options = _monte_carlo_parameter_options(parameter_source)
+    parameter_library = _monte_carlo_parameter_library(parameter_source)
+    parameter_options = parameter_library["Parameter"].tolist()
+    base_value_lookup = (
+        parameter_library.set_index("Parameter")["Base Value"].to_dict()
+        if not parameter_library.empty
+        else {}
+    )
 
     iterations = st.number_input(
         "Iterations",
@@ -2519,29 +2554,116 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     )
     st.session_state[MC_SEED_STATE_KEY] = int(seed)
 
-    st.caption(
-        "Configure the stochastic inputs for the simulation. Choose a distribution for each parameter"
-        " and provide the relevant shape/location values."
-    )
+    left_col, right_col = st.columns([1, 2])
 
-    current_params = st.session_state[MC_PARAMETER_STATE_KEY]
-    if "Parameter" in current_params:
-        for raw_value in current_params["Parameter"].tolist():
-            if pd.isna(raw_value):
-                continue
-            text = str(raw_value).strip()
-            if text and text not in parameter_options:
-                parameter_options.append(text)
-    edited_params = st.data_editor(
-        current_params,
-        key="mc_parameter_editor",
-        column_config=_monte_carlo_column_config(parameter_options),
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-    )
-    edited_params = edited_params.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
-    st.session_state[MC_PARAMETER_STATE_KEY] = edited_params
+    with left_col:
+        st.caption(
+            "Select which inputs feed the simulation and review their base values from the landing page."
+        )
+
+        existing = st.session_state[MC_PARAMETER_STATE_KEY]
+        current_parameters = [
+            str(value).strip()
+            for value in existing.get("Parameter", [])
+            if str(value).strip() in parameter_options
+        ]
+        initial_selection = st.session_state.get(
+            MC_SELECTED_PARAMETER_STATE_KEY,
+            current_parameters,
+        )
+        selected_parameters = st.multiselect(
+            "Parameters to include",
+            options=parameter_options,
+            default=initial_selection,
+            key="mc_parameter_selector",
+        )
+        st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = selected_parameters
+
+        if st.button("Select all variables", use_container_width=True) and parameter_options:
+            st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = parameter_options
+            getattr(st, "rerun", st.experimental_rerun)()
+
+        if parameter_library.empty:
+            st.info("No parameters are available on the landing page to configure the simulation.")
+        else:
+            st.dataframe(parameter_library, use_container_width=True, hide_index=True)
+
+        custom_parameter = st.text_input(
+            "Add custom parameter",
+            help="Provide a custom label when you need to sample a variable not listed above.",
+        )
+        if st.button("Add custom parameter to configuration", use_container_width=True):
+            trimmed = custom_parameter.strip()
+            if trimmed:
+                df = st.session_state[MC_PARAMETER_STATE_KEY]
+                if "Parameter" not in df or trimmed not in df["Parameter"].astype(str).tolist():
+                    new_row = {
+                        column: "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
+                        for column in MONTE_CARLO_PARAMETER_COLUMNS
+                    }
+                    new_row["Parameter"] = trimmed
+                    new_row["Distribution"] = "Normal"
+                    if trimmed in base_value_lookup:
+                        new_row["loc"] = base_value_lookup[trimmed]
+                    st.session_state[MC_PARAMETER_STATE_KEY] = pd.concat(
+                        [df, pd.DataFrame([new_row])], ignore_index=True
+                    ).reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+                selection = st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+                if trimmed not in selection:
+                    st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = selection + [trimmed]
+                getattr(st, "rerun", st.experimental_rerun)()
+
+    with right_col:
+        st.caption("Configure distributions and parameters for each selected input.")
+        current_params = st.session_state[MC_PARAMETER_STATE_KEY]
+
+        available_set: Set[str] = set(parameter_options)
+        available_set.update(st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []))
+        if "Parameter" in current_params:
+            for raw_value in current_params["Parameter"].tolist():
+                if pd.isna(raw_value):
+                    continue
+                available_set.add(str(raw_value).strip())
+
+        df = current_params.copy()
+        if parameter_options:
+            retain = set(st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []))
+            drop_mask = df["Parameter"].astype(str).isin(set(parameter_options) - retain)
+            df = df.loc[~drop_mask].copy()
+
+        for parameter in st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []):
+            existing_rows = df[df["Parameter"].astype(str) == parameter]
+            if existing_rows.empty:
+                template = {
+                    column: "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
+                    for column in MONTE_CARLO_PARAMETER_COLUMNS
+                }
+                template["Parameter"] = parameter
+                template["Distribution"] = "Normal"
+                if parameter in base_value_lookup:
+                    template["loc"] = base_value_lookup[parameter]
+                df = pd.concat([df, pd.DataFrame([template])], ignore_index=True)
+
+        df = df.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+        df = df.sort_values("Parameter", key=lambda col: col.astype(str)).reset_index(drop=True)
+
+        edited_params = st.data_editor(
+            df,
+            key="mc_parameter_editor",
+            column_config=_monte_carlo_column_config(sorted(available_set)),
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+        )
+        edited_params = edited_params.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+        st.session_state[MC_PARAMETER_STATE_KEY] = edited_params
+
+        with st.expander("Distribution reference", expanded=False):
+            st.dataframe(
+                _monte_carlo_distribution_table(),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed))
 
