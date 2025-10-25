@@ -302,6 +302,7 @@ SCENARIO_DEFINITIONS_KEY = "scenario_definitions"
 SCENARIO_SELECTION_STATE_KEY = "scenario_builder_selection"
 SCENARIO_VALUE_STATE_KEY = "scenario_builder_values"
 SCENARIO_NAME_STATE_KEY = "scenario_builder_name"
+SCENARIO_CLEAR_NAME_FLAG = "scenario_builder_clear_flag"
 
 PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
 
@@ -2463,6 +2464,10 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
     builder_values = st.session_state.setdefault(SCENARIO_VALUE_STATE_KEY, {})
     catalog_lookup = {row["Parameter"]: row for row in parameter_catalog.to_dict("records")}
 
+    st.session_state.setdefault(SCENARIO_NAME_STATE_KEY, "")
+    if st.session_state.pop(SCENARIO_CLEAR_NAME_FLAG, False):
+        st.session_state[SCENARIO_NAME_STATE_KEY] = ""
+
     if selected_parameters:
         st.subheader("Scenario Builder")
 
@@ -2562,7 +2567,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
             else:
                 scenario_definitions.append(new_entry)
             st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
-            st.session_state[SCENARIO_NAME_STATE_KEY] = ""
+            st.session_state[SCENARIO_CLEAR_NAME_FLAG] = True
             st.success(f"Scenario '{scenario_name}' saved.")
             _trigger_rerun()
 
