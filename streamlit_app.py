@@ -35,6 +35,7 @@ from bioethanol_model.schedules import (
 from bioethanol_model.sensitivity import (
     DEFAULT_MONTE_CARLO_ITERATIONS,
     DEFAULT_MONTE_CARLO_SEED,
+    MONTE_CARLO_DISTRIBUTIONS,
     MONTE_CARLO_PARAMETER_COLUMNS,
     MONTE_CARLO_TEXT_COLUMNS,
     SensitivityScenario,
