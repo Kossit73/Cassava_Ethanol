@@ -7,6 +7,7 @@ pd = pytest.importorskip("pandas")
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.inputs import default_input_page
 from bioethanol_model.sensitivity import (
+    MONTE_CARLO_PARAMETER_ADAPTERS,
     default_monte_carlo_parameters,
     monte_carlo_simulation,
 )
@@ -65,4 +66,13 @@ def test_monte_carlo_simulation_with_empty_configuration_returns_empty() -> None
 
     results = monte_carlo_simulation(model, empty_config, iterations=4, random_seed=2)
     assert results.empty
+
+
+def test_parameter_adapters_capture_base_values() -> None:
+    page = default_input_page()
+    cassava_state = MONTE_CARLO_PARAMETER_ADAPTERS["Cassava feedstock"].capture(page)
+    loan_state = MONTE_CARLO_PARAMETER_ADAPTERS["Loan Schedule"].capture(page)
+
+    assert pytest.approx(cassava_state.base_value) == 600_000
+    assert pytest.approx(loan_state.base_value) == 24_000_000
 

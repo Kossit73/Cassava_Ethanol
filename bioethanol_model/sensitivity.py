@@ -9,6 +9,7 @@ import pandas as pd
 from scipy import stats
 
 from .financial_model import CassavaBioethanolModel
+from .inputs import InputLandingPage
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,196 @@ MONTE_CARLO_DISTRIBUTIONS: Dict[str, _DistributionSpec] = {
     "F": _DistributionSpec(stats.f, shape_params=("dfn", "dfd"), keyword_params=("loc", "scale")),
 }
 
+
+
+@dataclass(frozen=True)
+class MonteCarloParameterState:
+    base_value: float
+    data: pd.DataFrame
+    placeholder: bool
+
+
+@dataclass(frozen=True)
+class MonteCarloParameterAdapter:
+    table_attr: str
+    value_columns: Tuple[str, ...]
+    units: str = ""
+    filter_column: str | None = None
+    filter_value: str | None = None
+    aggregator: str = "sum"
+
+    def capture(self, page: InputLandingPage) -> MonteCarloParameterState:
+        table = getattr(page, self.table_attr)
+        data = table.data.copy(deep=True)
+        mask = _adapter_mask(data, self.filter_column, self.filter_value)
+        numeric = _adapter_numeric(data, mask, self.value_columns[0])
+
+        if self.aggregator == "first":
+            base = numeric.iloc[0] if not numeric.empty else np.nan
+        elif self.aggregator == "mean":
+            base = numeric.mean() if not numeric.empty else np.nan
+        else:
+            base = numeric.sum() if not numeric.empty else np.nan
+
+        return MonteCarloParameterState(
+            base_value=float(base), data=data, placeholder=bool(table.placeholder)
+        )
+
+    def apply(
+        self,
+        page: InputLandingPage,
+        target_value: float,
+        state: MonteCarloParameterState,
+    ) -> None:
+        table = getattr(page, self.table_attr)
+        mask = _adapter_mask(state.data, self.filter_column, self.filter_value)
+        if not mask.any():
+            _restore_table(table, state)
+            return
+
+        if _values_equal(target_value, state.base_value):
+            _restore_table(table, state)
+            return
+
+        adjusted = state.data.copy(deep=True)
+
+        if not np.isfinite(state.base_value) or np.isclose(state.base_value, 0.0):
+            for column in self.value_columns:
+                adjusted.loc[mask, column] = target_value
+        else:
+            ratio = target_value / state.base_value
+            if not np.isfinite(ratio):
+                return
+            for column in self.value_columns:
+                base_numeric = _adapter_numeric(state.data, mask, column)
+                adjusted.loc[mask, column] = base_numeric * ratio
+
+        table.set_data(adjusted, mark_user_input=True)
+
+
+def _adapter_mask(df: pd.DataFrame, column: str | None, value: str | None) -> pd.Series:
+    if df.empty:
+        return pd.Series([], dtype=bool)
+    if column is None or value is None:
+        return pd.Series(True, index=df.index)
+    series = df.get(column)
+    if series is None:
+        return pd.Series(False, index=df.index)
+    return series.astype(str).str.strip().str.casefold() == value.casefold()
+
+
+def _adapter_numeric(df: pd.DataFrame, mask: pd.Series, column: str) -> pd.Series:
+    if df.empty or column not in df.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(df.loc[mask, column], errors="coerce").dropna()
+
+
+def _restore_table(table, state: MonteCarloParameterState) -> None:
+    table.set_data(state.data.copy(deep=True), mark_user_input=None)
+    table.placeholder = state.placeholder
+
+
+def _values_equal(a: float, b: float) -> bool:
+    if np.isnan(a) and np.isnan(b):
+        return True
+    return np.isclose(a, b, equal_nan=False)
+
+
+MONTE_CARLO_PARAMETER_ADAPTERS: Dict[str, MonteCarloParameterAdapter] = {
+    "Production monthly": MonteCarloParameterAdapter(
+        table_attr="production_monthly",
+        value_columns=("Cassava ton", "Ethanol litres", "Animal Feed ton"),
+        units="Production",
+        aggregator="sum",
+    ),
+    "Loan Schedule": MonteCarloParameterAdapter(
+        table_attr="loan_schedule",
+        value_columns=("Loan Amount",),
+        units="USD",
+        aggregator="sum",
+    ),
+    "Marketing": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="Marketing",
+    ),
+    "Cassava feedstock": MonteCarloParameterAdapter(
+        table_attr="direct_costs_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Cost Category",
+        filter_value="Cassava Feedstock",
+    ),
+    "Enzymes & Chemical": MonteCarloParameterAdapter(
+        table_attr="direct_costs_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Cost Category",
+        filter_value="Enzymes & Chemicals",
+    ),
+    "Energy cost": MonteCarloParameterAdapter(
+        table_attr="direct_costs_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Cost Category",
+        filter_value="Energy Cost",
+    ),
+    "Staff Monthly": MonteCarloParameterAdapter(
+        table_attr="staff_costs_monthly",
+        value_columns=("Cost",),
+        units="USD",
+    ),
+    "Insurance": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="Insurance",
+    ),
+    "Service Contracts": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="Service Contracts",
+    ),
+    "General Administration": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="General Administration",
+    ),
+    "Research & Development": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="Research & Development",
+    ),
+    "Sales & Marketing": MonteCarloParameterAdapter(
+        table_attr="other_opex_monthly",
+        value_columns=("Amount",),
+        units="USD",
+        filter_column="Category",
+        filter_value="Sales & Marketing",
+    ),
+    "Revenue Inputs": MonteCarloParameterAdapter(
+        table_attr="revenue_inputs",
+        value_columns=("Base Price",),
+        units="USD",
+        aggregator="first",
+    ),
+    "Initial Investment": MonteCarloParameterAdapter(
+        table_attr="initial_investment",
+        value_columns=("Cost",),
+        units="USD",
+        aggregator="sum",
+    ),
+}
+
 MONTE_CARLO_PARAMETER_COLUMNS: Tuple[str, ...] = (
     "Parameter",
     "Distribution",
@@ -245,13 +436,26 @@ def monte_carlo_simulation(
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_seed)
     table = model.input_page.global_inputs
-    if table.placeholder:
-        return pd.DataFrame()
-
-    base_values = table.data.set_index("Parameter")["Value"].to_dict()
+    if {"Parameter", "Value"}.issubset(table.data.columns):
+        base_values = table.data.set_index("Parameter")["Value"].to_dict()
+    else:
+        base_values = {}
     config_records = _normalise_parameter_configs(parameter_configs)
     if not config_records:
         return pd.DataFrame()
+
+    adapter_states: Dict[str, MonteCarloParameterState] = {}
+    for record in config_records:
+        parameter = record.get("Parameter")
+        if parameter in base_values:
+            continue
+        adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(parameter or "")
+        if adapter is None or parameter in adapter_states:
+            continue
+        try:
+            adapter_states[parameter] = adapter.capture(model.input_page)
+        except AttributeError:
+            continue
 
     results: List[Dict[str, Any]] = []
 
@@ -262,19 +466,29 @@ def monte_carlo_simulation(
             spec = MONTE_CARLO_DISTRIBUTIONS.get(record["Distribution"])
             if spec is None:
                 continue
-            if param not in base_values:
+            if param in base_values:
+                base_value = _coerce_float(base_values[param])
+                if base_value is None:
+                    continue
+                try:
+                    sampled = spec.sample(rng, record, base_value=base_value)
+                except ValueError:
+                    continue
+                table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
                 continue
 
-            base_value = _coerce_float(base_values[param])
-            if base_value is None:
+            adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+            state = adapter_states.get(param)
+            if adapter is None or state is None:
                 continue
-
+            base_value = state.base_value
+            if not np.isfinite(base_value):
+                continue
             try:
                 sampled = spec.sample(rng, record, base_value=base_value)
             except ValueError:
                 continue
-
-            table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
+            adapter.apply(model.input_page, sampled, state)
 
         result = model.build()
         metrics = result.get("metrics", {})
@@ -286,7 +500,16 @@ def monte_carlo_simulation(
             }
         )
 
+        for param, state in adapter_states.items():
+            adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+            if adapter is not None:
+                adapter.apply(model.input_page, state.base_value, state)
+
     _reset_global_inputs(table.data, base_values)
+    for param, state in adapter_states.items():
+        adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+        if adapter is not None:
+            adapter.apply(model.input_page, state.base_value, state)
     return pd.DataFrame(results)
 
 

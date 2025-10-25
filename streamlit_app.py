@@ -37,6 +37,7 @@ from bioethanol_model.sensitivity import (
     DEFAULT_MONTE_CARLO_ITERATIONS,
     DEFAULT_MONTE_CARLO_SEED,
     MONTE_CARLO_DISTRIBUTIONS,
+    MONTE_CARLO_PARAMETER_ADAPTERS,
     MONTE_CARLO_PARAMETER_COLUMNS,
     MONTE_CARLO_TEXT_COLUMNS,
     SensitivityScenario,
@@ -407,25 +408,22 @@ def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> 
 
 
 def _monte_carlo_parameter_library(page: InputLandingPage | None) -> pd.DataFrame:
-    """Return a catalog of candidate Monte Carlo parameters from the inputs."""
+    """Return the Monte Carlo parameter catalog derived from landing-page inputs."""
 
-    records: List[Dict[str, object]] = []
-    if isinstance(page, InputLandingPage):
-        table = getattr(page, "global_inputs", None)
-        if isinstance(table, EditableTable) and not table.data.empty:
-            for _, row in table.data.iterrows():
-                parameter = str(row.get("Parameter", "")).strip()
-                if not parameter:
-                    continue
-                records.append(
-                    {
-                        "Parameter": parameter,
-                        "Base Value": row.get("Value"),
-                        "Units": row.get("Units", ""),
-                    }
-                )
+    rows: List[Dict[str, object]] = []
+    for name, adapter in MONTE_CARLO_PARAMETER_ADAPTERS.items():
+        base_value = np.nan
+        units = adapter.units
+        if isinstance(page, InputLandingPage):
+            try:
+                state = adapter.capture(page)
+            except AttributeError:
+                state = None
+            if state is not None:
+                base_value = state.base_value
+        rows.append({"Parameter": name, "Base Value": base_value, "Units": units})
 
-    return pd.DataFrame(records, columns=["Parameter", "Base Value", "Units"])
+    return pd.DataFrame(rows, columns=["Parameter", "Base Value", "Units"])
 
 
 def _monte_carlo_parameter_options(page: InputLandingPage | None) -> List[str]:
