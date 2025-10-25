@@ -292,6 +292,17 @@ MC_SEED_STATE_KEY = "mc_random_seed"
 
 PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
 
+
+def _trigger_rerun() -> None:
+    """Request Streamlit to rerun the script if the API is available."""
+
+    rerun = getattr(st, "rerun", None)
+    if rerun is None:
+        rerun = getattr(st, "experimental_rerun", None)
+    if rerun is not None:
+        rerun()
+
+
 def _load_session_inputs() -> InputLandingPage:
     """Return the mutable input landing page stored in session state."""
     if "input_page" not in st.session_state:
@@ -2582,7 +2593,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
 
         if st.button("Select all variables", use_container_width=True) and parameter_options:
             st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = parameter_options
-            getattr(st, "rerun", st.experimental_rerun)()
+            _trigger_rerun()
 
         if parameter_library.empty:
             st.info("No parameters are available on the landing page to configure the simulation.")
@@ -2612,7 +2623,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
                 selection = st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
                 if trimmed not in selection:
                     st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = selection + [trimmed]
-                getattr(st, "rerun", st.experimental_rerun)()
+                _trigger_rerun()
 
     with right_col:
         st.caption("Configure distributions and parameters for each selected input.")
