@@ -167,17 +167,30 @@ def available_monte_carlo_distributions() -> List[str]:
 def default_monte_carlo_parameters() -> pd.DataFrame:
     """Seed Monte Carlo configuration with the standard project parameters."""
 
+    parameter_names = [
+        "Production monthly",
+        "Loan Schedule",
+        "Marketing",
+        "Cassava feedstock",
+        "Enzymes & Chemical",
+        "Energy cost",
+        "Staff Monthly",
+        "Insurance",
+        "Service Contracts",
+        "General Administration",
+        "Research & Development",
+        "Sales & Marketing",
+        "Revenue Inputs",
+        "Initial Investment",
+    ]
+
     data = [
         {
-            "Parameter": "Corporate tax rate",
+            "Parameter": name,
             "Distribution": "Normal",
-            "scale": 0.01,
-        },
-        {
-            "Parameter": "Investor share capital",
-            "Distribution": "Normal",
-            "scale": 0.02,
-        },
+            "scale": 0.05,
+        }
+        for name in parameter_names
     ]
 
     df = pd.DataFrame(data)
