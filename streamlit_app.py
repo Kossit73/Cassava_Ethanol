@@ -8,7 +8,7 @@ import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -450,37 +450,6 @@ def _monte_carlo_distribution_table() -> pd.DataFrame:
         parameter_list = ", ".join(parts) if parts else "None"
         rows.append({"Distribution": name, "Required Parameters": parameter_list})
     return pd.DataFrame(rows)
-
-
-def _monte_carlo_column_config(parameter_options: Sequence[str]) -> Dict[str, st.column_config.Column]:
-    options = available_monte_carlo_distributions()
-    config: Dict[str, st.column_config.Column] = {
-        "Parameter": st.column_config.SelectboxColumn(
-            "Parameter",
-            options=list(parameter_options) if parameter_options else [""],
-            help="Name of the global input parameter to sample."
-            " It must match the parameter name in the Modify Default Inputs table.",
-            required=False,
-        ),
-        "Distribution": st.column_config.SelectboxColumn(
-            "Distribution",
-            options=options,
-            help="Probability distribution used for sampling during the Monte Carlo run.",
-        ),
-        "pvals": st.column_config.TextColumn(
-            "pvals",
-            help="Comma-separated probabilities (e.g. 0.2,0.3,0.5) for the Multinomial distribution.",
-        ),
-    }
-
-    numeric_columns = {
-        column
-        for column in MONTE_CARLO_PARAMETER_COLUMNS
-        if column not in {"Parameter", "Distribution", "pvals"}
-    }
-    for column in numeric_columns:
-        config[column] = st.column_config.NumberColumn(column, format="%.6f")
-    return config
 
 
 def _projection_month_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[str]:
@@ -2629,46 +2598,125 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     with right_col:
         st.caption("Configure distributions and parameters for each selected input.")
         current_params = st.session_state[MC_PARAMETER_STATE_KEY]
-
-        available_set: Set[str] = set(parameter_options)
-        available_set.update(st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []))
-        if "Parameter" in current_params:
-            for raw_value in current_params["Parameter"].tolist():
-                if pd.isna(raw_value):
-                    continue
-                available_set.add(str(raw_value).strip())
-
         df = current_params.copy()
+
         if parameter_options:
             retain = set(st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []))
             drop_mask = df["Parameter"].astype(str).isin(set(parameter_options) - retain)
             df = df.loc[~drop_mask].copy()
 
-        for parameter in st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []):
+        selected_parameters = st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+        if not selected_parameters:
+            st.info("Select one or more parameters to configure the Monte Carlo simulation.")
+
+        updated_rows: List[Dict[str, object]] = []
+        distribution_options = available_monte_carlo_distributions()
+
+        for index, parameter in enumerate(selected_parameters):
             existing_rows = df[df["Parameter"].astype(str) == parameter]
-            if existing_rows.empty:
-                template = {
-                    column: "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
-                    for column in MONTE_CARLO_PARAMETER_COLUMNS
-                }
-                template["Parameter"] = parameter
-                template["Distribution"] = "Normal"
-                if parameter in base_value_lookup:
-                    template["loc"] = base_value_lookup[parameter]
-                df = pd.concat([df, pd.DataFrame([template])], ignore_index=True)
+            template = {
+                column: ("" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan)
+                for column in MONTE_CARLO_PARAMETER_COLUMNS
+            }
+            template["Parameter"] = parameter
+            template["Distribution"] = "Normal"
 
-        df = df.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
-        df = df.sort_values("Parameter", key=lambda col: col.astype(str)).reset_index(drop=True)
+            if not existing_rows.empty:
+                row_data = existing_rows.iloc[0].to_dict()
+                for column in MONTE_CARLO_PARAMETER_COLUMNS:
+                    if column not in row_data:
+                        row_data[column] = template[column]
+            else:
+                row_data = template
 
-        edited_params = st.data_editor(
-            df,
-            key="mc_parameter_editor",
-            column_config=_monte_carlo_column_config(sorted(available_set)),
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-        )
+            base_value = base_value_lookup.get(parameter)
+            slug = re.sub(r"[^0-9A-Za-z]+", "_", parameter).strip("_").lower() or f"param_{index}"
+
+            with st.container():
+                st.markdown(f"**{parameter}**")
+                if base_value is not None and not (isinstance(base_value, float) and np.isnan(base_value)):
+                    st.caption(f"Base value: {base_value}")
+
+                if not distribution_options:
+                    st.warning("No probability distributions are available for selection.")
+                    row_data["Distribution"] = ""
+                    spec = None
+                else:
+                    current_distribution = str(row_data.get("Distribution", "") or "Normal")
+                    if current_distribution not in distribution_options:
+                        current_distribution = distribution_options[0]
+
+                    distribution = st.selectbox(
+                        "Distribution",
+                        options=distribution_options,
+                        index=distribution_options.index(current_distribution),
+                        key=f"mc_dist_{slug}",
+                        help="Probability distribution used for sampling during the Monte Carlo run.",
+                    )
+                    row_data["Distribution"] = distribution
+                    spec = MONTE_CARLO_DISTRIBUTIONS.get(distribution)
+                relevant_fields: List[str] = []
+                if spec:
+                    relevant_fields.extend(spec.shape_params)
+                    relevant_fields.extend(spec.keyword_params)
+
+                if not relevant_fields:
+                    st.caption("No additional parameters required for this distribution.")
+                else:
+                    num_columns = min(3, max(1, len(relevant_fields)))
+                    field_columns = st.columns(num_columns)
+                    for field_index, field_name in enumerate(relevant_fields):
+                        field_column = field_columns[field_index % num_columns]
+                        raw_value = row_data.get(field_name)
+                        placeholder = ""
+                        if field_name == "loc" and base_value is not None and not (
+                            isinstance(base_value, float) and np.isnan(base_value)
+                        ):
+                            placeholder = str(base_value)
+
+                        key_suffix = f"{slug}_{field_name}"
+                        if field_name == "pvals":
+                            default_value = "" if pd.isna(raw_value) else str(raw_value)
+                            value = field_column.text_input(
+                                field_name,
+                                value=default_value,
+                                key=f"mc_param_{key_suffix}",
+                                help="Comma-separated probabilities (e.g. 0.2,0.3,0.5) for the Multinomial distribution.",
+                            )
+                            row_data[field_name] = value
+                        else:
+                            default_value = "" if pd.isna(raw_value) else str(raw_value)
+                            value = field_column.text_input(
+                                field_name,
+                                value=default_value,
+                                key=f"mc_param_{key_suffix}",
+                                placeholder=placeholder,
+                            )
+                            row_data[field_name] = value
+
+                for column in MONTE_CARLO_PARAMETER_COLUMNS:
+                    if column in {"Parameter", "Distribution"}:
+                        continue
+                    if spec and column in relevant_fields:
+                        continue
+                    row_data[column] = "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
+
+                updated_rows.append(row_data)
+
+                st.divider()
+
+        edited_params = pd.DataFrame(updated_rows, columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
         edited_params = edited_params.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+
+        numeric_columns = [
+            column for column in MONTE_CARLO_PARAMETER_COLUMNS if column not in MONTE_CARLO_TEXT_COLUMNS
+        ]
+        for column in numeric_columns:
+            if column in edited_params:
+                edited_params[column] = pd.to_numeric(edited_params[column], errors="coerce")
+        for column in MONTE_CARLO_TEXT_COLUMNS:
+            if column in edited_params:
+                edited_params[column] = edited_params[column].astype("string").fillna("").astype(object)
         st.session_state[MC_PARAMETER_STATE_KEY] = edited_params
 
         with st.expander("Distribution reference", expanded=False):
