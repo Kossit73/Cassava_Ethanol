@@ -28,6 +28,7 @@ from bioethanol_model.schedules import (
     ANIMAL_FEED_TON_PER_TON,
     ETHANOL_LITRES_PER_TON,
     ExpenseSummary,
+    WorkingCapitalOutput,
     compute_production_tables,
     compute_staff_schedule,
 )
@@ -1981,6 +1982,19 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         }
     )
     st.dataframe(assumption_snapshot, use_container_width=True, hide_index=True)
+
+    st.markdown("### Detailed Working Capital (Annual)")
+    working_capital_output = results.get("working_capital")
+    if isinstance(working_capital_output, WorkingCapitalOutput):
+        annual_wc = working_capital_output.annual.copy()
+    else:
+        annual_wc = pd.DataFrame()
+    if isinstance(annual_wc, pd.DataFrame) and not annual_wc.empty:
+        annual_display = annual_wc.copy()
+        annual_display.index.name = "Year"
+        st.dataframe(annual_display.reset_index(), use_container_width=True)
+    else:
+        st.info("Working capital schedule is not available for the selected horizon.")
 
     st.markdown("### Latest Drivers")
     drivers = pd.DataFrame(

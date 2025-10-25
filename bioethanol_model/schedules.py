@@ -804,8 +804,16 @@ def compute_working_capital(
         - payables
         - other_payables
     )
-    annual = wc.resample("Y").mean()
-    annual.index = annual.index.year
+
+    if wc.empty:
+        annual = pd.DataFrame(columns=wc.columns)
+    else:
+        annual = wc.resample("Y").last()
+        annual.index = annual.index.year
+        start_year = int(months.min().year)
+        end_year = int(months.max().year)
+        year_index = pd.Index(range(start_year, end_year + 1), name="Year")
+        annual = annual.reindex(year_index, fill_value=0.0)
     return WorkingCapitalOutput(wc, annual)
 
 
