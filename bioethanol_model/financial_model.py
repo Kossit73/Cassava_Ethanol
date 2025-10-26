@@ -39,6 +39,12 @@ class CassavaBioethanolModel:
 
     SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
 
+    @classmethod
+    def default(cls) -> "CassavaBioethanolModel":
+        """Return a model seeded with the default input landing page."""
+
+        return cls()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

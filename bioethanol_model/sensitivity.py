@@ -6,7 +6,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+from .scipy_compat import stats
 
 from .financial_model import CassavaBioethanolModel
 from .inputs import InputLandingPage

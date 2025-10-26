@@ -34,9 +34,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.io as pio
 from fastapi import HTTPException
-from scipy import stats
-from scipy.optimize import minimize
-from scipy.stats import (
+
+from .scipy_compat import (
     bernoulli,
     beta,
     binom,
@@ -47,9 +46,11 @@ from scipy.stats import (
     geom,
     hypergeom,
     lognorm,
+    minimize,
     multinomial,
     norm,
     poisson,
+    stats,
     uniform,
     weibull_min,
 )
