@@ -17,6 +17,10 @@ The model depends on the following Python packages:
 pip install -r requirements.txt
 ```
 
+If network egress is blocked (common in corporate or graded sandboxes), follow
+the offline installation notes in ``docs/OFFLINE_SETUP.md`` to stage compatible
+``numpy`` and ``pandas`` wheels locally before running the command above.
+
 ## Usage
 Generate the Excel financial model by running:
 

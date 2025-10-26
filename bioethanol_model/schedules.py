@@ -427,10 +427,9 @@ def compute_cost_tables(
                 columns=category_col,
                 values=value_column,
                 aggfunc="sum",
-                fill_value=0.0,
             )
             .sort_index()
-            .reindex(months, fill_value=0.0)
+            .reindex(months)
         )
 
         # Forward-fill within the projection horizon so dated overrides continue
@@ -450,7 +449,7 @@ def compute_cost_tables(
         if table.empty:
             annual = pd.DataFrame(columns=[])
         else:
-            annual = table.resample("Y").sum()
+            annual = table.resample("YE").sum()
             annual.index = annual.index.year
         outputs[name] = CostOutput(table, annual)
     return outputs
@@ -460,6 +459,7 @@ def compute_cost_tables(
 class LoanScheduleOutput:
     schedule: pd.DataFrame
     summary: pd.DataFrame
+    annual: pd.DataFrame
 
 
 def compute_loan_schedule(
@@ -486,9 +486,53 @@ def compute_loan_schedule(
         return LoanScheduleOutput(
             empty_schedule,
             pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"]),
+            pd.DataFrame(
+                columns=[
+                    "Loan",
+                    "Year",
+                    "Interest Rate",
+                    "Yearly Remaining Balance",
+                    "Monthly Interest (Balance × Rate / 12)",
+                    "Interest Paid",
+                    "Principal Paid",
+                    "Total Payment",
+                    "Year-End Balance",
+                ]
+            ),
         )
 
     amount_columns = ["Loan Amount", "Amount", "Drawdown"]
+
+    def _normalise_interest_rate(value: float | str | None) -> float:
+        """Return a decimal interest rate from user input.
+
+        The landing page captures rates as percentages (``7.5`` or ``"7.5%"``)
+        while tests feed decimals (``0.075``).  Streamline both by treating
+        values greater than ``1`` as percentages and gracefully handling
+        strings with a trailing percent sign.
+        """
+
+        if value is None or (isinstance(value, float) and not np.isfinite(value)):
+            return 0.0
+
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned.endswith("%"):
+                cleaned = cleaned[:-1]
+            try:
+                numeric = float(cleaned)
+            except ValueError:
+                return 0.0
+        else:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        if not np.isfinite(numeric):
+            return 0.0
+
+        return numeric / 100.0 if abs(numeric) > 1 else numeric
 
     for _, loan in loan_inputs.iterrows():
         amount = None
@@ -506,10 +550,7 @@ def compute_loan_schedule(
 
         tenor_years = int(loan.get("Tenor Years", 8))
         grace_years = int(loan.get("Grace Years", 1))
-        try:
-            rate = float(loan.get("Interest Rate", 0.08))
-        except (TypeError, ValueError):
-            rate = 0.0
+        rate = _normalise_interest_rate(loan.get("Interest Rate", 0.08))
         amortization = str(loan.get("Amortization", "Annuity") or "Annuity")
         monthly_rate = rate / 12.0
         tenor_months = max(tenor_years, 0) * 12
@@ -573,15 +614,70 @@ def compute_loan_schedule(
                     "Principal": principal,
                     "Closing Balance": balance,
                     "Payment": interest + principal,
+                    "Interest Rate": rate,
                 }
             )
 
     schedule = pd.DataFrame(schedule_rows)
     if schedule.empty:
         summary = pd.DataFrame(columns=["Draw", "Interest", "Principal", "Payment"])
+        annual = pd.DataFrame(
+            columns=[
+                "Loan",
+                "Year",
+                "Interest Rate",
+                "Yearly Remaining Balance",
+                "Monthly Interest (Balance × Rate / 12)",
+                "Interest Paid",
+                "Principal Paid",
+                "Total Payment",
+                "Year-End Balance",
+            ]
+        )
     else:
+        schedule = schedule.sort_values(["Loan", "Month"]).reset_index(drop=True)
+        schedule["Month"] = pd.to_datetime(schedule["Month"], errors="coerce")
         summary = schedule.groupby("Loan").agg({"Draw": "sum", "Interest": "sum", "Principal": "sum", "Payment": "sum"})
-    return LoanScheduleOutput(schedule, summary)
+        schedule["Year"] = schedule["Month"].dt.year
+        annual = (
+            schedule.groupby(["Loan", "Year"]).agg(
+                Interest_Rate=("Interest Rate", "first"),
+                Yearly_Remaining_Balance=("Opening Balance", "first"),
+                Interest_Paid=("Interest", "sum"),
+                Principal_Paid=("Principal", "sum"),
+                Total_Payment=("Payment", "sum"),
+                Year_End_Balance=("Closing Balance", "last"),
+            )
+            .reset_index()
+            .sort_values(["Loan", "Year"])
+        )
+        annual["Monthly Interest (Balance × Rate / 12)"] = (
+            annual["Yearly_Remaining_Balance"] * annual["Interest_Rate"] / 12.0
+        )
+        annual = annual.rename(
+            columns={
+                "Interest_Rate": "Interest Rate",
+                "Yearly_Remaining_Balance": "Yearly Remaining Balance",
+                "Interest_Paid": "Interest Paid",
+                "Principal_Paid": "Principal Paid",
+                "Total_Payment": "Total Payment",
+                "Year_End_Balance": "Year-End Balance",
+            }
+        )
+        annual = annual[
+            [
+                "Loan",
+                "Year",
+                "Interest Rate",
+                "Yearly Remaining Balance",
+                "Monthly Interest (Balance × Rate / 12)",
+                "Interest Paid",
+                "Principal Paid",
+                "Total Payment",
+                "Year-End Balance",
+            ]
+        ]
+    return LoanScheduleOutput(schedule, summary, annual)
 
 
 @dataclass
@@ -708,8 +804,16 @@ def compute_working_capital(
         - payables
         - other_payables
     )
-    annual = wc.resample("Y").mean()
-    annual.index = annual.index.year
+
+    if wc.empty:
+        annual = pd.DataFrame(columns=wc.columns)
+    else:
+        annual = wc.resample("Y").last()
+        annual.index = annual.index.year
+        start_year = int(months.min().year)
+        end_year = int(months.max().year)
+        year_index = pd.Index(range(start_year, end_year + 1), name="Year")
+        annual = annual.reindex(year_index, fill_value=0.0)
     return WorkingCapitalOutput(wc, annual)
 
 
@@ -1082,14 +1186,83 @@ def extract_expense_summary(
     return ExpenseSummary(monthly=monthly_df, annual=annual_df)
 
 
+def _derive_initial_investment_components(
+    financials: FinancialStatements,
+    revenue: RevenueOutput | None = None,
+) -> Tuple[float, float, pd.Series, pd.Series]:
+    """Return the pre-operation investment split and adjusted cash flows."""
+
+    cashflow_monthly = financials.cashflow_monthly
+    free_cash_flow = pd.to_numeric(
+        cashflow_monthly.get("Free Cash Flow"), errors="coerce"
+    ).fillna(0.0)
+    financing_cash_flow = pd.to_numeric(
+        cashflow_monthly.get("Financing Cash Flow"), errors="coerce"
+    ).fillna(0.0)
+    capex_series = pd.to_numeric(cashflow_monthly.get("Capex"), errors="coerce").fillna(0.0)
+    loan_draws = pd.to_numeric(cashflow_monthly.get("Debt Draws"), errors="coerce").fillna(0.0)
+
+    index = free_cash_flow.index
+    operations_start: pd.Timestamp | None = None
+
+    if revenue is not None and hasattr(revenue, "monthly"):
+        revenue_monthly = revenue.monthly
+        if isinstance(revenue_monthly, pd.DataFrame) and not revenue_monthly.empty:
+            monthly = revenue_monthly.copy()
+            if not isinstance(monthly.index, pd.DatetimeIndex):
+                monthly.index = pd.to_datetime(monthly.index, errors="coerce")
+                monthly = monthly[~monthly.index.isna()]
+            total_revenue = pd.to_numeric(monthly.get("Total Revenue"), errors="coerce").fillna(0.0)
+            positive_revenue = total_revenue[total_revenue > 1e-9]
+            if not positive_revenue.empty:
+                operations_start = positive_revenue.index.min()
+
+    if operations_start is None:
+        operating_cf = pd.to_numeric(
+            cashflow_monthly.get("Operating Cash Flow"), errors="coerce"
+        ).fillna(0.0)
+        positive_operating = operating_cf[operating_cf > 1e-9]
+        if not positive_operating.empty:
+            operations_start = positive_operating.index.min()
+
+    initial_mask = pd.Series(False, index=index)
+    if operations_start is not None:
+        initial_mask.loc[index < operations_start] = True
+    if not initial_mask.any() and len(index) > 0:
+        initial_mask.iloc[0] = True
+
+    initial_capex = capex_series.where(initial_mask, 0.0)
+    initial_loan = loan_draws.where(initial_mask, 0.0)
+
+    adjusted_free_cash_flow = free_cash_flow + initial_capex
+    adjusted_financing_cash_flow = financing_cash_flow - initial_loan
+
+    total_initial_investment = float(initial_capex.sum())
+    total_initial_loan = float(initial_loan.sum())
+    return (
+        total_initial_investment,
+        total_initial_loan,
+        adjusted_free_cash_flow,
+        adjusted_financing_cash_flow,
+    )
+
+
 def compute_key_metrics(
     financials: FinancialStatements,
     discount_rate: float,
     investor_share: float,
     owner_share: float,
+    *,
+    revenue: RevenueOutput | None = None,
 ) -> Dict[str, float]:
-    free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
-    equity_cash_flow = financials.cashflow_monthly["Equity Cash Flow"].astype(float)
+    raw_free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
+    (
+        initial_project_outlay,
+        initial_loan_draw,
+        adjusted_free_cash_flow,
+        adjusted_financing_cash_flow,
+    ) = _derive_initial_investment_components(financials, revenue)
+    equity_cash_flow = adjusted_free_cash_flow + adjusted_financing_cash_flow
 
     def _cumulative_total(series: pd.Series) -> float:
         if series.empty:
@@ -1101,10 +1274,16 @@ def compute_key_metrics(
             return 0.0
         return float(series.iloc[-1])
 
-    project_cashflows = [0.0] + free_cash_flow.tolist()
-    equity_cashflows = [0.0] + equity_cash_flow.tolist()
-    investor_cashflows = [0.0] + (equity_cash_flow * investor_share).tolist()
-    owner_cashflows = [0.0] + (equity_cash_flow * owner_share).tolist()
+    initial_equity = initial_project_outlay - initial_loan_draw
+
+    project_cashflows = [-initial_project_outlay] + adjusted_free_cash_flow.tolist()
+    equity_cashflows = [-initial_equity] + equity_cash_flow.tolist()
+    investor_cashflows = [-initial_equity * investor_share] + (
+        equity_cash_flow * investor_share
+    ).tolist()
+    owner_cashflows = [-initial_equity * owner_share] + (
+        equity_cash_flow * owner_share
+    ).tolist()
 
     project_npv = npv(discount_rate / 12, project_cashflows)
     project_irr = irr(project_cashflows)
@@ -1131,7 +1310,10 @@ def compute_key_metrics(
         "Equity IRR": equity_irr,
         "Investor IRR": investor_irr,
         "Owner IRR": owner_irr,
-        "Cumulative FCF": _cumulative_total(free_cash_flow),
+        "Initial Project Outlay": initial_project_outlay,
+        "Initial Loan Draw": initial_loan_draw,
+        "Initial Equity Investment": initial_equity,
+        "Cumulative FCF": _cumulative_total(raw_free_cash_flow),
         "Cumulative Equity CF": _cumulative_total(equity_cash_flow),
         "Final Month Revenue": _final_value(financials.income_monthly["Revenue"]),
         "Final Month EBITDA": _final_value(financials.income_monthly["EBITDA"]),
@@ -1157,7 +1339,19 @@ def compute_break_even(revenue: RevenueOutput, cost_outputs: Dict[str, CostOutpu
     )
 
 
-def compute_payback(cashflow_monthly: pd.DataFrame) -> pd.DataFrame:
-    cumulative = cashflow_monthly["Free Cash Flow"].cumsum()
-    payback_month = cumulative[cumulative >= 0].index.min()
+def compute_payback(
+    financials: FinancialStatements,
+    revenue: RevenueOutput | None = None,
+    *,
+    initial_project_outlay: float | None = None,
+) -> pd.DataFrame:
+    (
+        derived_outlay,
+        _,
+        adjusted_free_cash_flow,
+        _,
+    ) = _derive_initial_investment_components(financials, revenue)
+    total_outlay = derived_outlay if initial_project_outlay is None else initial_project_outlay
+    cumulative = adjusted_free_cash_flow.cumsum() - total_outlay
+    payback_month = cumulative[cumulative >= 0].index.min() if not cumulative.empty else None
     return pd.DataFrame({"Cumulative FCF": cumulative, "Payback Month": payback_month})

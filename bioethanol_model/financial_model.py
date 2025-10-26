@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Tuple, TYPE_CHECKING
 
 import hashlib
 import numpy as np
 import pandas as pd
 
 from . import inputs
+if TYPE_CHECKING:
+    from .advanced_tools import AdvancedAnalyticsToolkit
+
 from .schedules import (
     compute_break_even,
     compute_cost_tables,
@@ -32,8 +35,15 @@ class CassavaBioethanolModel:
     input_page: inputs.InputLandingPage = field(default_factory=inputs.default_input_page)
     scenario: str = "FARM_ONLY"
     _scenario_cache: Dict[str, Tuple[str, Dict[str, object]]] = field(default_factory=dict, init=False, repr=False)
+    _advanced_tools: "AdvancedAnalyticsToolkit" | None = field(default=None, init=False, repr=False)
 
     SCENARIOS = ("FARM_ONLY", "BUY_ONLY", "HYBRID")
+
+    @classmethod
+    def default(cls) -> "CassavaBioethanolModel":
+        """Return a model seeded with the default input landing page."""
+
+        return cls()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -127,41 +137,6 @@ class CassavaBioethanolModel:
                 mark_user = page.staff_positions.placeholder or farm_positions.any()
                 page.staff_positions.set_data(positions_df, mark_user_input=mark_user)
 
-        direct_df = page.direct_costs_monthly.model_frame
-        if not direct_df.empty and "Cost Category" in direct_df.columns:
-            feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
-            if feed_mask.any():
-                prod_df = page.production_monthly.model_frame
-                tons = pd.Series(dtype=float)
-                month_col = None
-                if not prod_df.empty:
-                    if "Month" in prod_df.columns:
-                        month_col = "Month"
-                    elif "Start Month" in prod_df.columns:
-                        month_col = "Start Month"
-                if month_col and "Cassava ton" in prod_df.columns:
-                    prod_df[month_col] = prod_df[month_col].astype(str)
-                    tons = pd.to_numeric(prod_df.set_index(month_col)["Cassava ton"], errors="coerce")
-                default_ton = float(tons.mean()) if not tons.dropna().empty else 0.0
-
-                def _tons(month: str) -> float:
-                    if month in tons.index and pd.notna(tons.loc[month]):
-                        return float(tons.loc[month])
-                    return default_ton
-
-                if scenario == "FARM_ONLY":
-                    cost_per_ton = farm_cost
-                elif scenario == "BUY_ONLY":
-                    cost_per_ton = purchase_cost
-                else:
-                    cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
-
-                direct_df.loc[feed_mask, "Amount"] = direct_df.loc[feed_mask, "Month"].astype(str).apply(
-                    lambda month: _tons(month) * cost_per_ton
-                )
-                mark_user = page.direct_costs_monthly.placeholder or feed_mask.any()
-                page.direct_costs_monthly.set_data(direct_df, mark_user_input=mark_user)
-
         return page
 
     def _apply_staff_schedule(self, page: inputs.InputLandingPage):
@@ -195,6 +170,19 @@ class CassavaBioethanolModel:
             page.staff_costs_monthly.set_data(staff_df, mark_user_input=mark_user)
 
         return schedule
+
+    # ------------------------------------------------------------------
+    # Advanced analytics extensions
+    # ------------------------------------------------------------------
+
+    def advanced_toolkit(self) -> "AdvancedAnalyticsToolkit":
+        """Lazily instantiate the :class:`AdvancedAnalyticsToolkit` helper."""
+
+        if self._advanced_tools is None:
+            from .advanced_tools import AdvancedAnalyticsToolkit
+
+            self._advanced_tools = AdvancedAnalyticsToolkit(self)
+        return self._advanced_tools
 
     def build(self, scenario: str | None = None) -> Dict[str, object]:
         scenario_name = (scenario or self.scenario or "FARM_ONLY").upper()
@@ -292,7 +280,13 @@ class CassavaBioethanolModel:
             discount_rate=discount_rate,
             investor_share=investor_share,
             owner_share=owner_share,
+            revenue=revenue,
         )
+        loan_summary = loan_schedule.summary if hasattr(loan_schedule, "summary") else pd.DataFrame()
+        if isinstance(loan_summary, pd.DataFrame) and not loan_summary.empty:
+            total_loan_draw = float(pd.to_numeric(loan_summary.get("Draw"), errors="coerce").fillna(0.0).sum())
+        else:
+            total_loan_draw = 0.0
         metrics.update(
             {
                 "Corporate Tax Rate": tax_rate,
@@ -301,7 +295,11 @@ class CassavaBioethanolModel:
                 "Terminal Growth Rate": _get_global("Terminal growth", 0.0),
                 "Capital Gains Tax Rate": _get_global("Capital gains tax rate", 0.0),
                 "Discount Rate": discount_rate,
-                "Total Initial Investment": total_investment,
+                "Total Initial Investment": metrics.get("Initial Project Outlay", total_investment),
+                "Initial Loan Funding": metrics.get("Initial Loan Draw", total_loan_draw),
+                "Initial Equity Investment": metrics.get(
+                    "Initial Equity Investment", total_investment - total_loan_draw
+                ),
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
             }
@@ -310,7 +308,11 @@ class CassavaBioethanolModel:
             metrics["Payback Period (years)"] = metrics["Payback Period (months)"] / 12.0
 
         break_even = compute_break_even(revenue, cost_outputs)
-        payback = compute_payback(financials.cashflow_monthly)
+        payback = compute_payback(
+            financials,
+            revenue,
+            initial_project_outlay=metrics.get("Initial Project Outlay"),
+        )
 
         results = {
             "depreciation": depreciation,

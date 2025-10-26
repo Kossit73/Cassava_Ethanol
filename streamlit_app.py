@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import tempfile
 from collections import OrderedDict
@@ -11,26 +12,43 @@ from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
+from bioethanol_model.increment import apply_yearly_increment
 from bioethanol_model.inputs import (
     EditableTable,
     InputLandingPage,
     ProjectionHorizon,
     default_input_page,
 )
-from bioethanol_model.scenario import ScenarioConfig, goal_seek_to_target, scenario_comparison
+from bioethanol_model.scenario import (
+    ScenarioConfig,
+    goal_seek_to_target,
+    scenario_comparison,
+    scenario_parameter_catalog,
+)
 from bioethanol_model.schedules import (
     ANIMAL_FEED_TON_PER_TON,
     ETHANOL_LITRES_PER_TON,
     ExpenseSummary,
+    WorkingCapitalOutput,
     compute_production_tables,
     compute_staff_schedule,
 )
 from bioethanol_model.sensitivity import (
+    DEFAULT_MONTE_CARLO_ITERATIONS,
+    DEFAULT_MONTE_CARLO_SEED,
+    MONTE_CARLO_DISTRIBUTIONS,
+    MONTE_CARLO_PARAMETER_ADAPTERS,
+    MONTE_CARLO_PARAMETER_COLUMNS,
+    MONTE_CARLO_TEXT_COLUMNS,
+    SCENARIO_PARAMETER_NAMES,
     SensitivityScenario,
+    available_monte_carlo_distributions,
+    default_monte_carlo_parameters,
     monte_carlo_simulation,
     run_sensitivity,
     tornado_chart_inputs,
@@ -53,15 +71,6 @@ DERIVED_COLUMN_MAP = {
 }
 
 
-def _is_cassava_feedstock(value: object) -> bool:
-    """Return True when *value* refers to the cassava feedstock cost row."""
-
-    if value is None:
-        return False
-    text = str(value).strip().lower()
-    return "cassava" in text and "feedstock" in text
-
-
 # Predefined category options surfaced in the "Modify Default Inputs & Figures"
 # editor. Users can still supply custom values by selecting the explicit custom
 # option exposed by the editor for each table.
@@ -72,31 +81,124 @@ DIRECT_COST_CATEGORY_OPTIONS = [
 ]
 
 CATEGORY_SELECT_OPTIONS = {
-    ("Direct Costs Monthly", "Cost Category"): DIRECT_COST_CATEGORY_OPTIONS,
-    ("Other Opex Monthly", "Category"): [
-        "Service Contracts",
-        "General Administration",
-        "Research & Development",
-        "Energy Cost",
-        "Sales & Marketing",
-    ],
+    ("Direct Costs Monthly", "Cost Category"): {
+        "options": DIRECT_COST_CATEGORY_OPTIONS,
+        "allow_custom": False,
+    },
+    (
+        "Other Opex Monthly",
+        "Category",
+    ): {
+        "options": [
+            "Service Contracts",
+            "General Administration",
+            "Research & Development",
+            "Energy Cost",
+            "Sales & Marketing",
+        ],
+        "allow_custom": True,
+    },
     (
         "Accounts Receivable & Other Assets",
         "Metric",
-    ): [
-        "Receivables days",
-        "Inventory days",
-        "Prepaid expense days",
-        "Other assets percent of revenue",
-    ],
+    ): {
+        "options": [
+            "Receivables days",
+            "Inventory days",
+            "Prepaid expense days",
+            "Other assets percent of revenue",
+        ],
+        "allow_custom": True,
+    },
     (
         "Accounts Payable",
         "Metric",
-    ): [
-        "Payables days",
-        "Other payable days",
-    ],
+    ): {
+        "options": [
+            "Payables days",
+            "Other payable days",
+        ],
+        "allow_custom": True,
+    },
 }
+
+YEARLY_INCREMENT_CONFIG = {
+    "Production Monthly": {
+        "date_column": "Start Month",
+        "frequency": "M",
+        "value_columns": ["Cassava ton"],
+        "match_columns": [],
+        "description": "Apply an annual growth/decline to cassava tonnage.",
+    },
+    "Production Annual": {
+        "date_column": "Year",
+        "frequency": "Y",
+        "value_columns": ["Cassava ton"],
+        "match_columns": [],
+        "description": "Scale annual cassava tonnage by a yearly percentage.",
+    },
+    "Direct Costs Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Amount"],
+        "match_columns": ["Cost Category"],
+        "description": "Increase or decrease the selected cost category each year.",
+    },
+    "Staff Costs Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Headcount", "Cost"],
+        "match_columns": ["Department"],
+        "description": "Apply annual changes to staffing levels or department spend.",
+    },
+    "Other Opex Monthly": {
+        "date_column": "Month",
+        "frequency": "M",
+        "value_columns": ["Amount"],
+        "match_columns": ["Category"],
+        "description": "Cascade the yearly percentage to this operating expense.",
+    },
+    "Accounts Receivable & Other Assets": {
+        "date_column": "Effective Month",
+        "frequency": "M",
+        "value_columns": ["Value"],
+        "match_columns": ["Metric"],
+        "description": "Roll forward the working-capital metric with an annual rate.",
+    },
+    "Accounts Payable": {
+        "date_column": "Effective Month",
+        "frequency": "M",
+        "value_columns": ["Value"],
+        "match_columns": ["Metric"],
+        "description": "Apply the yearly percentage to the payable policy value.",
+    },
+    "Inflation Schedule": {
+        "date_column": "Year",
+        "frequency": "Y",
+        "value_columns": ["CPI", "FX Index", "Tariff Escalation"],
+        "match_columns": [],
+        "description": "Project inflation indices with an annual growth rate.",
+    },
+    "Loan Schedule": {
+        "date_column": "Start Month",
+        "frequency": "M",
+        "value_columns": ["Loan Amount"],
+        "match_columns": ["Loan"],
+        "description": "Escalate the selected facility amount year over year.",
+    },
+}
+
+
+def _increment_horizon_value(config: Dict[str, object], projection: ProjectionHorizon) -> object | None:
+    """Return the terminal period for yearly increments based on *projection*."""
+
+    frequency = str(config.get("frequency", "")).upper()
+    if frequency.startswith("M"):
+        return f"{projection.end_year:04d}-12"
+    if frequency.startswith("Y"):
+        return projection.end_year
+    return None
+
 
 CHANGE_BUTTON_CONFIG = {
     "Production Monthly": {
@@ -191,11 +293,54 @@ TORNADO_DRIVERS: List[Tuple[str, float]] = [
     ("Discount rate", 1.0),
 ]
 
-MONTE_CARLO_STD = {"Corporate tax rate": 0.01, "Investor share capital": 0.02}
-MONTE_CARLO_ITERATIONS = 250
-MONTE_CARLO_SEED = 42
+MC_PARAMETER_STATE_KEY = "mc_parameter_config"
+MC_SELECTED_PARAMETER_STATE_KEY = "mc_selected_parameters"
+MC_ITERATION_STATE_KEY = "mc_iteration_setting"
+MC_SEED_STATE_KEY = "mc_random_seed"
+
+SCENARIO_DEFINITIONS_KEY = "scenario_definitions"
+SCENARIO_SELECTION_STATE_KEY = "scenario_builder_selection"
+SCENARIO_VALUE_STATE_KEY = "scenario_builder_values"
+SCENARIO_NAME_STATE_KEY = "scenario_builder_name"
+SCENARIO_CLEAR_NAME_FLAG = "scenario_builder_clear_flag"
 
 PRODUCTION_EDIT_FLAG = "production_user_edit_flag"
+
+
+def _trigger_rerun() -> None:
+    """Request Streamlit to rerun the script if the API is available."""
+
+    rerun = getattr(st, "rerun", None)
+    if rerun is None:
+        rerun = getattr(st, "experimental_rerun", None)
+    if rerun is not None:
+        rerun()
+
+
+def _normalise_json_value(value: object) -> object:
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return float(value)
+    return value
+
+
+def _scenario_definition_signature(definitions: Iterable[Dict[str, object]]) -> str:
+    normalised: List[Dict[str, object]] = []
+    for entry in definitions:
+        normalised.append(
+            {
+                "name": entry.get("name"),
+                "overrides": {
+                    key: _normalise_json_value(val) for key, val in entry.get("overrides", {}).items()
+                },
+                "deltas": {
+                    key: _normalise_json_value(val) for key, val in entry.get("deltas", {}).items()
+                },
+            }
+        )
+    return json.dumps(normalised, sort_keys=True)
+
 
 def _load_session_inputs() -> InputLandingPage:
     """Return the mutable input landing page stored in session state."""
@@ -249,6 +394,97 @@ def _reset_table_widget(table: EditableTable) -> None:
     widget_key = _table_widget_key(table)
     if widget_key in st.session_state:
         del st.session_state[widget_key]
+
+
+def _ensure_monte_carlo_state() -> None:
+    if MC_PARAMETER_STATE_KEY not in st.session_state or not isinstance(
+        st.session_state[MC_PARAMETER_STATE_KEY], pd.DataFrame
+    ):
+        st.session_state[MC_PARAMETER_STATE_KEY] = default_monte_carlo_parameters()
+
+    df = st.session_state[MC_PARAMETER_STATE_KEY]
+    missing = [col for col in MONTE_CARLO_PARAMETER_COLUMNS if col not in df.columns]
+    if missing:
+        for column in missing:
+            if column in MONTE_CARLO_TEXT_COLUMNS:
+                df[column] = ""
+            else:
+                df[column] = np.nan
+
+    df = df[list(MONTE_CARLO_PARAMETER_COLUMNS)]
+
+    for column in MONTE_CARLO_TEXT_COLUMNS:
+        df[column] = df[column].astype("string").fillna("").astype(object)
+
+    st.session_state[MC_PARAMETER_STATE_KEY] = df
+
+    if MC_ITERATION_STATE_KEY not in st.session_state:
+        st.session_state[MC_ITERATION_STATE_KEY] = DEFAULT_MONTE_CARLO_ITERATIONS
+    if MC_SEED_STATE_KEY not in st.session_state:
+        st.session_state[MC_SEED_STATE_KEY] = DEFAULT_MONTE_CARLO_SEED
+
+
+def _monte_carlo_parameters() -> pd.DataFrame:
+    _ensure_monte_carlo_state()
+    return st.session_state[MC_PARAMETER_STATE_KEY].copy()
+
+
+def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> str:
+    filtered = (
+        config.replace("", np.nan)
+        .dropna(subset=["Parameter", "Distribution"], how="any")
+        .fillna("<nan>")
+    )
+    ordered = filtered.sort_values(["Parameter", "Distribution"]).reset_index(drop=True)
+    payload = {
+        "iterations": int(iterations),
+        "seed": int(seed),
+        "config": ordered.to_dict(orient="records"),
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _monte_carlo_parameter_library(page: InputLandingPage | None) -> pd.DataFrame:
+    """Return the Monte Carlo parameter catalog derived from landing-page inputs."""
+
+    rows: List[Dict[str, object]] = []
+    for name, adapter in MONTE_CARLO_PARAMETER_ADAPTERS.items():
+        base_value = np.nan
+        units = adapter.units
+        if isinstance(page, InputLandingPage):
+            try:
+                state = adapter.capture(page)
+            except AttributeError:
+                state = None
+            if state is not None:
+                base_value = state.base_value
+        rows.append({"Parameter": name, "Base Value": base_value, "Units": units})
+
+    return pd.DataFrame(rows, columns=["Parameter", "Base Value", "Units"])
+
+
+def _monte_carlo_parameter_options(page: InputLandingPage | None) -> List[str]:
+    """Return the ordered list of Monte Carlo parameters sourced from inputs."""
+
+    library = _monte_carlo_parameter_library(page)
+    if library.empty:
+        return []
+    return library["Parameter"].tolist()
+
+
+def _monte_carlo_distribution_table() -> pd.DataFrame:
+    """Return a help table describing supported distributions and parameters."""
+
+    rows: List[Dict[str, str]] = []
+    for name, spec in MONTE_CARLO_DISTRIBUTIONS.items():
+        parts: List[str] = []
+        if spec.shape_params:
+            parts.append(", ".join(spec.shape_params))
+        if spec.keyword_params:
+            parts.append(", ".join(spec.keyword_params))
+        parameter_list = ", ".join(parts) if parts else "None"
+        rows.append({"Distribution": name, "Required Parameters": parameter_list})
+    return pd.DataFrame(rows)
 
 
 def _projection_month_options(projection: ProjectionHorizon, start_year_offset: int = 0) -> List[str]:
@@ -948,85 +1184,6 @@ def _update_staff_costs_from_positions(page: InputLandingPage) -> None:
     page.staff_costs_monthly.set_data(staff_df, mark_user_input=True)
 
 
-def _update_feedstock_costs(page: InputLandingPage, scenario: str) -> None:
-    """Recalculate cassava feedstock costs using the active scenario pricing."""
-
-    if page.direct_costs_monthly.data.empty or page.direct_costs_monthly.placeholder:
-        return
-
-    direct_df = page.direct_costs_monthly.data.copy()
-    if direct_df.empty or "Cost Category" not in direct_df.columns:
-        return
-
-    feed_mask = direct_df["Cost Category"].astype(str).str.contains("cassava", case=False, na=False)
-    if not feed_mask.any():
-        return
-
-    global_df = page.global_inputs.data
-    if global_df.empty or "Parameter" not in global_df.columns:
-        return
-
-    lookup = global_df.set_index("Parameter")["Value"].to_dict()
-
-    def _get_global(name: str, default: float) -> float:
-        try:
-            return float(lookup.get(name, default))
-        except (TypeError, ValueError):
-            return default
-
-    farm_cost = _get_global("Cassava farm cost per ton", 45.0)
-    purchase_cost = _get_global("Cassava purchase cost per ton", 70.0)
-    farm_share = float(np.clip(_get_global("Hybrid farm share", 0.5), 0.0, 1.0))
-
-    scenario = (scenario or "FARM_ONLY").upper()
-    if scenario == "FARM_ONLY":
-        cost_per_ton = farm_cost
-    elif scenario == "BUY_ONLY":
-        cost_per_ton = purchase_cost
-    else:
-        cost_per_ton = farm_share * farm_cost + (1 - farm_share) * purchase_cost
-
-    production_source = page.production_monthly.model_frame
-    if production_source.empty:
-        return
-
-    production = compute_production_tables(
-        production_source,
-        page.projection.start_year,
-        page.projection.end_year,
-        planning_start=page.projection.planning_start_timestamp,
-    )
-    cassava_series = pd.to_numeric(
-        production.monthly.get("Cassava ton", pd.Series(dtype=float)), errors="coerce"
-    ).fillna(method="ffill").fillna(method="bfill")
-    if cassava_series.empty:
-        return
-
-    cassava_series.index = cassava_series.index.to_period("M").to_timestamp()
-    fallback = float(cassava_series.mean()) if not cassava_series.empty else 0.0
-
-    def _month_to_timestamp(value: object) -> pd.Timestamp | None:
-        try:
-            return pd.Period(str(value), freq="M").to_timestamp()
-        except Exception:  # pragma: no cover - defensive parsing guard
-            return None
-
-    direct_df = direct_df.copy()
-    month_stamps = direct_df["Month"].apply(_month_to_timestamp)
-    updated_amounts = []
-    for is_feed, month, current in zip(feed_mask, month_stamps, direct_df["Amount"]):
-        if not is_feed:
-            updated_amounts.append(current)
-            continue
-        tons = fallback
-        if month is not None and month in cassava_series.index:
-            tons = float(cassava_series.loc[month])
-        updated_amounts.append(tons * cost_per_ton)
-
-    direct_df["Amount"] = updated_amounts
-    page.direct_costs_monthly.set_data(direct_df, mark_user_input=True)
-
-
 def _sync_working_capital_tables(page: InputLandingPage) -> None:
     """Refresh the Accounts Payable editor state after landing-page edits."""
 
@@ -1040,12 +1197,11 @@ def _sync_working_capital_tables(page: InputLandingPage) -> None:
     _update_table_editor_state(inv_table)
 
 
-def _apply_dependent_updates(page: InputLandingPage, scenario: str) -> None:
+def _apply_dependent_updates(page: InputLandingPage) -> None:
     """Ensure derived landing-page tables stay synchronised with inputs."""
 
     _auto_compound_production(page)
     _update_staff_costs_from_positions(page)
-    _update_feedstock_costs(page, scenario)
     _sync_working_capital_tables(page)
 
 
@@ -1131,6 +1287,31 @@ def _display_production_metrics(derived_metrics: Tuple[float, float] | None) -> 
     )
 
 
+def _production_metrics_from_row(df: pd.DataFrame, row_idx: int) -> Tuple[float, float] | None:
+    if "Cassava ton" not in df.columns or row_idx not in df.index:
+        return None
+
+    cassava_val = pd.to_numeric(pd.Series([df.at[row_idx, "Cassava ton"]]), errors="coerce").iloc[0]
+    if pd.isna(cassava_val):
+        return None
+
+    ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
+    feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
+    return ethanol_val, feed_val
+
+
+def _sync_production_outputs(df: pd.DataFrame) -> pd.DataFrame:
+    if "Cassava ton" not in df.columns:
+        return df
+
+    cassava_series = pd.to_numeric(df["Cassava ton"], errors="coerce")
+    if "Ethanol litres" in df.columns:
+        df.loc[:, "Ethanol litres"] = cassava_series * ETHANOL_LITRES_PER_TON
+    if "Animal Feed ton" in df.columns:
+        df.loc[:, "Animal Feed ton"] = cassava_series * ANIMAL_FEED_TON_PER_TON
+    return df
+
+
 def _row_editor_form(
     table: EditableTable,
     row_idx: int,
@@ -1146,17 +1327,6 @@ def _row_editor_form(
 
     original_row = df.loc[row_idx].copy()
 
-    read_only_row = (
-        table.name == "Direct Costs Monthly"
-        and "Cost Category" in df.columns
-        and _is_cassava_feedstock(df.at[row_idx, "Cost Category"])
-    )
-
-    if read_only_row:
-        st.info(
-            "Cassava feedstock costs are scenario-driven. Review the values below; they are locked for editing."
-        )
-
     month_range = pd.period_range(
         f"{int(projection.start_year):04d}-01",
         f"{int(projection.end_year):04d}-12",
@@ -1171,20 +1341,6 @@ def _row_editor_form(
     for column in table.columns:
         current_value = df.at[row_idx, column]
         widget_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}".replace(" ", "_").lower()
-
-        if read_only_row:
-            display_value = ""
-            if current_value is not None and not (
-                isinstance(current_value, float) and pd.isna(current_value)
-            ):
-                display_value = str(current_value)
-            st.text_input(
-                column,
-                value=display_value,
-                key=widget_key,
-                disabled=True,
-            )
-            continue
 
         if column in derived_columns:
             if table.name == "Production Monthly":
@@ -1238,23 +1394,30 @@ def _row_editor_form(
 
         category_key = (table.name, column)
         if category_key in CATEGORY_SELECT_OPTIONS:
-            options = list(CATEGORY_SELECT_OPTIONS[category_key])
+            config = CATEGORY_SELECT_OPTIONS[category_key]
+            options = list(config.get("options", []))
+            allow_custom = bool(config.get("allow_custom", True))
             current_str = (
                 ""
                 if current_value is None or (isinstance(current_value, float) and pd.isna(current_value))
                 else str(current_value)
             )
-            if current_str and current_str not in options:
+            if current_str and current_str not in options and allow_custom:
                 options.append(current_str)
-            custom_label = "Custom value"
-            if custom_label not in options:
-                options.append(custom_label)
 
-            default_index = 0
-            if current_str and current_str in options:
-                default_index = options.index(current_str)
-            elif custom_label in options and current_str and current_str not in CATEGORY_SELECT_OPTIONS[category_key]:
-                default_index = options.index(current_str)
+            if allow_custom:
+                custom_label = "Custom value"
+                if custom_label not in options:
+                    options.append(custom_label)
+
+            if options:
+                if current_str and current_str in options:
+                    default_index = options.index(current_str)
+                else:
+                    default_index = 0
+            else:
+                options = [""]
+                default_index = 0
 
             selection = st.selectbox(
                 column,
@@ -1263,16 +1426,18 @@ def _row_editor_form(
                 key=widget_key,
             )
 
-            if selection == custom_label:
+            if allow_custom and selection == "Custom value":
                 custom_key = f"{widget_prefix}_{table.name}_{row_idx}_{column}_custom".replace(" ", "_").lower()
                 custom_value = st.text_input(
                     f"Specify {column.lower()}",
-                    value=current_str if current_str not in CATEGORY_SELECT_OPTIONS[category_key] else "",
+                    value=current_str if current_str not in config.get("options", []) else "",
                     key=custom_key,
                 )
                 new_value = custom_value.strip() if custom_value.strip() else None
             else:
                 new_value = selection
+                if not allow_custom and new_value not in config.get("options", []):
+                    new_value = config.get("options", [None])[0]
 
             df.at[row_idx, column] = new_value
             if (current_str or None) != (new_value or None):
@@ -1375,7 +1540,8 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         ):
             category = table.data.at[idx, "Cost Category"]
             if category and not pd.isna(category):
-                label = f"{label} – {category}"
+                return str(category)
+            return f"Row {idx + 1}"
 
         return f"{idx + 1}. {label}"
 
@@ -1394,6 +1560,48 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         page.projection,
         widget_prefix="default_edit",
     )
+
+    increment_config = YEARLY_INCREMENT_CONFIG.get(table.name)
+    if increment_config:
+        available_columns = [col for col in increment_config["value_columns"] if col in df_updated.columns]
+        if available_columns:
+            st.markdown("---")
+            st.markdown("**Yearly increment adjustments (%)**")
+            description = increment_config.get("description")
+            if description:
+                st.caption(description)
+
+            rates: Dict[str, float] = {}
+            for column in available_columns:
+                rate_input = st.number_input(
+                    f"{column} annual change (%)",
+                    value=0.0,
+                    step=0.1,
+                    format="%.2f",
+                    key=f"yearly_increment_{table.name.replace(' ', '_').lower()}_{row_idx}_{column}",
+                )
+                rates[column] = float(rate_input) / 100.0
+
+            if st.button(
+                "Apply yearly increment",
+                key=f"apply_yearly_increment_{table.name.replace(' ', '_').lower()}_{row_idx}",
+            ):
+                incremented = apply_yearly_increment(
+                    df_updated,
+                    row_idx,
+                    date_column=increment_config["date_column"],
+                    frequency=increment_config["frequency"],
+                    value_columns=available_columns,
+                    increments=rates,
+                    match_columns=increment_config.get("match_columns", []),
+                    horizon_end=_increment_horizon_value(increment_config, page.projection),
+                )
+                if table.name.startswith("Production"):
+                    incremented = _sync_production_outputs(incremented)
+                    derived_metrics = _production_metrics_from_row(incremented, row_idx)
+                if not incremented.equals(df_updated):
+                    df_updated = incremented
+                    updated = True
 
     cascade_applied = False
     cascade_metrics: Tuple[float, float] | None = None
@@ -1671,15 +1879,8 @@ def _render_table(
             )
             if controls[1].button("➖ Remove selected", key=f"remove_{safe_key}"):
                 idx = int(remove_index)
-                if (
-                    table.name == "Direct Costs Monthly"
-                    and "Cost Category" in table.data.columns
-                    and _is_cassava_feedstock(table.data.at[idx, "Cost Category"])
-                ):
-                    st.warning("Cassava feedstock costs are scenario-driven and cannot be removed.")
-                else:
-                    table.remove_row(idx)
-                    data_changed = True
+                table.remove_row(idx)
+                data_changed = True
         else:
             controls[1].markdown("&nbsp;")
 
@@ -1699,6 +1900,17 @@ def _render_table(
                     help="Calculated automatically from other inputs.",
                 )
 
+        for (table_name, column), config in CATEGORY_SELECT_OPTIONS.items():
+            if (
+                table_name == table.name
+                and column in table.columns
+                and not config.get("allow_custom", True)
+            ):
+                column_config[column] = st.column_config.SelectboxColumn(
+                    label=column,
+                    options=list(config.get("options", [])),
+                )
+
         if table.name == "Production Monthly":
             st.caption(
                 "Edit **Cassava ton** (and optional Growth %) for any month. The model will automatically recompute the matching "
@@ -1713,68 +1925,20 @@ def _render_table(
         if cache_key not in st.session_state:
             st.session_state[cache_key] = table.data.copy()
 
-        if table.name == "Direct Costs Monthly" and "Cost Category" in table.data.columns:
-            auto_mask = table.data["Cost Category"].apply(_is_cassava_feedstock)
-            auto_rows = table.data.loc[auto_mask].copy()
-            manual_rows = table.data.loc[~auto_mask].copy()
+        edited = st.data_editor(
+            table.data,
+            num_rows="dynamic",
+            use_container_width=True,
+            key=widget_key,
+            column_config=column_config or None,
+        )
+        if isinstance(edited, pd.DataFrame):
+            new_data = edited[table.columns].copy()
+        else:  # pragma: no cover - safety for older Streamlit returning list of dicts
+            new_data = pd.DataFrame(edited, columns=table.columns)
 
-            if not auto_rows.empty:
-                auto_rows = auto_rows.sort_index().reset_index(drop=True)
-                st.caption(
-                    "Cassava feedstock costs are scenario-driven and locked. Adjust other "
-                    "direct-cost rows using the editor below."
-                )
-                st.data_editor(
-                    auto_rows,
-                    use_container_width=True,
-                    key=f"{widget_key}_auto",
-                    disabled=True,
-                    column_config=column_config or None,
-                )
-
-            display_manual = manual_rows.reset_index(drop=True)
-
-            if display_manual.empty:
-                st.info("No editable direct-cost rows are available. Use **Add row** to insert a new item.")
-                manual_result = display_manual.copy()
-            else:
-                manual_column_config = dict(column_config)
-                if "Cost Category" in display_manual.columns:
-                    manual_column_config["Cost Category"] = st.column_config.SelectboxColumn(
-                        label="Cost Category",
-                        options=list(DIRECT_COST_CATEGORY_OPTIONS),
-                    )
-                edited_manual = st.data_editor(
-                    display_manual,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key=f"{widget_key}_manual",
-                    column_config=manual_column_config or None,
-                )
-                if isinstance(edited_manual, pd.DataFrame):
-                    manual_result = edited_manual[display_manual.columns].copy()
-                else:  # pragma: no cover
-                    manual_result = pd.DataFrame(edited_manual, columns=display_manual.columns)
-                if not manual_result.equals(display_manual):
-                    data_changed = True
-
-            combined = pd.concat([auto_rows, manual_result], axis=0, ignore_index=True)
-            new_data = combined[table.columns]
-        else:
-            edited = st.data_editor(
-                table.data,
-                num_rows="dynamic",
-                use_container_width=True,
-                key=widget_key,
-                column_config=column_config or None,
-            )
-            if isinstance(edited, pd.DataFrame):
-                new_data = edited[table.columns].copy()
-            else:  # pragma: no cover - safety for older Streamlit returning list of dicts
-                new_data = pd.DataFrame(edited, columns=table.columns)
-
-            if not new_data.equals(table.data):
-                data_changed = True
+        if not new_data.equals(table.data):
+            data_changed = True
 
         table.set_data(new_data, mark_user_input=data_changed)
         if (data_changed or change_applied) and table.name == "Production Monthly":
@@ -1847,6 +2011,8 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 "Terminal Growth Rate",
                 "Capital Gains Tax Rate",
                 "Total Initial Investment",
+                "Initial Equity Investment",
+                "Initial Loan Funding",
             ],
             "Value": [
                 _format_rate(metrics.get("Corporate Tax Rate")),
@@ -1856,10 +2022,25 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 _format_rate(metrics.get("Terminal Growth Rate")),
                 _format_rate(metrics.get("Capital Gains Tax Rate")),
                 _format_currency(metrics.get("Total Initial Investment")),
+                _format_currency(metrics.get("Initial Equity Investment")),
+                _format_currency(metrics.get("Initial Loan Funding")),
             ],
         }
     )
     st.dataframe(assumption_snapshot, use_container_width=True, hide_index=True)
+
+    st.markdown("### Detailed Working Capital (Annual)")
+    working_capital_output = results.get("working_capital")
+    if isinstance(working_capital_output, WorkingCapitalOutput):
+        annual_wc = working_capital_output.annual.copy()
+    else:
+        annual_wc = pd.DataFrame()
+    if isinstance(annual_wc, pd.DataFrame) and not annual_wc.empty:
+        annual_display = annual_wc.copy()
+        annual_display.index.name = "Year"
+        st.dataframe(annual_display.reset_index(), use_container_width=True)
+    else:
+        st.info("Working capital schedule is not available for the selected horizon.")
 
     st.markdown("### Latest Drivers")
     drivers = pd.DataFrame(
@@ -1977,10 +2158,66 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     if not debt_payments.empty:
         st.area_chart(debt_payments)
 
+    st.markdown("### Yearly Loan Amortisation")
+    yearly_amortisation = getattr(loan_schedule, "annual", pd.DataFrame())
+    if isinstance(yearly_amortisation, pd.DataFrame) and not yearly_amortisation.empty:
+        amort_display = yearly_amortisation.copy()
+        rate_column = "Interest Rate"
+        currency_columns = [
+            "Yearly Remaining Balance",
+            "Monthly Interest (Balance × Rate / 12)",
+            "Interest Paid",
+            "Principal Paid",
+            "Total Payment",
+            "Year-End Balance",
+        ]
+        if rate_column in amort_display.columns:
+            amort_display[rate_column] = amort_display[rate_column].apply(_format_rate)
+        for col in currency_columns:
+            if col in amort_display.columns:
+                amort_display[col] = amort_display[col].apply(_format_currency)
+        st.dataframe(amort_display, use_container_width=True)
+    else:
+        st.info("No loan amortisation data available for the current projection.")
+
     st.markdown("### Break-even Analysis")
     break_even_df = results.get("break_even")
     if isinstance(break_even_df, pd.DataFrame) and not break_even_df.empty:
         st.dataframe(_reset_period_index(break_even_df, "Month"), use_container_width=True)
+
+        break_even_monthly = break_even_df.copy()
+        if isinstance(break_even_monthly.index, pd.PeriodIndex):
+            break_even_monthly.index = break_even_monthly.index.to_timestamp()
+        elif not isinstance(break_even_monthly.index, pd.DatetimeIndex):
+            converted_index = pd.to_datetime(break_even_monthly.index, errors="coerce")
+            valid_mask = converted_index.notna()
+            break_even_monthly = break_even_monthly.loc[valid_mask]
+            break_even_monthly.index = converted_index[valid_mask]
+
+        numeric_columns = [
+            column
+            for column in ("Monthly Margin", "Cumulative Margin")
+            if column in break_even_monthly.columns
+        ]
+
+        if numeric_columns:
+            monthly_chart = break_even_monthly[numeric_columns]
+            if not monthly_chart.empty:
+                st.markdown("#### Monthly Break-even Trend")
+                st.line_chart(monthly_chart)
+
+                aggregation: Dict[str, str] = {}
+                if "Monthly Margin" in monthly_chart.columns:
+                    aggregation["Monthly Margin"] = "sum"
+                if "Cumulative Margin" in monthly_chart.columns:
+                    aggregation["Cumulative Margin"] = "last"
+                annual_break_even = (
+                    monthly_chart.resample("Y").agg(aggregation).dropna(how="all") if aggregation else pd.DataFrame()
+                )
+                if not annual_break_even.empty:
+                    annual_break_even.index = annual_break_even.index.to_period("Y").astype(str)
+                    st.markdown("#### Annual Break-even Trend")
+                    st.line_chart(annual_break_even)
 
 def _render_financial_performance(results: Dict[str, object]) -> None:
     financials = results["financials"]
@@ -2198,33 +2435,167 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
     else:
         st.dataframe(sensitivity_results, use_container_width=True)
 
-    st.subheader("Monte Carlo Simulation Configuration")
-    mc_rows = (
-        [{"Setting": "Iterations", "Value": MONTE_CARLO_ITERATIONS}, {"Setting": "Random Seed", "Value": MONTE_CARLO_SEED}]
-        + [{"Setting": f"Std Dev - {param}", "Value": std} for param, std in MONTE_CARLO_STD.items()]
-    )
-    st.dataframe(pd.DataFrame(mc_rows), use_container_width=True, hide_index=True)
-
     st.subheader("Tornado Drivers")
     tornado_model = _scenario_model()
     tornado_df = tornado_chart_inputs(tornado_model, TORNADO_DRIVERS, scale=0.1)
     st.dataframe(tornado_df, use_container_width=True)
 
 def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
-    st.subheader("Scenario/Is Configuration")
-    scenario_df = pd.DataFrame([{"Scenario": cfg.name, **cfg.overrides} for cfg in DEFAULT_SCENARIO_CONFIGS]) if DEFAULT_SCENARIO_CONFIGS else pd.DataFrame(columns=["Scenario"])
-    st.dataframe(scenario_df, use_container_width=True)
-
-    st.subheader("Scenario Tool Configuration")
-    tool_df = model.input_page.global_inputs.model_frame.rename(columns={"Value": "Base Value"}).copy()
-    numeric_values = pd.to_numeric(tool_df["Base Value"], errors="coerce")
-    tool_df["Low Bound"] = np.where(numeric_values.notna(), numeric_values * 0.8, np.nan)
-    tool_df["High Bound"] = np.where(numeric_values.notna(), numeric_values * 1.2, np.nan)
-    desired_order = ["Parameter", "Base Value", "Units", "Low Bound", "High Bound"]
-    tool_df = tool_df[[c for c in desired_order if c in tool_df.columns]]
-    st.dataframe(tool_df, use_container_width=True, hide_index=True)
-
     base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+    parameter_catalog = scenario_parameter_catalog(base_page)
+
+    st.subheader("Scenario Parameter Library")
+    if parameter_catalog.empty:
+        st.info("No scenario-compatible parameters are available for the current inputs.")
+    else:
+        catalog_display = parameter_catalog.copy()
+        st.dataframe(catalog_display, use_container_width=True, hide_index=True)
+
+    options = parameter_catalog["Parameter"].tolist()
+    scenario_definitions = st.session_state.setdefault(SCENARIO_DEFINITIONS_KEY, [])
+    selected_defaults = st.session_state.setdefault(SCENARIO_SELECTION_STATE_KEY, [])
+    selected_parameters = st.multiselect(
+        "Select parameters to configure",
+        options=options,
+        default=[value for value in selected_defaults if value in options],
+    )
+    st.session_state[SCENARIO_SELECTION_STATE_KEY] = selected_parameters
+
+    builder_values = st.session_state.setdefault(SCENARIO_VALUE_STATE_KEY, {})
+    catalog_lookup = {row["Parameter"]: row for row in parameter_catalog.to_dict("records")}
+
+    st.session_state.setdefault(SCENARIO_NAME_STATE_KEY, "")
+    if st.session_state.pop(SCENARIO_CLEAR_NAME_FLAG, False):
+        st.session_state[SCENARIO_NAME_STATE_KEY] = ""
+
+    if selected_parameters:
+        st.subheader("Scenario Builder")
+
+    for parameter in selected_parameters:
+        info = catalog_lookup.get(parameter, {})
+        base_value = float(info.get("Base Value", np.nan)) if info else np.nan
+        units = info.get("Units", "")
+        source = info.get("Source", "")
+        base_label = f"{base_value:,.2f}" if np.isfinite(base_value) else "n/a"
+        expander_label = f"{parameter} — Base {base_label}{f' {units}' if units else ''}"
+        with st.expander(expander_label, expanded=False):
+            if source:
+                st.caption(f"Source: {source}")
+            default_mode = "percent" if np.isfinite(base_value) and not np.isclose(base_value, 0.0) else "absolute"
+            state = builder_values.get(parameter, {"mode": default_mode})
+            mode = st.selectbox(
+                "Adjustment mode",
+                ["Percent", "Absolute"],
+                index=0 if state.get("mode", default_mode) == "percent" else 1,
+                key=f"scenario_mode_{parameter}",
+            )
+            state["mode"] = "percent" if mode == "Percent" else "absolute"
+            if state["mode"] == "percent" and np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                percent_default = float(state.get("percent", 0.0))
+                percent_value = st.number_input(
+                    "Percent change (%)",
+                    key=f"scenario_percent_{parameter}",
+                    value=percent_default,
+                    step=0.5,
+                    format="%.2f",
+                )
+                state["percent"] = percent_value
+            else:
+                if not np.isfinite(base_value):
+                    st.info("Base value unavailable; specify a target value explicitly.")
+                absolute_default = state.get("absolute")
+                if absolute_default is None:
+                    absolute_default = base_value if np.isfinite(base_value) else 0.0
+                absolute_value = st.number_input(
+                    f"Target value ({units})" if units else "Target value",
+                    key=f"scenario_absolute_{parameter}",
+                    value=float(absolute_default),
+                    step=100.0,
+                    format="%.2f",
+                )
+                state["absolute"] = absolute_value
+            builder_values[parameter] = state
+
+    st.session_state[SCENARIO_VALUE_STATE_KEY] = builder_values
+
+    scenario_name = st.text_input("Scenario name", key=SCENARIO_NAME_STATE_KEY)
+    if st.button("Save Scenario", key="save_scenario_definition"):
+        if not scenario_name.strip():
+            st.warning("Please provide a scenario name before saving.")
+        elif not selected_parameters:
+            st.warning("Select at least one parameter to configure.")
+        else:
+            overrides: Dict[str, float] = {}
+            deltas: Dict[str, float | None] = {}
+            for parameter in selected_parameters:
+                info = catalog_lookup.get(parameter, {})
+                base_value = float(info.get("Base Value", np.nan)) if info else np.nan
+                state = builder_values.get(parameter, {})
+                mode = state.get("mode", "percent")
+                if mode == "percent" and np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                    percent = float(state.get("percent", 0.0))
+                    target_value = base_value * (1 + percent / 100.0)
+                    overrides[parameter] = float(target_value)
+                    deltas[parameter] = float(percent)
+                else:
+                    absolute = state.get("absolute")
+                    if absolute is None:
+                        absolute = base_value if np.isfinite(base_value) else 0.0
+                    absolute = float(absolute)
+                    overrides[parameter] = absolute
+                    if np.isfinite(base_value) and not np.isclose(base_value, 0.0):
+                        change = (absolute / base_value - 1.0) * 100.0
+                        deltas[parameter] = float(change)
+                    else:
+                        deltas[parameter] = None
+
+            new_entry = {
+                "name": scenario_name.strip(),
+                "overrides": overrides,
+                "deltas": deltas,
+            }
+            existing_index = next(
+                (
+                    idx
+                    for idx, entry in enumerate(scenario_definitions)
+                    if entry["name"].casefold() == scenario_name.strip().casefold()
+                ),
+                None,
+            )
+            if existing_index is not None:
+                scenario_definitions[existing_index] = new_entry
+            else:
+                scenario_definitions.append(new_entry)
+            st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+            st.session_state[SCENARIO_CLEAR_NAME_FLAG] = True
+            st.success(f"Scenario '{scenario_name}' saved.")
+            _trigger_rerun()
+
+    if scenario_definitions:
+        st.subheader("Configured Scenarios")
+        summary_rows: List[Dict[str, object]] = []
+        for entry in scenario_definitions:
+            for parameter, target in entry.get("overrides", {}).items():
+                delta_value = entry.get("deltas", {}).get(parameter)
+                summary_rows.append(
+                    {
+                        "Scenario": entry["name"],
+                        "Parameter": parameter,
+                        "Target Value": float(target),
+                        "Delta (%)": None if delta_value is None else float(delta_value),
+                    }
+                )
+        summary_df = pd.DataFrame(summary_rows)
+        if not summary_df.empty:
+            if "Delta (%)" in summary_df.columns:
+                summary_df["Delta (%)"] = summary_df["Delta (%)"].round(2)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        for idx, entry in enumerate(scenario_definitions):
+            if st.button(f"Remove {entry['name']}", key=f"remove_scenario_{idx}"):
+                scenario_definitions.pop(idx)
+                st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+                _trigger_rerun()
+                return
 
     def _scenario_model() -> CassavaBioethanolModel:
         clone = CassavaBioethanolModel(copy.deepcopy(base_page))
@@ -2232,34 +2603,217 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         return clone
 
     comparison_model = _scenario_model()
+    scenario_configs = [ScenarioConfig(entry["name"], entry["overrides"]) for entry in scenario_definitions]
     scenario_cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(SCENARIO_CACHE_KEY, {})
     cached_entry = scenario_cache.get(model.scenario)
+    signature = _scenario_definition_signature(scenario_definitions)
     comparison_button = st.button(
         "Run Scenario Comparison",
         key=f"run_scenario_cmp_{model.scenario.lower()}",
     )
 
-    if comparison_button or not cached_entry or cached_entry.get("version") != _current_model_version():
-        if DEFAULT_SCENARIO_CONFIGS:
-            with st.spinner("Evaluating scenario overrides..."):
-                comparison_df = scenario_comparison(comparison_model, DEFAULT_SCENARIO_CONFIGS)
-        else:
-            comparison_df = pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
+    needs_refresh = (
+        comparison_button
+        or cached_entry is None
+        or cached_entry.get("version") != _current_model_version()
+        or cached_entry.get("signature") != signature
+    )
+
+    if needs_refresh:
+        with st.spinner("Evaluating scenario overrides..."):
+            base_result = comparison_model.build()
+            base_metrics = base_result.get("metrics", {})
+            if scenario_configs:
+                comparison_df = scenario_comparison(comparison_model, scenario_configs)
+            else:
+                comparison_df = pd.DataFrame(columns=["Scenario"])
         scenario_cache[model.scenario] = {
             "version": _current_model_version(),
+            "signature": signature,
             "comparison": comparison_df,
+            "base_metrics": base_metrics,
         }
         st.session_state[SCENARIO_CACHE_KEY] = scenario_cache
         cached_entry = scenario_cache[model.scenario]
-    else:
-        comparison_df = (
-            cached_entry.get("comparison") if cached_entry else pd.DataFrame(columns=["Scenario", "Project NPV", "Project IRR", "Equity IRR"])
-        )
+
+    comparison_df = cached_entry.get("comparison", pd.DataFrame()) if cached_entry else pd.DataFrame()
+    base_metrics = cached_entry.get("base_metrics", {}) if cached_entry else {}
+
+    base_row = {"Scenario": "Base Case"}
+    base_row.update(base_metrics)
+    base_df = pd.DataFrame([base_row])
+    comparison_display = comparison_df.copy()
+    for metric in ["Project NPV", "Project IRR", "Equity IRR", "Payback Period (years)"]:
+        if metric in comparison_display.columns and metric in base_metrics:
+            comparison_display[f"{metric} Δ"] = comparison_display[metric] - base_metrics[metric]
+
+    combined_df = pd.concat([base_df, comparison_display], ignore_index=True, sort=False)
+    for metric in ["Project NPV", "Project IRR", "Equity IRR", "Payback Period (years)"]:
+        delta_col = f"{metric} Δ"
+        if delta_col in combined_df.columns:
+            combined_df.loc[combined_df["Scenario"] == "Base Case", delta_col] = 0.0
+
     st.subheader("Scenario Comparison")
-    if comparison_df.empty:
-        st.info("Click 'Run Scenario Comparison' to evaluate the configured overrides.")
+    if combined_df.empty:
+        st.info("Configure scenarios and click 'Run Scenario Comparison' to evaluate impacts.")
     else:
-        st.dataframe(comparison_df, use_container_width=True)
+        preferred_cols = [
+            "Scenario",
+            "Project NPV",
+            "Project NPV Δ",
+            "Project IRR",
+            "Project IRR Δ",
+            "Equity IRR",
+            "Equity IRR Δ",
+            "Payback Period (years)",
+            "Payback Period (years) Δ",
+        ]
+        display_cols = [col for col in preferred_cols if col in combined_df.columns]
+        display_df = combined_df[display_cols] if display_cols else combined_df
+        st.dataframe(display_df, use_container_width=True)
+
+    toolkit = comparison_model.advanced_toolkit()
+    analysis_df = pd.DataFrame()
+    feature_cols: List[str] = []
+    if scenario_definitions and not comparison_df.empty:
+        feature_rows: List[Dict[str, object]] = []
+        for entry in scenario_definitions:
+            row: Dict[str, object] = {"Scenario": entry["name"]}
+            for parameter in SCENARIO_PARAMETER_NAMES:
+                delta_value = entry.get("deltas", {}).get(parameter)
+                row[parameter] = 0.0 if delta_value is None else float(delta_value)
+            feature_rows.append(row)
+        features_df = pd.DataFrame(feature_rows).set_index("Scenario") if feature_rows else pd.DataFrame()
+        metrics_df = comparison_df.set_index("Scenario") if not comparison_df.empty else pd.DataFrame()
+        if not features_df.empty and not metrics_df.empty:
+            analysis_df = features_df.join(metrics_df, how="inner")
+            if "Project NPV" in analysis_df.columns and "Project NPV" in metrics_df.columns:
+                base_npv = base_metrics.get("Project NPV")
+                if base_npv is not None:
+                    analysis_df["Project NPV Change"] = analysis_df["Project NPV"] - base_npv
+            if "Equity IRR" in analysis_df.columns and "Equity IRR" in metrics_df.columns:
+                base_equity = base_metrics.get("Equity IRR")
+                if base_equity is not None:
+                    analysis_df["Equity IRR Change"] = analysis_df["Equity IRR"] - base_equity
+            feature_cols = [param for param in SCENARIO_PARAMETER_NAMES if param in analysis_df.columns]
+            if feature_cols:
+                analysis_df[feature_cols] = analysis_df[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    st.subheader("Predictive Scenario Tools")
+    regression_tab, tree_tab, time_series_tab, revolver_tab = st.tabs(
+        ["Regression", "Decision Tree", "Time Series", "Revolver"]
+    )
+
+    with regression_tab:
+        if len(analysis_df) >= 2 and feature_cols and "Project NPV Change" in analysis_df.columns:
+            regression_input = analysis_df[feature_cols + ["Project NPV Change"]].reset_index(drop=True)
+            try:
+                regression_result = toolkit.linear_regression(regression_input, "Project NPV Change")
+            except Exception as exc:  # pragma: no cover - display feedback only
+                st.warning(f"Regression analysis failed: {exc}")
+            else:
+                metric_cols = st.columns(2)
+                metric_cols[0].metric("R²", f"{regression_result.score:.3f}")
+                metric_cols[1].metric("Intercept", f"{regression_result.intercept:,.2f}")
+                coeff_df = (
+                    pd.DataFrame(
+                        [
+                            {"Parameter": name, "Coefficient": coeff}
+                            for name, coeff in regression_result.coefficients.items()
+                        ]
+                    )
+                    .sort_values("Coefficient", key=lambda s: s.abs(), ascending=False)
+                )
+                st.dataframe(coeff_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Add at least two scenarios to run regression analysis.")
+
+    with tree_tab:
+        if len(analysis_df) >= 2 and feature_cols and "Project NPV Change" in analysis_df.columns:
+            tree_input = analysis_df[feature_cols + ["Project NPV Change"]].reset_index(drop=True)
+            try:
+                tree_result = toolkit.decision_tree_regression(
+                    tree_input,
+                    "Project NPV Change",
+                    max_depth=min(4, len(feature_cols)),
+                )
+            except Exception as exc:  # pragma: no cover - display feedback only
+                st.warning(f"Decision tree analysis failed: {exc}")
+            else:
+                metric_cols = st.columns(2)
+                score_value = tree_result.score if np.isfinite(tree_result.score) else float("nan")
+                metric_cols[0].metric("R²", f"{score_value:.3f}" if np.isfinite(score_value) else "n/a")
+                metric_cols[1].metric("Depth", str(tree_result.depth))
+                importance_df = (
+                    pd.DataFrame(
+                        [
+                            {"Parameter": name, "Importance": importance}
+                            for name, importance in tree_result.feature_importances.items()
+                        ]
+                    )
+                    .sort_values("Importance", ascending=False)
+                )
+                st.dataframe(importance_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("Add at least two scenarios to explore decision tree splits.")
+
+    with time_series_tab:
+        financials = results.get("financials") if isinstance(results, dict) else None
+        annual_cf = getattr(financials, "cashflow_annual", None) if financials is not None else None
+        if isinstance(annual_cf, pd.DataFrame) and "Free Cash Flow" in annual_cf.columns:
+            series = annual_cf["Free Cash Flow"]
+            if isinstance(series, pd.Series) and not series.empty:
+                periods = st.slider("Forecast periods", min_value=1, max_value=10, value=5, step=1)
+                try:
+                    forecast = toolkit.arima_forecast(series, periods=periods)
+                except Exception as exc:  # pragma: no cover - display feedback only
+                    st.warning(f"Time-series forecast failed: {exc}")
+                else:
+                    actual_df = series.to_frame(name="Value").reset_index().rename(columns={series.index.name or "index": "Period"})
+                    actual_df["Type"] = "Actual"
+                    forecast_df = forecast.to_frame(name="Value").reset_index().rename(columns={forecast.index.name or "index": "Period"})
+                    forecast_df["Type"] = "Forecast"
+                    chart_df = pd.concat([actual_df, forecast_df], ignore_index=True)
+                    chart_df["Period"] = chart_df["Period"].astype(str)
+                    fig = px.line(chart_df, x="Period", y="Value", color="Type", title="Free Cash Flow Forecast")
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Free cash flow history is required for time-series forecasting.")
+        else:
+            st.info("Run the model to generate free cash flow before forecasting.")
+
+    with revolver_tab:
+        financials = results.get("financials") if isinstance(results, dict) else None
+        monthly_cf = getattr(financials, "cashflow_monthly", None) if financials is not None else None
+        if isinstance(monthly_cf, pd.DataFrame) and "Free Cash Flow" in monthly_cf.columns:
+            series = monthly_cf["Free Cash Flow"]
+            if isinstance(series, pd.Series) and not series.empty:
+                window = st.slider("Rolling window (months)", min_value=3, max_value=24, value=12, step=1)
+                revolver_df = toolkit.revolver_projection(series, window=window)
+                if not revolver_df.empty:
+                    viz_df = revolver_df.reset_index().rename(columns={series.index.name or "index": "Period"})
+                    viz_df["Period"] = viz_df["Period"].astype(str)
+                    melted = viz_df.melt(
+                        id_vars=["Period"],
+                        value_vars=["Value", "Rolling Mean"],
+                        var_name="Measure",
+                        value_name="Amount",
+                    )
+                    fig = px.line(
+                        melted,
+                        x="Period",
+                        y="Amount",
+                        color="Measure",
+                        title="Rolling Free Cash Flow (Revolver)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption("Rolling standard deviation provides a volatility view of the revolver balance.")
+                    std_chart = viz_df.set_index("Period")["Rolling Std"].rename("Rolling Std Dev")
+                    st.line_chart(std_chart)
+            else:
+                st.info("Monthly free cash flow is required to analyse the revolver trajectory.")
+        else:
+            st.info("Run the model to generate monthly free cash flow before analysing the revolver.")
 
     st.subheader("Goal Seek Results")
     goal_seek_parameter = "Corporate tax rate"
@@ -2309,37 +2863,265 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("Monte Carlo Simulation")
 
+    _ensure_monte_carlo_state()
+    st.subheader("Monte Carlo Simulation Configuration")
     current_version = _current_model_version()
     current_scenario = model.scenario
+    parameter_source = results.get("input_page_snapshot") if isinstance(results, dict) else None
+    if not isinstance(parameter_source, InputLandingPage):
+        parameter_source = model.input_page
+    parameter_library = _monte_carlo_parameter_library(parameter_source)
+    parameter_options = parameter_library["Parameter"].tolist()
+    base_value_lookup = (
+        parameter_library.set_index("Parameter")["Base Value"].to_dict()
+        if not parameter_library.empty
+        else {}
+    )
+
+    iterations = st.number_input(
+        "Iterations",
+        min_value=1,
+        value=int(st.session_state[MC_ITERATION_STATE_KEY]),
+        step=1,
+        format="%d",
+    )
+    st.session_state[MC_ITERATION_STATE_KEY] = int(iterations)
+
+    seed = st.number_input(
+        "Random Seed",
+        value=int(st.session_state[MC_SEED_STATE_KEY]),
+        step=1,
+        format="%d",
+    )
+    st.session_state[MC_SEED_STATE_KEY] = int(seed)
+
+    left_col, right_col = st.columns([1, 2])
+
+    with left_col:
+        st.caption(
+            "Select which inputs feed the simulation and review their base values from the landing page."
+        )
+
+        existing = st.session_state[MC_PARAMETER_STATE_KEY]
+        current_parameters = [
+            str(value).strip()
+            for value in existing.get("Parameter", [])
+            if str(value).strip() in parameter_options
+        ]
+        initial_selection = st.session_state.get(
+            MC_SELECTED_PARAMETER_STATE_KEY,
+            current_parameters,
+        )
+        selected_parameters = st.multiselect(
+            "Parameters to include",
+            options=parameter_options,
+            default=initial_selection,
+            key="mc_parameter_selector",
+        )
+        st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = selected_parameters
+
+        if st.button("Select all variables", use_container_width=True) and parameter_options:
+            st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = parameter_options
+            _trigger_rerun()
+
+        if parameter_library.empty:
+            st.info("No parameters are available on the landing page to configure the simulation.")
+        else:
+            st.dataframe(parameter_library, use_container_width=True, hide_index=True)
+
+        custom_parameter = st.text_input(
+            "Add custom parameter",
+            help="Provide a custom label when you need to sample a variable not listed above.",
+        )
+        if st.button("Add custom parameter to configuration", use_container_width=True):
+            trimmed = custom_parameter.strip()
+            if trimmed:
+                df = st.session_state[MC_PARAMETER_STATE_KEY]
+                if "Parameter" not in df or trimmed not in df["Parameter"].astype(str).tolist():
+                    new_row = {
+                        column: "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
+                        for column in MONTE_CARLO_PARAMETER_COLUMNS
+                    }
+                    new_row["Parameter"] = trimmed
+                    new_row["Distribution"] = "Normal"
+                    if trimmed in base_value_lookup:
+                        new_row["loc"] = base_value_lookup[trimmed]
+                    st.session_state[MC_PARAMETER_STATE_KEY] = pd.concat(
+                        [df, pd.DataFrame([new_row])], ignore_index=True
+                    ).reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+                selection = st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+                if trimmed not in selection:
+                    st.session_state[MC_SELECTED_PARAMETER_STATE_KEY] = selection + [trimmed]
+                _trigger_rerun()
+
+    with right_col:
+        st.caption("Configure distributions and parameters for each selected input.")
+        current_params = st.session_state[MC_PARAMETER_STATE_KEY]
+        df = current_params.copy()
+
+        if parameter_options:
+            retain = set(st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, []))
+            drop_mask = df["Parameter"].astype(str).isin(set(parameter_options) - retain)
+            df = df.loc[~drop_mask].copy()
+
+        selected_parameters = st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+        if not selected_parameters:
+            st.info("Select one or more parameters to configure the Monte Carlo simulation.")
+
+        updated_rows: List[Dict[str, object]] = []
+        distribution_options = available_monte_carlo_distributions()
+
+        for index, parameter in enumerate(selected_parameters):
+            existing_rows = df[df["Parameter"].astype(str) == parameter]
+            template = {
+                column: ("" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan)
+                for column in MONTE_CARLO_PARAMETER_COLUMNS
+            }
+            template["Parameter"] = parameter
+            template["Distribution"] = "Normal"
+
+            if not existing_rows.empty:
+                row_data = existing_rows.iloc[0].to_dict()
+                for column in MONTE_CARLO_PARAMETER_COLUMNS:
+                    if column not in row_data:
+                        row_data[column] = template[column]
+            else:
+                row_data = template
+
+            base_value = base_value_lookup.get(parameter)
+            slug = re.sub(r"[^0-9A-Za-z]+", "_", parameter).strip("_").lower() or f"param_{index}"
+
+            with st.container():
+                st.markdown(f"**{parameter}**")
+                if base_value is not None and not (isinstance(base_value, float) and np.isnan(base_value)):
+                    st.caption(f"Base value: {base_value}")
+
+                if not distribution_options:
+                    st.warning("No probability distributions are available for selection.")
+                    row_data["Distribution"] = ""
+                    spec = None
+                else:
+                    current_distribution = str(row_data.get("Distribution", "") or "Normal")
+                    if current_distribution not in distribution_options:
+                        current_distribution = distribution_options[0]
+
+                    distribution = st.selectbox(
+                        "Distribution",
+                        options=distribution_options,
+                        index=distribution_options.index(current_distribution),
+                        key=f"mc_dist_{slug}",
+                        help="Probability distribution used for sampling during the Monte Carlo run.",
+                    )
+                    row_data["Distribution"] = distribution
+                    spec = MONTE_CARLO_DISTRIBUTIONS.get(distribution)
+                relevant_fields: List[str] = []
+                if spec:
+                    relevant_fields.extend(spec.shape_params)
+                    relevant_fields.extend(spec.keyword_params)
+
+                if not relevant_fields:
+                    st.caption("No additional parameters required for this distribution.")
+                else:
+                    num_columns = min(3, max(1, len(relevant_fields)))
+                    field_columns = st.columns(num_columns)
+                    for field_index, field_name in enumerate(relevant_fields):
+                        field_column = field_columns[field_index % num_columns]
+                        raw_value = row_data.get(field_name)
+                        placeholder = ""
+                        if field_name == "loc" and base_value is not None and not (
+                            isinstance(base_value, float) and np.isnan(base_value)
+                        ):
+                            placeholder = str(base_value)
+
+                        key_suffix = f"{slug}_{field_name}"
+                        if field_name == "pvals":
+                            default_value = "" if pd.isna(raw_value) else str(raw_value)
+                            value = field_column.text_input(
+                                field_name,
+                                value=default_value,
+                                key=f"mc_param_{key_suffix}",
+                                help="Comma-separated probabilities (e.g. 0.2,0.3,0.5) for the Multinomial distribution.",
+                            )
+                            row_data[field_name] = value
+                        else:
+                            default_value = "" if pd.isna(raw_value) else str(raw_value)
+                            value = field_column.text_input(
+                                field_name,
+                                value=default_value,
+                                key=f"mc_param_{key_suffix}",
+                                placeholder=placeholder,
+                            )
+                            row_data[field_name] = value
+
+                for column in MONTE_CARLO_PARAMETER_COLUMNS:
+                    if column in {"Parameter", "Distribution"}:
+                        continue
+                    if spec and column in relevant_fields:
+                        continue
+                    row_data[column] = "" if column in MONTE_CARLO_TEXT_COLUMNS else np.nan
+
+                updated_rows.append(row_data)
+
+                st.divider()
+
+        edited_params = pd.DataFrame(updated_rows, columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+        edited_params = edited_params.reindex(columns=list(MONTE_CARLO_PARAMETER_COLUMNS))
+
+        numeric_columns = [
+            column for column in MONTE_CARLO_PARAMETER_COLUMNS if column not in MONTE_CARLO_TEXT_COLUMNS
+        ]
+        for column in numeric_columns:
+            if column in edited_params:
+                edited_params[column] = pd.to_numeric(edited_params[column], errors="coerce")
+        for column in MONTE_CARLO_TEXT_COLUMNS:
+            if column in edited_params:
+                edited_params[column] = edited_params[column].astype("string").fillna("").astype(object)
+        st.session_state[MC_PARAMETER_STATE_KEY] = edited_params
+
+        with st.expander("Distribution reference", expanded=False):
+            st.dataframe(
+                _monte_carlo_distribution_table(),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed))
+
     cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(MC_CACHE_KEY, {})
     cached_entry = cache.get(current_scenario)
+    if cached_entry and (
+        cached_entry.get("version") != current_version
+        or cached_entry.get("signature") != config_signature
+    ):
+        cache.pop(current_scenario, None)
+        st.session_state[MC_CACHE_KEY] = cache
+        cached_entry = None
 
     run_requested = st.button(
         "Run Monte Carlo Simulation",
         key=f"mc_run_{current_scenario.lower()}",
     )
 
-    if run_requested or not cached_entry or cached_entry.get("version") != current_version:
-        if run_requested:
-            base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
-            with st.spinner("Running Monte Carlo simulation..."):
-                mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
-                mc_model.scenario = current_scenario
-                mc_results = monte_carlo_simulation(
-                    mc_model,
-                    parameter_std=MONTE_CARLO_STD,
-                    iterations=MONTE_CARLO_ITERATIONS,
-                    random_seed=MONTE_CARLO_SEED,
-                )
-            cache[current_scenario] = {"version": current_version, "results": mc_results}
-            st.session_state[MC_CACHE_KEY] = cache
-            cached_entry = cache[current_scenario]
-        else:
-            st.info("Click 'Run Monte Carlo Simulation' to generate results for this scenario.")
-            return
-
-    if not cached_entry or cached_entry.get("results") is None:
-        st.info("Monte Carlo results are not available. Click the run button to generate them.")
+    if run_requested:
+        base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        with st.spinner("Running Monte Carlo simulation..."):
+            mc_model = CassavaBioethanolModel(copy.deepcopy(base_page))
+            mc_model.scenario = current_scenario
+            mc_results = monte_carlo_simulation(
+                mc_model,
+                parameter_configs=edited_params,
+                iterations=int(iterations),
+                random_seed=int(seed),
+            )
+        cache[current_scenario] = {
+            "version": current_version,
+            "signature": config_signature,
+            "results": mc_results,
+        }
+        st.session_state[MC_CACHE_KEY] = cache
+        cached_entry = cache[current_scenario]
+    elif cached_entry is None:
+        st.info("Monte Carlo results are not available. Click 'Run Monte Carlo Simulation' to generate them.")
         return
 
     mc_results = cached_entry["results"]
@@ -2348,15 +3130,48 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
         return
 
     st.subheader("Summary Statistics")
-    summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T
-    st.dataframe(summary, use_container_width=True)
+    summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T.reset_index()
+    summary = summary.rename(columns={"index": "Metric"})
+    stat_columns = [
+        column
+        for column in summary.columns
+        if column != "Metric" and summary[column].notna().any()
+    ]
+    if stat_columns:
+        summary_melt = summary.melt(
+            id_vars="Metric",
+            value_vars=stat_columns,
+            var_name="Statistic",
+            value_name="Value",
+        )
+        summary_chart = px.bar(
+            summary_melt,
+            x="Statistic",
+            y="Value",
+            color="Statistic",
+            facet_col="Metric",
+            facet_col_wrap=2,
+            title="Monte Carlo summary statistics by metric",
+        )
+        summary_chart.update_layout(showlegend=False)
+        st.plotly_chart(summary_chart, use_container_width=True)
+    else:
+        st.info("Summary statistics are not available for the current simulation results.")
 
-    st.subheader("NPV Distribution (sorted path)")
-    st.line_chart(mc_results["Project NPV"].sort_values().reset_index(drop=True))
-
-    if "Project IRR" in mc_results:
-        st.subheader("IRR Distribution (sorted path)")
-        st.line_chart(mc_results["Project IRR"].sort_values().reset_index(drop=True))
+    numeric_columns = mc_results.select_dtypes(include=[np.number]).columns.tolist()
+    if numeric_columns:
+        st.subheader("Distribution Visualisations")
+        for column in numeric_columns:
+            distribution_chart = px.histogram(
+                mc_results,
+                x=column,
+                nbins=min(50, max(10, int(np.sqrt(len(mc_results))))),
+                marginal="box",
+                title=f"Distribution for {column}",
+            )
+            st.plotly_chart(distribution_chart, use_container_width=True)
+    else:
+        st.info("Monte Carlo results do not contain numeric metrics to plot.")
 
 def main() -> None:
     st.title("Cassava_Bioethanol Financial Model")
@@ -2417,7 +3232,7 @@ def main() -> None:
         _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)
-        _apply_dependent_updates(input_page, selected_scenario)
+        _apply_dependent_updates(input_page)
         _editable_tables(input_page)
 
     snapshot = st.session_state.get("input_snapshot")
