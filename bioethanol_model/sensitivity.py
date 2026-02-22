@@ -20,6 +20,7 @@ class _DistributionSpec:
     dist: Any
     shape_params: Tuple[str, ...] = ()
     keyword_params: Tuple[str, ...] = ()
+    keyword_aliases: Mapping[str, str] | None = None
     force_size_one: bool = False
 
     def sample(
@@ -52,7 +53,8 @@ class _DistributionSpec:
             value = _resolve_parameter_value(key, raw_values.get(key), base_value)
             if value is None:
                 continue
-            kwargs[key] = value
+            target_key = self.keyword_aliases.get(key, key) if self.keyword_aliases else key
+            kwargs[target_key] = value
 
         if self.force_size_one and "size" not in kwargs:
             kwargs["size"] = 1
@@ -124,6 +126,7 @@ MONTE_CARLO_DISTRIBUTIONS: Dict[str, _DistributionSpec] = {
         stats.multinomial,
         shape_params=("n",),
         keyword_params=("pvals",),
+        keyword_aliases={"pvals": "p"},
         force_size_one=True,
     ),
     "Beta": _DistributionSpec(stats.beta, shape_params=("a", "b"), keyword_params=("loc", "scale")),
