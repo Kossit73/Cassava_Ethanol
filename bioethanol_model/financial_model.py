@@ -140,6 +140,20 @@ class CassavaBioethanolModel:
         return page
 
 
+    def _materialize_required_defaults(self, page: inputs.InputLandingPage) -> None:
+        """Use seeded default tables when placeholders are still active."""
+
+        required_tables = [
+            page.global_inputs,
+            page.initial_investment,
+            page.revenue_inputs,
+            page.production_monthly,
+            page.loan_schedule,
+        ]
+        for table in required_tables:
+            if table.placeholder and table.data is not None and not table.data.empty:
+                table.set_data(table.data, mark_user_input=True)
+
     def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
         """Hard validation gate for investor-grade completeness checks."""
 
@@ -361,6 +375,7 @@ class CassavaBioethanolModel:
             return copy.deepcopy(cached[1])
 
         page = self._prepare_page_for_scenario(scenario_name)
+        self._materialize_required_defaults(page)
         self._validate_required_inputs(page)
         self._apply_debt_strategy_toggles(page)
 
