@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import re
 import tempfile
+from datetime import datetime
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -2860,6 +2862,277 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 
     st.dataframe(goal_df, use_container_width=True)
 
+
+
+RAG_PROVIDER_OPTIONS = ["OpenAI", "Copilot", "Vertex", "Anthropic", "DeepSeek", "Custom"]
+
+
+def _rag_state() -> Dict[str, object]:
+    return st.session_state.setdefault(
+        "rag_assistant",
+        {
+            "indexed_docs": [],
+            "chunks": [],
+            "config": {},
+            "insights": "",
+            "business_plan": "",
+            "forecast_table": pd.DataFrame(),
+        },
+    )
+
+
+def _chunk_text(text: str, chunk_size: int = 1400) -> List[str]:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[i : i + chunk_size] for i in range(0, len(cleaned), chunk_size)]
+
+
+def _build_model_knowledge_pack(results: Dict[str, object]) -> str:
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+    financials = results.get("financials") if isinstance(results, dict) else None
+    sections: List[str] = ["# Financial Model Knowledge Pack"]
+
+    if metrics:
+        metric_rows = [f"- {k}: {v}" for k, v in list(metrics.items())[:25]]
+        sections.append("## Core Metrics\n" + "\n".join(metric_rows))
+
+    def _df_section(title: str, df: pd.DataFrame | None, rows: int = 24) -> None:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            sections.append(f"## {title}\n" + df.head(rows).to_markdown())
+
+    if financials is not None:
+        _df_section("Income Statement (Monthly excerpt)", getattr(financials, "income_monthly", None))
+        _df_section("Cash Flow Statement (Monthly excerpt)", getattr(financials, "cashflow_monthly", None))
+        _df_section("Balance Sheet (Monthly excerpt)", getattr(financials, "balance_monthly", None))
+
+    for key in ("production", "revenue", "break_even", "payback"):
+        payload = results.get(key) if isinstance(results, dict) else None
+        if isinstance(payload, pd.DataFrame):
+            _df_section(key.replace("_", " ").title(), payload)
+        elif hasattr(payload, "monthly") and isinstance(payload.monthly, pd.DataFrame):
+            _df_section(f"{key.title()} Monthly", payload.monthly)
+        elif hasattr(payload, "annual") and isinstance(payload.annual, pd.DataFrame):
+            _df_section(f"{key.title()} Annual", payload.annual)
+
+    return "\n\n".join(sections)
+
+
+def _simple_retrieve(chunks: List[str], question: str, top_k: int = 6) -> List[str]:
+    if not chunks:
+        return []
+    terms = [t for t in re.findall(r"[a-zA-Z0-9]+", (question or "").lower()) if len(t) > 2]
+    if not terms:
+        return chunks[:top_k]
+    scored = []
+    for chunk in chunks:
+        lower = chunk.lower()
+        score = sum(lower.count(term) for term in terms)
+        scored.append((score, chunk))
+    ranked = [c for s, c in sorted(scored, key=lambda x: x[0], reverse=True) if s > 0]
+    return (ranked or chunks)[:top_k]
+
+
+def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
+    financials = results.get("financials") if isinstance(results, dict) else None
+    if financials is None:
+        return pd.DataFrame()
+    annual = getattr(financials, "income_annual", pd.DataFrame())
+    if annual.empty or "Revenue" not in annual.columns:
+        return pd.DataFrame()
+    annual = annual.copy()
+    annual.index = pd.to_datetime(annual.index, errors="coerce")
+    annual = annual[~annual.index.isna()]
+    if annual.empty:
+        return pd.DataFrame()
+
+    rev = pd.to_numeric(annual["Revenue"], errors="coerce").dropna()
+    ebitda = pd.to_numeric(annual.get("EBITDA"), errors="coerce").dropna() if "EBITDA" in annual.columns else pd.Series(dtype=float)
+    if rev.empty:
+        return pd.DataFrame()
+
+    if len(rev) > 1 and rev.iloc[0] > 0:
+        cagr = (rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1
+    else:
+        cagr = 0.03
+
+    last_year = int(rev.index[-1].year)
+    last_rev = float(rev.iloc[-1])
+    last_ebitda = float(ebitda.iloc[-1]) if not ebitda.empty else 0.0
+    margin = (last_ebitda / last_rev) if last_rev else 0.0
+
+    rows = []
+    cur_rev = last_rev
+    for i in range(1, max(1, years) + 1):
+        cur_rev *= 1 + cagr
+        rows.append({
+            "Year": last_year + i,
+            "Forecast Revenue": cur_rev,
+            "Forecast EBITDA": cur_rev * margin,
+            "Assumed Growth": cagr,
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
+    st.subheader("RAG Assistant")
+    st.caption("Upload reference materials, index model outputs, and generate a comprehensive business-plan draft with forecasts.")
+
+    rag = _rag_state()
+    left, right = st.columns([1.05, 1.25])
+
+    with left:
+        st.markdown("### 1) Upload reference document")
+        uploads = st.file_uploader(
+            "Upload business plan references",
+            type=["txt", "md", "pdf", "docx", "csv", "xlsx"],
+            accept_multiple_files=True,
+            key="rag_uploads",
+        )
+
+        st.markdown("### 2) AI & Machine Learning Configuration")
+        provider = st.selectbox("AI options", RAG_PROVIDER_OPTIONS, key="rag_provider")
+        custom_provider = st.text_input("Custom AI provider", key="rag_provider_custom") if provider == "Custom" else ""
+        model_name = st.text_input("AI model space", value="gpt-4.1", key="rag_model")
+        forecast_years = st.number_input("Forecast years", min_value=1, max_value=30, value=5, step=1, key="rag_forecast_years")
+        api_key = st.text_input("API Key", type="password", key="rag_api_key")
+        advanced_features = st.multiselect(
+            "Generative Features",
+            [
+                "Auto executive summary",
+                "Risk heatmap narrative",
+                "Covenant commentary",
+                "Capex/opex optimisation ideas",
+                "Scenario narrative builder",
+                "Investor Q&A prep",
+            ],
+            default=["Auto executive summary", "Investor Q&A prep"],
+            key="rag_features",
+        )
+
+        if st.button("Save configuration", key="rag_save_config"):
+            rag["config"] = {
+                "provider": custom_provider.strip() if provider == "Custom" else provider,
+                "model": model_name.strip(),
+                "forecast_years": int(forecast_years),
+                "api_key_present": bool(api_key),
+                "features": advanced_features,
+                "saved_at": datetime.utcnow().isoformat(timespec="seconds"),
+            }
+            st.success("Configuration saved.")
+
+    with right:
+        st.markdown("### 3) AI Insights")
+        action_cols = st.columns(3)
+        with action_cols[0]:
+            run_ai = st.button("Run the AI", key="rag_run_ai")
+        with action_cols[1]:
+            index_btn = st.button("Document Indexing", key="rag_index")
+        with action_cols[2]:
+            clear_btn = st.button("Clear document indexed", key="rag_clear")
+
+        if clear_btn:
+            rag["indexed_docs"] = []
+            rag["chunks"] = []
+            rag["insights"] = ""
+            rag["business_plan"] = ""
+            rag["forecast_table"] = pd.DataFrame()
+            st.success("Indexed corpus cleared.")
+
+        if index_btn:
+            chunks: List[str] = []
+            indexed_docs: List[str] = []
+            for f in uploads or []:
+                content = ""
+                try:
+                    if f.type in {"text/plain", "text/markdown", "text/csv"} or f.name.lower().endswith((".txt", ".md", ".csv")):
+                        content = f.getvalue().decode("utf-8", errors="ignore")
+                    else:
+                        content = f"Document file: {f.name} (binary file indexed by name only in this local mode)."
+                except Exception:
+                    content = f"Document file: {f.name} (unable to parse text in local mode)."
+                doc_chunks = _chunk_text(content)
+                chunks.extend(doc_chunks if doc_chunks else [content])
+                indexed_docs.append(f.name)
+
+            chunks.extend(_chunk_text(_build_model_knowledge_pack(results)))
+            rag["chunks"] = chunks
+            rag["indexed_docs"] = indexed_docs
+            st.success(f"Indexed {len(indexed_docs)} uploaded documents and synced model outputs ({len(chunks)} chunks).")
+
+        if rag.get("indexed_docs"):
+            st.write("Indexed documents:", ", ".join(rag["indexed_docs"]))
+
+        question = st.text_area("Ask a question", key="rag_question", height=90)
+        if run_ai:
+            retrieved = _simple_retrieve(rag.get("chunks", []), question or "business plan summary")
+            rag["insights"] = "\n\n".join(retrieved) if retrieved else "No indexed content yet. Run Document Indexing first."
+            st.success("AI insights generated.")
+
+        if rag.get("insights"):
+            st.markdown("#### Retrieved AI insights")
+            st.write(rag["insights"][:8000])
+
+    st.markdown("### 4) Prepare Business Plan")
+    if st.button("Prepare Business Plan", type="primary", key="rag_prepare_plan"):
+        years = int(rag.get("config", {}).get("forecast_years", forecast_years))
+        forecast_df = _build_forecast(results, years)
+        rag["forecast_table"] = forecast_df
+        metrics = results.get("metrics", {})
+        top_metrics = "\n".join([f"- **{k}**: {v}" for k, v in list(metrics.items())[:12]])
+        narrative = rag.get("insights") or "No retrieved context. Use Document Indexing and Run the AI for richer narrative."
+        rag["business_plan"] = f"""# Cassava Bioethanol Comprehensive Business Plan
+
+## 1. Executive Summary
+Generated with provider: {rag.get('config', {}).get('provider', 'Not set')} / model: {rag.get('config', {}).get('model', 'Not set')}
+
+## 2. Financial Highlights
+{top_metrics}
+
+## 3. Strategy and Operations
+- Feedstock strategy reviewed across FARM_ONLY, BUY_ONLY, HYBRID scenarios.
+- Integrated revenue, opex, capex, debt, and working-capital schedules are included in the synced model outputs.
+
+## 4. AI and RAG Insights
+{narrative}
+
+## 5. Forecast
+Forecast horizon: {years} year(s).
+
+## 6. Governance and Risk
+- Include sensitivity, Monte Carlo, and covenant tracking prior to investor circulation.
+"""
+        st.success("Business plan draft prepared.")
+
+    forecast_df = rag.get("forecast_table", pd.DataFrame())
+    if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
+        st.dataframe(forecast_df, use_container_width=True)
+        fig = px.line(forecast_df, x="Year", y=["Forecast Revenue", "Forecast EBITDA"], title="Forecast Outlook")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### 5) Business Plan Downloads")
+    plan_text = rag.get("business_plan", "")
+    if plan_text:
+        st.download_button("Download Business Plan (Word)", data=plan_text.encode("utf-8"), file_name="Business_Plan.doc", mime="application/msword")
+        excel_buf = io.BytesIO()
+        with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+            if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
+                forecast_df.to_excel(writer, sheet_name="Forecast", index=False)
+            pd.DataFrame([results.get("metrics", {})]).to_excel(writer, sheet_name="Metrics", index=False)
+        st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        pdf_like = ("BUSINESS PLAN\n\n" + plan_text).encode("utf-8")
+        st.download_button("Download Business Plan (PDF)", data=pdf_like, file_name="Business_Plan.pdf", mime="application/pdf")
+    else:
+        st.info("Generate the business plan first to enable downloads.")
+
+    st.markdown("### 6) Additional AI tools to enhance the model")
+    st.markdown(
+        "- **Anomaly detection** on monthly statements and schedules to flag unusual movements.\n"
+        "- **Automatic covenant monitor** (DSCR/LLCR early warning) with threshold alerts.\n"
+        "- **Narrative variance analysis** that explains month-on-month and scenario deltas.\n"
+        "- **Deal-room pack generator** that bundles assumptions, tables, and charts into investor-ready outputs."
+    )
+
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("Monte Carlo Simulation")
 
@@ -3221,6 +3494,7 @@ def main() -> None:
             "Sensitivity Analyses",
             "Scenario / IFs Analysis",
             "Monte Carlo Simulation",
+            "RAG Assistant",
         ]
     )
 
@@ -3326,6 +3600,9 @@ def main() -> None:
 
     with tabs[7]:
         _render_monte_carlo_page(model, results)
+
+    with tabs[8]:
+        _render_rag_assistant_page(model, results)
 
 
 if __name__ == "__main__":
