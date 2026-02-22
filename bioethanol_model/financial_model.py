@@ -139,6 +139,171 @@ class CassavaBioethanolModel:
 
         return page
 
+
+    def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
+        """Hard validation gate for investor-grade completeness checks."""
+
+        missing: list[str] = []
+        required_tables = [
+            ("Global Inputs", page.global_inputs.model_frame),
+            ("Initial Investment", page.initial_investment.model_frame),
+            ("Revenue Inputs", page.revenue_inputs.model_frame),
+            ("Production Monthly", page.production_monthly.model_frame),
+            ("Loan Schedule", page.loan_schedule.model_frame),
+        ]
+        for name, frame in required_tables:
+            if frame is None or frame.empty:
+                missing.append(name)
+
+        if missing:
+            raise ValueError("Missing required input tables: " + ", ".join(missing))
+
+        globals_df = page.global_inputs.model_frame
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict() if not globals_df.empty else {}
+
+        def _must(parameter: str) -> float:
+            if parameter not in lookup:
+                raise ValueError(f"Missing required global assumption: {parameter}")
+            try:
+                return float(lookup[parameter])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid numeric value for global assumption: {parameter}") from exc
+
+        discount_rate = _must("Discount rate")
+        tax_rate = _must("Corporate tax rate")
+        if not (0.0 <= tax_rate <= 0.6):
+            raise ValueError("Corporate tax rate must be between 0 and 0.60")
+        if not (0.0 <= discount_rate <= 0.5):
+            raise ValueError("Discount rate must be between 0 and 0.50")
+
+        take_or_pay = _must("Take-or-pay share")
+        if not (0.0 <= take_or_pay <= 1.0):
+            raise ValueError("Take-or-pay share must be between 0 and 1")
+
+    def _apply_debt_strategy_toggles(self, page: inputs.InputLandingPage) -> None:
+        globals_df = page.global_inputs.model_frame
+        if globals_df.empty:
+            return
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict()
+
+        def _get(name: str, default: float = 0.0) -> float:
+            try:
+                return float(lookup.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        sculpting = _get("Debt sculpting enabled", 0.0) >= 0.5
+        target_dscr = _get("Target DSCR", 1.25)
+        refinancing = _get("Refinancing enabled", 0.0) >= 0.5
+        refinancing_year = int(_get("Refinancing year", page.projection.start_year + 3))
+        refinancing_rate = _get("Refinancing interest rate", 0.0)
+
+        loan_df = page.loan_schedule.model_frame
+        if loan_df.empty:
+            return
+
+        adjusted = loan_df.copy()
+
+        if sculpting:
+            if "Grace Years" in adjusted.columns:
+                grace = pd.to_numeric(adjusted["Grace Years"], errors="coerce").fillna(0.0)
+                adjusted["Grace Years"] = np.maximum(grace, 2.0)
+            if "Tenor Years" in adjusted.columns:
+                tenor = pd.to_numeric(adjusted["Tenor Years"], errors="coerce").fillna(0.0)
+                tenor_extension = 1.0 if target_dscr >= 1.2 else 2.0
+                adjusted["Tenor Years"] = tenor + tenor_extension
+
+        if refinancing and refinancing_rate > 0 and "Interest Rate" in adjusted.columns:
+            start_period = pd.Period(f"{refinancing_year}-01", freq="M")
+            if "Start Month" in adjusted.columns:
+                starts = pd.to_datetime(adjusted["Start Month"], errors="coerce")
+                mask = starts.dt.to_period("M") <= start_period
+            else:
+                mask = pd.Series(True, index=adjusted.index)
+            adjusted.loc[mask, "Interest Rate"] = refinancing_rate
+
+        if not adjusted.equals(loan_df):
+            page.loan_schedule.set_data(adjusted, mark_user_input=page.loan_schedule.placeholder)
+
+    def _apply_risk_and_contract_mechanics(
+        self,
+        page: inputs.InputLandingPage,
+        production,
+        revenue,
+        cost_outputs: Dict[str, object],
+    ) -> Dict[str, float]:
+        """Integrate risk register and commercial contract assumptions."""
+
+        globals_df = page.global_inputs.model_frame
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict() if not globals_df.empty else {}
+
+        def _get(name: str, default: float = 0.0) -> float:
+            try:
+                return float(lookup.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        floor_price = _get("Offtake floor price (USD/L)", 0.0)
+        ceiling_price = _get("Offtake ceiling price (USD/L)", float("inf"))
+        take_or_pay = float(np.clip(_get("Take-or-pay share", 1.0), 0.0, 1.0))
+        contracted_share = float(np.clip(_get("Contracted feedstock share", 0.0), 0.0, 1.0))
+        contracted_discount = float(np.clip(_get("Contract feedstock discount", 0.0), 0.0, 0.8))
+
+        risk_df = page.risk_schedule.model_frame
+        risk_score = 0.0
+        if not risk_df.empty:
+            impact_map = {"low": 0.35, "medium": 0.65, "high": 1.0}
+            for _, row in risk_df.iterrows():
+                try:
+                    prob = float(row.get("Probability", 0.0))
+                except (TypeError, ValueError):
+                    prob = 0.0
+                impact_raw = row.get("Impact", 0.0)
+                if isinstance(impact_raw, str):
+                    impact = impact_map.get(impact_raw.strip().lower(), 0.5)
+                else:
+                    try:
+                        impact = float(impact_raw)
+                    except (TypeError, ValueError):
+                        impact = 0.5
+                risk_score += max(0.0, prob) * max(0.0, impact)
+        risk_intensity = float(np.clip(risk_score, 0.0, 1.0))
+
+        monthly_rev = revenue.monthly.copy()
+        if "Total Revenue" in monthly_rev.columns and not monthly_rev.empty:
+            total_rev = pd.to_numeric(monthly_rev["Total Revenue"], errors="coerce").fillna(0.0)
+            volume = pd.to_numeric(getattr(production, "monthly", pd.DataFrame()).get("Ethanol litres"), errors="coerce").fillna(0.0)
+            implied_price = total_rev / volume.replace(0.0, np.nan)
+            adjusted_price = implied_price.clip(lower=floor_price if floor_price > 0 else None, upper=ceiling_price)
+            price_factor = (adjusted_price / implied_price.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+            top_factor = np.clip(take_or_pay + (1 - take_or_pay) * 0.7, 0.0, 1.0)
+            risk_factor = max(0.0, 1.0 - 0.25 * risk_intensity)
+            overall = price_factor * top_factor * risk_factor
+            monthly_rev = monthly_rev.mul(overall, axis=0)
+            monthly_rev["Total Revenue"] = pd.to_numeric(monthly_rev.sum(axis=1), errors="coerce").fillna(0.0)
+            revenue.monthly = monthly_rev
+            revenue.annual = monthly_rev.resample("YE").sum()
+            revenue.annual.index = revenue.annual.index.year
+
+        direct = cost_outputs.get("Direct Costs")
+        feedstock_saving = contracted_share * contracted_discount
+        risk_cost_uplift = 0.2 * risk_intensity
+        cost_multiplier = max(0.0, 1.0 - feedstock_saving + risk_cost_uplift)
+        if direct is not None and hasattr(direct, "monthly"):
+            direct.monthly = direct.monthly * cost_multiplier
+            direct.annual = direct.monthly.resample("YE").sum()
+            direct.annual.index = direct.annual.index.year
+
+        return {
+            "Risk Score": risk_intensity,
+            "Commercial Price Floor": floor_price,
+            "Commercial Price Ceiling": ceiling_price,
+            "Take-or-pay Share": take_or_pay,
+            "Feedstock Contract Share": contracted_share,
+            "Feedstock Contract Discount": contracted_discount,
+            "Commercial Cost Multiplier": cost_multiplier,
+        }
+
     def _apply_staff_schedule(self, page: inputs.InputLandingPage):
         """Update monthly staff costs from the staff position salary schedule."""
 
@@ -196,6 +361,8 @@ class CassavaBioethanolModel:
             return copy.deepcopy(cached[1])
 
         page = self._prepare_page_for_scenario(scenario_name)
+        self._validate_required_inputs(page)
+        self._apply_debt_strategy_toggles(page)
 
         staff_schedule = self._apply_staff_schedule(page)
 
@@ -256,6 +423,8 @@ class CassavaBioethanolModel:
 
         tax_rate = _get_global("Corporate tax rate", 0.0)
 
+        risk_commercial = self._apply_risk_and_contract_mechanics(page, production, revenue, cost_outputs)
+
         financials = compute_financial_statements(
             revenue,
             depreciation,
@@ -307,6 +476,7 @@ class CassavaBioethanolModel:
                 ),
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
+                **risk_commercial,
             }
         )
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):

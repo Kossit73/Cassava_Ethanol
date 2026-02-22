@@ -2092,6 +2092,27 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     )
     st.dataframe(lender_df, use_container_width=True, hide_index=True)
 
+    st.markdown("### Covenant Heatmap (DSCR)")
+    dscr_base = pd.to_numeric(financials.cashflow_monthly.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+    dscr_debt = pd.to_numeric(financials.cashflow_monthly.get("Debt Service"), errors="coerce").replace(0.0, np.nan)
+    dscr_series = (dscr_base / dscr_debt).replace([np.inf, -np.inf], np.nan)
+    if not dscr_series.dropna().empty:
+        dscr_df = dscr_series.to_frame("DSCR")
+        dscr_df["Month"] = dscr_df.index.to_period("M").astype(str)
+        dscr_df["Breach (<1.0x)"] = dscr_df["DSCR"] < 1.0
+        heat = px.imshow(
+            np.array([dscr_df["DSCR"].fillna(0.0).values]),
+            aspect="auto",
+            color_continuous_scale="RdYlGn",
+            labels={"x": "Month", "y": "Metric", "color": "DSCR"},
+        )
+        heat.update_xaxes(tickmode="array", tickvals=list(range(len(dscr_df))), ticktext=dscr_df["Month"].tolist())
+        heat.update_yaxes(tickmode="array", tickvals=[0], ticktext=["DSCR"])
+        st.plotly_chart(heat, use_container_width=True)
+        st.dataframe(dscr_df[["Month", "DSCR", "Breach (<1.0x)"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("No DSCR series available for covenant heatmap.")
+
     st.markdown("### Annual Operations & Production")
     production_annual = production.annual.copy()
     if not production_annual.empty:
