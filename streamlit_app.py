@@ -2065,6 +2065,33 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     )
     st.dataframe(drivers, use_container_width=True, hide_index=True)
 
+    st.markdown("### Lender Coverage Metrics")
+    lender_df = pd.DataFrame(
+        {
+            "Metric": [
+                "DSCR (min)",
+                "DSCR (avg)",
+                "Debt Service Coverage Breach Months",
+                "LLCR",
+                "PLCR",
+                "Outstanding Debt (opening)",
+                "PV CFADS",
+                "PV Terminal Value",
+            ],
+            "Value": [
+                _format_rate(metrics.get("DSCR (min)")),
+                _format_rate(metrics.get("DSCR (avg)")),
+                f"{metrics.get('Debt Service Coverage Breach Months', 0):,.0f}",
+                _format_rate(metrics.get("LLCR")),
+                _format_rate(metrics.get("PLCR")),
+                _format_currency(metrics.get("Outstanding Debt (opening)")),
+                _format_currency(metrics.get("PV CFADS")),
+                _format_currency(metrics.get("PV Terminal Value")),
+            ],
+        }
+    )
+    st.dataframe(lender_df, use_container_width=True, hide_index=True)
+
     st.markdown("### Annual Operations & Production")
     production_annual = production.annual.copy()
     if not production_annual.empty:

@@ -275,12 +275,17 @@ class CassavaBioethanolModel:
         init_df = page.initial_investment.model_frame
         total_investment = float(init_df["Cost"].sum()) if "Cost" in init_df.columns else 0.0
 
+        terminal_growth_rate = _get_global("Terminal growth", 0.0)
+        capital_gains_tax_rate = _get_global("Capital gains tax rate", 0.0)
+
         metrics = compute_key_metrics(
             financials,
             discount_rate=discount_rate,
             investor_share=investor_share,
             owner_share=owner_share,
             revenue=revenue,
+            terminal_growth_rate=terminal_growth_rate,
+            capital_gains_tax_rate=capital_gains_tax_rate,
         )
         loan_summary = loan_schedule.summary if hasattr(loan_schedule, "summary") else pd.DataFrame()
         if isinstance(loan_summary, pd.DataFrame) and not loan_summary.empty:
@@ -292,8 +297,8 @@ class CassavaBioethanolModel:
                 "Corporate Tax Rate": tax_rate,
                 "Investor Share": investor_share,
                 "Owner Share": owner_share,
-                "Terminal Growth Rate": _get_global("Terminal growth", 0.0),
-                "Capital Gains Tax Rate": _get_global("Capital gains tax rate", 0.0),
+                "Terminal Growth Rate": terminal_growth_rate,
+                "Capital Gains Tax Rate": capital_gains_tax_rate,
                 "Discount Rate": discount_rate,
                 "Total Initial Investment": metrics.get("Initial Project Outlay", total_investment),
                 "Initial Loan Funding": metrics.get("Initial Loan Draw", total_loan_draw),

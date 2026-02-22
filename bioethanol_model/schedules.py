@@ -1254,6 +1254,8 @@ def compute_key_metrics(
     owner_share: float,
     *,
     revenue: RevenueOutput | None = None,
+    terminal_growth_rate: float = 0.0,
+    capital_gains_tax_rate: float = 0.0,
 ) -> Dict[str, float]:
     raw_free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
     (
@@ -1291,6 +1293,41 @@ def compute_key_metrics(
     investor_irr = irr(investor_cashflows)
     owner_irr = irr(owner_cashflows)
 
+    operating_cf = pd.to_numeric(financials.cashflow_monthly.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+    debt_service = pd.to_numeric(financials.cashflow_monthly.get("Debt Service"), errors="coerce").fillna(0.0)
+    interest = pd.to_numeric(financials.income_monthly.get("Interest"), errors="coerce").fillna(0.0)
+    principal = (debt_service - interest).clip(lower=0.0)
+    cfads = operating_cf
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dscr_series = cfads / debt_service.replace(0.0, np.nan)
+    dscr_series = dscr_series.replace([np.inf, -np.inf], np.nan)
+
+    debt_balance = pd.to_numeric(financials.balance_monthly.get("Debt"), errors="coerce").fillna(0.0)
+    monthly_discount = max(-0.999999, float(discount_rate) / 12.0)
+    discount_factors = pd.Series(
+        [(1.0 / ((1.0 + monthly_discount) ** (i + 1))) for i in range(len(cfads))],
+        index=cfads.index,
+        dtype=float,
+    ) if len(cfads) else pd.Series(dtype=float)
+
+    pv_cfads_total = float((cfads * discount_factors).sum()) if not discount_factors.empty else 0.0
+    outstanding_debt = float(debt_balance.iloc[0]) if not debt_balance.empty else 0.0
+    llcr = (pv_cfads_total / outstanding_debt) if outstanding_debt > 0 else float("nan")
+
+    if not cfads.empty:
+        tail_cfads = float(cfads.iloc[-1])
+    else:
+        tail_cfads = 0.0
+    effective_growth = min(float(terminal_growth_rate), max(float(discount_rate) - 1e-4, -0.99))
+    terminal_value = 0.0
+    if discount_rate > effective_growth and tail_cfads > 0:
+        terminal_value = tail_cfads * (1.0 + effective_growth) / max(discount_rate - effective_growth, 1e-6)
+    terminal_value_after_tax = terminal_value * (1.0 - max(0.0, float(capital_gains_tax_rate)))
+    terminal_discount = float(discount_factors.iloc[-1]) if not discount_factors.empty else 0.0
+    pv_terminal_value = terminal_value_after_tax * terminal_discount
+    plcr = ((pv_cfads_total + pv_terminal_value) / outstanding_debt) if outstanding_debt > 0 else float("nan")
+
     cumulative_project = np.cumsum(project_cashflows)
     payback_months = float("nan")
     payback_label = None
@@ -1320,6 +1357,17 @@ def compute_key_metrics(
         "Final Month Equity CF": _final_value(equity_cash_flow),
         "Payback Period (months)": payback_months,
         "Payback Month": payback_label,
+        "DSCR (min)": float(dscr_series.min()) if not dscr_series.dropna().empty else float("nan"),
+        "DSCR (avg)": float(dscr_series.mean()) if not dscr_series.dropna().empty else float("nan"),
+        "Debt Service Coverage Breach Months": float((dscr_series < 1.0).sum()) if not dscr_series.empty else 0.0,
+        "LLCR": llcr,
+        "PLCR": plcr,
+        "PV CFADS": pv_cfads_total,
+        "Outstanding Debt (opening)": outstanding_debt,
+        "Terminal Value (post-tax)": terminal_value_after_tax,
+        "PV Terminal Value": pv_terminal_value,
+        "Principal Service (total)": float(principal.sum()),
+        "Interest Service (total)": float(interest.sum()),
     }
     return metrics
 
