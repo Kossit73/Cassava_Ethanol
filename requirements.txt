@@ -2,6 +2,7 @@ pandas
 numpy
 xlsxwriter
 streamlit>=1.38,<2
+python-docx
 altair>=5,<6
 numpy-financial
 scipy

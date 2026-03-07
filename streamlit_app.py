@@ -8,6 +8,7 @@ import json
 import re
 import tempfile
 from datetime import datetime
+import textwrap
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -15,6 +16,8 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
@@ -3163,6 +3166,133 @@ Risk register impacts, commercial safeguards, and scenario analytics are embedde
 The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios.
 """
 
+
+
+def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    financials = results.get("financials") if isinstance(results, dict) else None
+    income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    forecast = _round_nearest_100(forecast_df)
+    return {
+        "Income Annual": income_annual,
+        "Cash Flow Annual": cashflow_annual,
+        "Balance Annual": balance_annual,
+        "Forecast": forecast,
+    }
+
+
+def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
+    try:
+        from docx import Document
+        from docx.shared import Inches
+    except Exception:
+        return plan_text.encode("utf-8")
+
+    doc = Document()
+    doc.add_heading("Cassava Bioethanol Business Plan", level=0)
+
+    for line in (plan_text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            doc.add_heading(stripped[3:], level=1)
+        elif stripped.startswith("### "):
+            doc.add_heading(stripped[4:], level=2)
+        elif stripped.startswith("# "):
+            continue
+        elif stripped:
+            doc.add_paragraph(stripped)
+        else:
+            doc.add_paragraph("")
+
+    def _add_table(title: str, df: pd.DataFrame) -> None:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        view = df.reset_index().copy()
+        doc.add_heading(title, level=2)
+        table = doc.add_table(rows=1, cols=len(view.columns))
+        table.style = "Light List"
+        for i, col in enumerate(view.columns):
+            table.rows[0].cells[i].text = str(col)
+        for _, row in view.head(20).iterrows():
+            cells = table.add_row().cells
+            for i, val in enumerate(row.tolist()):
+                cells[i].text = str(val)
+
+    for title, frame in frames.items():
+        _add_table(title, frame)
+
+    def _add_chart(title: str, df: pd.DataFrame) -> None:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        view = df.reset_index().copy()
+        if view.shape[1] < 2:
+            return
+        fig, ax = plt.subplots(figsize=(8, 3))
+        x = view.iloc[:, 0].astype(str)
+        for col in view.columns[1: min(5, len(view.columns))]:
+            ax.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col))
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=45)
+        ax.legend(loc="best")
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        doc.add_picture(buf, width=Inches(6.5))
+
+    for title, frame in frames.items():
+        _add_chart(f"{title} Trend", frame)
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
+    out = io.BytesIO()
+    with PdfPages(out) as pdf:
+        fig, ax = plt.subplots(figsize=(8.27, 11.69))
+        ax.axis("off")
+        wrapped = textwrap.fill((plan_text or "").replace("\n", " "), width=110)
+        ax.text(0.01, 0.99, wrapped[:12000], va="top", ha="left", fontsize=8)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        for title, df in frames.items():
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            view = df.reset_index().head(25)
+
+            fig_t, ax_t = plt.subplots(figsize=(11.69, 8.27))
+            ax_t.axis("off")
+            ax_t.set_title(title, fontsize=12)
+            tbl = ax_t.table(
+                cellText=view.astype(str).values,
+                colLabels=[str(c) for c in view.columns],
+                loc="center",
+            )
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(7)
+            tbl.scale(1, 1.2)
+            pdf.savefig(fig_t, bbox_inches="tight")
+            plt.close(fig_t)
+
+            if view.shape[1] >= 2:
+                fig_c, ax_c = plt.subplots(figsize=(11.69, 5.0))
+                x = view.iloc[:, 0].astype(str)
+                for col in view.columns[1: min(5, len(view.columns))]:
+                    ax_c.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col))
+                ax_c.set_title(f"{title} Trend")
+                ax_c.tick_params(axis="x", rotation=45)
+                ax_c.legend(loc="best")
+                plt.tight_layout()
+                pdf.savefig(fig_c, bbox_inches="tight")
+                plt.close(fig_c)
+    out.seek(0)
+    return out.getvalue()
+
 def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("RAG Assistant")
     st.caption("Upload reference materials, index model outputs, and generate a comprehensive business-plan draft with forecasts.")
@@ -3301,7 +3431,13 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
     st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
     if plan_text:
-        st.download_button("Download Business Plan (Word)", data=plan_text.encode("utf-8"), file_name="Business_Plan.doc", mime="application/msword")
+        frames = _rag_export_frames(results, forecast_df)
+        word_bytes = _generate_word_business_plan_bytes(plan_text, frames)
+        pdf_bytes = _generate_pdf_business_plan_bytes(plan_text, frames)
+
+        word_name = "Business_Plan.docx" if word_bytes[:2] == b"PK" else "Business_Plan.txt"
+        word_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if word_name.endswith(".docx") else "text/plain"
+        st.download_button("Download Business Plan (Word)", data=word_bytes, file_name=word_name, mime=word_mime)
         excel_buf = io.BytesIO()
         with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
             if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
@@ -3383,8 +3519,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                 _add_line_chart("Plot_Balance", "Balance Sheet Trends")
                 _add_line_chart("Plot_Forecast", "Forecast Trends")
         st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        pdf_like = ("BUSINESS PLAN\n\n" + plan_text).encode("utf-8")
-        st.download_button("Download Business Plan (PDF)", data=pdf_like, file_name="Business_Plan.pdf", mime="application/pdf")
+        st.download_button("Download Business Plan (PDF)", data=pdf_bytes, file_name="Business_Plan.pdf", mime="application/pdf")
     else:
         st.info("Generate the business plan first to enable downloads.")
 
