@@ -3030,7 +3030,11 @@ def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
     view = df.head(rows).copy()
     if isinstance(view.index, pd.DatetimeIndex):
         view.index = view.index.to_period("Y").astype(str)
-    return view.to_markdown()
+    try:
+        return view.to_markdown()
+    except ImportError:
+        # `to_markdown` requires optional `tabulate`; provide a robust fallback.
+        return "```\n" + view.to_string() + "\n```"
 
 
 def _metric_commentary(metrics: Dict[str, object]) -> str:
