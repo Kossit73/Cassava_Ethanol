@@ -3042,7 +3042,21 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         provider = st.selectbox("AI options", RAG_PROVIDER_OPTIONS, key="rag_provider")
         custom_provider = st.text_input("Custom AI provider", key="rag_provider_custom") if provider == "Custom" else ""
         model_name = st.text_input("AI model space", value="gpt-4.1", key="rag_model")
-        forecast_years = st.number_input("Forecast years", min_value=1, max_value=30, value=5, step=1, key="rag_forecast_years")
+        snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+        if isinstance(snapshot, InputLandingPage):
+            projection_years = int(snapshot.projection.end_year) - int(snapshot.projection.start_year) + 1
+        else:
+            projection_years = int(model.input_page.projection.end_year) - int(model.input_page.projection.start_year) + 1
+        projection_years = max(1, projection_years)
+        forecast_years = st.number_input(
+            "Forecast years",
+            min_value=projection_years,
+            max_value=projection_years,
+            value=projection_years,
+            step=1,
+            key="rag_forecast_years",
+            help="Forecast years are locked to match the Projection Horizon.",
+        )
         api_key = st.text_input("API Key", type="password", key="rag_api_key")
         advanced_features = st.multiselect(
             "Generative Features",
@@ -3123,7 +3137,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
 
     st.markdown("### 4) Prepare Business Plan")
     if st.button("Prepare Business Plan", type="primary", key="rag_prepare_plan"):
-        years = int(rag.get("config", {}).get("forecast_years", forecast_years))
+        years = int(forecast_years)
         forecast_df = _build_forecast(results, years)
         rag["forecast_table"] = forecast_df
         metrics = results.get("metrics", {})
