@@ -3053,6 +3053,8 @@ def _metric_commentary(metrics: Dict[str, object]) -> str:
 
 
 def _compose_business_plan(results: Dict[str, object], insights: str, years: int, forecast_df: pd.DataFrame) -> str:
+    """Build a professional investor-style business plan text package."""
+
     financials = results.get("financials")
     metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
 
@@ -3068,21 +3070,40 @@ def _compose_business_plan(results: Dict[str, object], insights: str, years: int
     metric_table = pd.DataFrame([metrics]).T.reset_index()
     metric_table.columns = ["Key Metric", "Value"]
 
+    income_plot_cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
+    cash_plot_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in cashflow_annual.columns]
+    balance_plot_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in balance_annual.columns]
+
+    income_plot_df = income_annual[income_plot_cols].copy() if income_plot_cols else pd.DataFrame()
+    cash_plot_df = cashflow_annual[cash_plot_cols].copy() if cash_plot_cols else pd.DataFrame()
+    balance_plot_df = balance_annual[balance_plot_cols].copy() if balance_plot_cols else pd.DataFrame()
+
+    scenario = metrics.get("Scenario", "FARM_ONLY")
+    dscr_min = _format_rate(metrics.get("DSCR (min)"))
+    llcr = _format_rate(metrics.get("LLCR"))
+    plcr = _format_rate(metrics.get("PLCR"))
+
     return f"""# Cassava Bioethanol Comprehensive Business Plan
 
 ## 1. Executive Summary
-This business plan is generated directly from the integrated financial model and RAG evidence base. It reproduces annual statements, key operating schedules, and forecast outputs for investor and lender diligence.
+This plan is generated from the integrated cassava-ethanol financial model and RAG evidence base for scenario **{scenario}**.
+The current investment thesis is supported by diversified revenue (fuel ethanol + animal feed), integrated debt-service diagnostics, and projection-consistent forecasting.
 
-## 2. Key Metrics with Professional Commentary
+## 2. Investment Highlights and Key Metrics
+### Professional Interpretation
 {_metric_commentary(metrics)}
 
 ### Key Metrics Table
-{_to_markdown_table(metric_table, rows=40)}
+{_to_markdown_table(metric_table, rows=50)}
 
-## 3. Strategic and Commercial Positioning
-The project combines ethanol and animal-feed revenue streams, with configurable offtake assumptions, procurement strategy, and downside risk adjustments.
+## 3. Market, Commercial Strategy, and Operations
+### 3.1 Commercial Positioning
+The model embeds offtake floor/ceiling assumptions, take-or-pay coverage, and contracted feedstock mechanisms to reflect realistic contract economics.
 
-## 4. Annual Financial Statements (Model Reproduction)
+### 3.2 Operational Configuration
+Production planning, capex, staffing, opex, and working-capital assumptions are integrated into three-statement outputs and debt metrics.
+
+## 4. Annual Financial Statements (Reproduced)
 ### 4.1 Annual Income Statement
 {_to_markdown_table(income_annual, rows=25)}
 
@@ -3092,32 +3113,43 @@ The project combines ethanol and animal-feed revenue streams, with configurable 
 ### 4.3 Annual Balance Sheet
 {_to_markdown_table(balance_annual, rows=25)}
 
-## 5. Production and Revenue Schedules
+## 5. Schedules and Forecasts
 ### 5.1 Production Annual Schedule
 {_to_markdown_table(production_annual, rows=25)}
 
 ### 5.2 Revenue Annual Schedule
 {_to_markdown_table(revenue_annual, rows=25)}
 
-## 6. Forecast Section
-Forecast horizon is locked to the projection horizon ({years} year(s)).
-
-### Forecast Table
+### 5.3 Forecast (Projection-Horizon Aligned)
+Forecast horizon: **{years} year(s)**.
 {_to_markdown_table(forecast_df, rows=years + 2)}
 
-## 7. AI/RAG Insights
+## 6. Graphs and Plot Data (Reproduced for Download Pack)
+The following data tables are the source series for the charts included in the download package.
+
+### 6.1 Income Statement Plot Data
+{_to_markdown_table(income_plot_df, rows=25)}
+
+### 6.2 Cash Flow Plot Data
+{_to_markdown_table(cash_plot_df, rows=25)}
+
+### 6.3 Balance Sheet Plot Data
+{_to_markdown_table(balance_plot_df, rows=25)}
+
+### 6.4 Forecast Plot Data
+{_to_markdown_table(forecast_df, rows=years + 2)}
+
+## 7. Lender/Covenant Narrative
+Minimum DSCR is **{dscr_min}** with LLCR **{llcr}** and PLCR **{plcr}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions.
+
+## 8. Risk and Mitigation
+Risk register impacts, commercial safeguards, and scenario analytics are embedded to produce risk-adjusted performance views and improve investor decision confidence.
+
+## 9. AI/RAG Supporting Insights
 {insights or '_No additional RAG insights available. Run Document Indexing and Run the AI._'}
 
-## 8. Graphs and Plots Included in App View
-- Annual Revenue vs EBITDA trend
-- Annual Net Income trend
-- Annual cash-flow profile (Operating/Investing/Financing/FCF)
-- Balance-sheet trajectory (Assets vs Liabilities & Equity)
-- Production profile (Cassava, Ethanol, Animal Feed)
-- Forecast Revenue and EBITDA trend
-
-## 9. Risk, Governance and Investment Readiness
-The model includes scenario analysis, sensitivity analysis, Monte Carlo simulation, covenant indicators, and risk-commercial adjustments to support institutional investment decision-making.
+## 10. Conclusion and Funding Case
+The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios.
 """
 
 def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
@@ -3261,12 +3293,79 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
             pd.DataFrame([results.get("metrics", {})]).to_excel(writer, sheet_name="Metrics", index=False)
             fin = results.get("financials") if isinstance(results, dict) else None
             if fin is not None:
-                if isinstance(getattr(fin, "income_annual", None), pd.DataFrame) and not fin.income_annual.empty:
-                    fin.income_annual.reset_index().to_excel(writer, sheet_name="Income_Annual", index=False)
-                if isinstance(getattr(fin, "cashflow_annual", None), pd.DataFrame) and not fin.cashflow_annual.empty:
-                    fin.cashflow_annual.reset_index().to_excel(writer, sheet_name="Cashflow_Annual", index=False)
-                if isinstance(getattr(fin, "balance_annual", None), pd.DataFrame) and not fin.balance_annual.empty:
-                    fin.balance_annual.reset_index().to_excel(writer, sheet_name="Balance_Annual", index=False)
+                income_annual = getattr(fin, "income_annual", pd.DataFrame())
+                cashflow_annual = getattr(fin, "cashflow_annual", pd.DataFrame())
+                balance_annual = getattr(fin, "balance_annual", pd.DataFrame())
+
+                if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
+                    income_view = income_annual.reset_index()
+                    income_view.to_excel(writer, sheet_name="Income_Annual", index=False)
+                else:
+                    income_view = pd.DataFrame()
+
+                if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
+                    cash_view = cashflow_annual.reset_index()
+                    cash_view.to_excel(writer, sheet_name="Cashflow_Annual", index=False)
+                else:
+                    cash_view = pd.DataFrame()
+
+                if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
+                    balance_view = balance_annual.reset_index()
+                    balance_view.to_excel(writer, sheet_name="Balance_Annual", index=False)
+                else:
+                    balance_view = pd.DataFrame()
+
+                # Plot data sheets to keep the same graph series across Word/PDF/Excel artifacts.
+                income_cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in getattr(income_annual, 'columns', [])]
+                cash_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in getattr(cashflow_annual, 'columns', [])]
+                balance_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in getattr(balance_annual, 'columns', [])]
+
+                income_plot = income_annual[income_cols].reset_index() if income_cols else pd.DataFrame()
+                cash_plot = cashflow_annual[cash_cols].reset_index() if cash_cols else pd.DataFrame()
+                balance_plot = balance_annual[balance_cols].reset_index() if balance_cols else pd.DataFrame()
+
+                if not income_plot.empty:
+                    income_plot.to_excel(writer, sheet_name="Plot_Income", index=False)
+                if not cash_plot.empty:
+                    cash_plot.to_excel(writer, sheet_name="Plot_Cashflow", index=False)
+                if not balance_plot.empty:
+                    balance_plot.to_excel(writer, sheet_name="Plot_Balance", index=False)
+                if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
+                    forecast_df.to_excel(writer, sheet_name="Plot_Forecast", index=False)
+
+                workbook = writer.book
+
+                def _add_line_chart(sheet_name: str, title: str, max_series: int = 4) -> None:
+                    if sheet_name not in writer.sheets:
+                        return
+                    ws = writer.sheets[sheet_name]
+                    # infer dimensions from worksheet write range using dataframe shape fallback
+                    df_map = {
+                        "Plot_Income": income_plot,
+                        "Plot_Cashflow": cash_plot,
+                        "Plot_Balance": balance_plot,
+                        "Plot_Forecast": forecast_df if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame(),
+                    }
+                    df = df_map.get(sheet_name, pd.DataFrame())
+                    if df.empty or df.shape[1] < 2:
+                        return
+                    chart = workbook.add_chart({"type": "line"})
+                    rows = len(df)
+                    cols = min(df.shape[1] - 1, max_series)
+                    for idx in range(1, cols + 1):
+                        chart.add_series({
+                            "name":       [sheet_name, 0, idx],
+                            "categories": [sheet_name, 1, 0, rows, 0],
+                            "values":     [sheet_name, 1, idx, rows, idx],
+                        })
+                    chart.set_title({"name": title})
+                    chart.set_legend({"position": "bottom"})
+                    ws.insert_chart('H2', chart)
+
+                _add_line_chart("Plot_Income", "Income Statement Trends")
+                _add_line_chart("Plot_Cashflow", "Cash Flow Trends")
+                _add_line_chart("Plot_Balance", "Balance Sheet Trends")
+                _add_line_chart("Plot_Forecast", "Forecast Trends")
         st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         pdf_like = ("BUSINESS PLAN\n\n" + plan_text).encode("utf-8")
         st.download_button("Download Business Plan (PDF)", data=pdf_like, file_name="Business_Plan.pdf", mime="application/pdf")
