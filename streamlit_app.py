@@ -3208,11 +3208,32 @@ def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) ->
     }
 
 
+def _prepare_export_table(df: pd.DataFrame, max_rows: int = 40) -> pd.DataFrame:
+    """Normalize dataframe for export readability (clear rows/columns)."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    view = df.copy()
+    if not isinstance(view.index, pd.RangeIndex) or view.index.name:
+        view = view.reset_index()
+    view.columns = [str(c) for c in view.columns]
+    return view.head(max_rows)
+
+
+def _fit_column_widths_excel(ws, df: pd.DataFrame, max_width: int = 28) -> None:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return
+    for idx, col in enumerate(df.columns):
+        sample = [str(col)] + [str(v) for v in df[col].head(30).tolist()]
+        width = min(max(len(x) for x in sample) + 2, max_width)
+        ws.set_column(idx, idx, width)
+
+
 def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
     try:
         from docx import Document
         from docx.enum.section import WD_ORIENT
-        from docx.shared import Inches
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        from docx.shared import Inches, Pt
     except Exception:
         return plan_text.encode("utf-8")
 
@@ -3220,7 +3241,9 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
     section = doc.sections[-1]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width, section.page_height = section.page_height, section.page_width
-    doc.add_heading("Cassava Bioethanol Business Plan", level=0)
+
+    title = doc.add_heading("Cassava Bioethanol Business Plan", level=0)
+    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
 
     for line in (plan_text or "").splitlines():
         stripped = line.strip()
@@ -3231,50 +3254,53 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
         elif stripped.startswith("# "):
             continue
         elif stripped:
-            doc.add_paragraph(stripped)
+            p = doc.add_paragraph(stripped)
+            p.paragraph_format.space_after = Pt(4)
         else:
             doc.add_paragraph("")
 
     def _add_table(title: str, df: pd.DataFrame) -> None:
-        if not isinstance(df, pd.DataFrame) or df.empty:
+        view = _prepare_export_table(df, max_rows=50)
+        if view.empty:
             return
-        view = df.copy()
-        if not isinstance(view.index, pd.RangeIndex) or view.index.name:
-            view = view.reset_index()
         doc.add_heading(title, level=2)
         table = doc.add_table(rows=1, cols=len(view.columns))
-        table.style = "Light List"
+        table.style = "Table Grid"
+
+        hdr_cells = table.rows[0].cells
         for i, col in enumerate(view.columns):
-            table.rows[0].cells[i].text = str(col)
-        for _, row in view.head(20).iterrows():
+            run = hdr_cells[i].paragraphs[0].add_run(str(col))
+            run.bold = True
+
+        for _, row in view.iterrows():
             cells = table.add_row().cells
             for i, val in enumerate(row.tolist()):
                 cells[i].text = str(val)
+
+        doc.add_paragraph("")
 
     for title, frame in frames.items():
         _add_table(title, frame)
 
     def _add_chart(title: str, df: pd.DataFrame) -> None:
-        if not isinstance(df, pd.DataFrame) or df.empty:
+        view = _prepare_export_table(df, max_rows=40)
+        if view.empty or view.shape[1] < 2:
             return
-        view = df.copy()
-        if not isinstance(view.index, pd.RangeIndex) or view.index.name:
-            view = view.reset_index()
-        if view.shape[1] < 2:
-            return
-        fig, ax = plt.subplots(figsize=(8, 3))
+        fig, ax = plt.subplots(figsize=(10.5, 3.8))
         x = view.iloc[:, 0].astype(str)
-        for col in view.columns[1: min(5, len(view.columns))]:
-            ax.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col))
+        for col in view.columns[1: min(6, len(view.columns))]:
+            ax.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col), linewidth=2)
         ax.set_title(title)
         ax.tick_params(axis="x", rotation=45)
-        ax.legend(loc="best")
+        ax.grid(True, alpha=0.2)
+        ax.legend(loc="best", fontsize=8)
         plt.tight_layout()
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=150)
+        fig.savefig(buf, format="png", dpi=170)
         plt.close(fig)
         buf.seek(0)
-        doc.add_picture(buf, width=Inches(6.5))
+        doc.add_picture(buf, width=Inches(9.8))
+        doc.add_paragraph("")
 
     for title, frame in frames.items():
         _add_chart(f"{title} Trend", frame)
@@ -3289,46 +3315,46 @@ def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataF
     with PdfPages(out) as pdf:
         fig, ax = plt.subplots(figsize=(11.69, 8.27))
         ax.axis("off")
-        wrapped = textwrap.fill((plan_text or "").replace("\n", " "), width=110)
-        ax.text(0.01, 0.99, wrapped[:12000], va="top", ha="left", fontsize=8)
+        wrapped = textwrap.fill((plan_text or "").replace("\n", " "), width=130)
+        ax.text(0.01, 0.99, wrapped[:14000], va="top", ha="left", fontsize=8)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
         for title, df in frames.items():
-            if not isinstance(df, pd.DataFrame) or df.empty:
+            view = _prepare_export_table(df, max_rows=30)
+            if view.empty:
                 continue
-            view = df.copy()
-            if not isinstance(view.index, pd.RangeIndex) or view.index.name:
-                view = view.reset_index()
-            view = view.head(25)
 
             fig_t, ax_t = plt.subplots(figsize=(11.69, 8.27))
             ax_t.axis("off")
-            ax_t.set_title(title, fontsize=12)
+            ax_t.set_title(title, fontsize=14, pad=14)
             tbl = ax_t.table(
                 cellText=view.astype(str).values,
                 colLabels=[str(c) for c in view.columns],
                 loc="center",
+                cellLoc="center",
             )
             tbl.auto_set_font_size(False)
-            tbl.set_fontsize(7)
-            tbl.scale(1, 1.2)
+            tbl.set_fontsize(7.5)
+            tbl.scale(1.2, 1.25)
             pdf.savefig(fig_t, bbox_inches="tight")
             plt.close(fig_t)
 
             if view.shape[1] >= 2:
-                fig_c, ax_c = plt.subplots(figsize=(11.69, 5.0))
+                fig_c, ax_c = plt.subplots(figsize=(11.69, 4.6))
                 x = view.iloc[:, 0].astype(str)
-                for col in view.columns[1: min(5, len(view.columns))]:
-                    ax_c.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col))
+                for col in view.columns[1: min(6, len(view.columns))]:
+                    ax_c.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col), linewidth=2)
                 ax_c.set_title(f"{title} Trend")
                 ax_c.tick_params(axis="x", rotation=45)
-                ax_c.legend(loc="best")
+                ax_c.grid(True, alpha=0.25)
+                ax_c.legend(loc="best", fontsize=8)
                 plt.tight_layout()
                 pdf.savefig(fig_c, bbox_inches="tight")
                 plt.close(fig_c)
     out.seek(0)
     return out.getvalue()
+
 
 def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("RAG Assistant")
@@ -3559,11 +3585,11 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                         return
                     ws.set_landscape()
                     ws.fit_to_pages(1, 0)
-                    ws.set_zoom(90)
+                    ws.set_zoom(95)
+                    ws.freeze_panes(1, 1)
+                    ws.autofilter(0, 0, 0, max((len(df.columns) - 1), 0) if isinstance(df, pd.DataFrame) else 0)
                     if isinstance(df, pd.DataFrame) and not df.empty:
-                        max_cols = min(len(df.columns), 12)
-                        for col_idx in range(max_cols):
-                            ws.set_column(col_idx, col_idx, 18)
+                        _fit_column_widths_excel(ws, df)
 
                 _format_sheet("Metrics", _round_nearest_100(metrics_df))
                 _format_sheet("Forecast", _round_nearest_100(forecast_df) if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame())
