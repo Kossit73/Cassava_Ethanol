@@ -3248,36 +3248,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         fig = px.line(forecast_df, x="Year", y=["Forecast Revenue", "Forecast EBITDA"], title="Forecast Outlook")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### 5) Annual Financials & Graphs (Reproduced)")
-    financials = results.get("financials") if isinstance(results, dict) else None
-    if financials is not None:
-        income_annual = getattr(financials, "income_annual", pd.DataFrame())
-        cashflow_annual = getattr(financials, "cashflow_annual", pd.DataFrame())
-        balance_annual = getattr(financials, "balance_annual", pd.DataFrame())
-
-        if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
-            st.markdown("#### Annual Income Statement")
-            income_view = income_annual.reset_index()
-            st.dataframe(income_view, use_container_width=True)
-            cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
-            if cols:
-                st.plotly_chart(px.line(income_view, x=income_view.columns[0], y=cols, title="Income Statement Trends"), use_container_width=True)
-
-        if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
-            st.markdown("#### Annual Cash Flow Statement")
-            cash_view = cashflow_annual.reset_index()
-            st.dataframe(cash_view, use_container_width=True)
-            cf_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in cashflow_annual.columns]
-            if cf_cols:
-                st.plotly_chart(px.bar(cash_view, x=cash_view.columns[0], y=cf_cols, barmode="group", title="Cash Flow Profile"), use_container_width=True)
-
-        if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
-            st.markdown("#### Annual Balance Sheet")
-            balance_view = balance_annual.reset_index()
-            st.dataframe(balance_view, use_container_width=True)
-            bs_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in balance_annual.columns]
-            if bs_cols:
-                st.plotly_chart(px.line(balance_view, x=balance_view.columns[0], y=bs_cols, title="Balance Sheet Structure"), use_container_width=True)
+    st.info("Annual financial statement reproductions and chart-ready outputs are included in the Word/PDF/Excel business plan downloads.")
 
     st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
