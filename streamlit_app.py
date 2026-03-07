@@ -3094,7 +3094,13 @@ def _metric_commentary(metrics: Dict[str, object]) -> str:
     )
 
 
-def _compose_business_plan(results: Dict[str, object], insights: str, years: int, forecast_df: pd.DataFrame) -> str:
+def _compose_business_plan(
+    results: Dict[str, object],
+    insights: str,
+    years: int,
+    forecast_df: pd.DataFrame,
+    frames: Dict[str, pd.DataFrame] | None = None,
+) -> str:
     """Build a professional investor-style business plan text package."""
 
     financials = results.get("financials")
@@ -3125,6 +3131,10 @@ def _compose_business_plan(results: Dict[str, object], insights: str, years: int
     llcr = _format_rate(metrics.get("LLCR"))
     plcr = _format_rate(metrics.get("PLCR"))
 
+    sensitivity_df = (frames or {}).get("Sensitivity Analyses", pd.DataFrame())
+    scenario_df = (frames or {}).get("Scenario / IFs Analysis", pd.DataFrame())
+    monte_carlo_df = (frames or {}).get("Monte Carlo Simulation", pd.DataFrame())
+
     return f"""# Cassava Bioethanol Comprehensive Business Plan
 
 ## 1. Executive Summary
@@ -3135,7 +3145,8 @@ The current investment thesis is supported by diversified revenue (fuel ethanol 
 ### Professional Interpretation
 {_metric_commentary(metrics)}
 
-### Key Metrics Table
+### Key Metrics Dashboard
+Interpretation: this dashboard is the decision core for equity return quality, debt-service resilience, and valuation headroom.
 {_to_markdown_table(metric_table, rows=50)}
 
 ## 3. Market, Commercial Strategy, and Operations
@@ -3147,12 +3158,15 @@ Production planning, capex, staffing, opex, and working-capital assumptions are 
 
 ## 4. Annual Financial Statements (Reproduced)
 ### 4.1 Annual Income Statement
+Interpretation: this section explains top-line growth, operating profitability, and net earnings conversion quality.
 {_to_markdown_table(income_annual, rows=25)}
 
 ### 4.2 Annual Cash Flow Statement
+Interpretation: this section tracks cash generation, reinvestment intensity, and financing dependence over time.
 {_to_markdown_table(cashflow_annual, rows=25)}
 
 ### 4.3 Annual Balance Sheet
+Interpretation: this section highlights capital structure strength, leverage trajectory, and net asset accumulation.
 {_to_markdown_table(balance_annual, rows=25)}
 
 ## 5. Schedules and Forecasts
@@ -3184,19 +3198,43 @@ The following data tables are the source series for the charts included in the d
 ## 7. Lender/Covenant Narrative
 Minimum DSCR is **{dscr_min}** with LLCR **{llcr}** and PLCR **{plcr}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions.
 
-## 8. Risk and Mitigation
+## 8. Financial Performance
+Interpretation: financial performance combines revenue scale-up, EBITDA quality, and bottom-line durability.
+{_to_markdown_table(income_annual, rows=25)}
+
+## 9. Financial Position
+Interpretation: financial position demonstrates solvency, leverage profile, and balance-sheet risk absorption capacity.
+{_to_markdown_table(balance_annual, rows=25)}
+
+## 10. Cash Flow Statement
+Interpretation: cash flow analysis validates debt serviceability and reinvestment capacity under operating assumptions.
+{_to_markdown_table(cashflow_annual, rows=25)}
+
+## 11. Sensitivity Analyses
+Interpretation: sensitivity analyses quantify first-order valuation and return responses to key assumption shocks.
+{_to_markdown_table(sensitivity_df, rows=40)}
+
+## 12. Scenario / IFs Analysis
+Interpretation: scenario analysis compares strategic configurations and downside/upside outcomes across selected cases.
+{_to_markdown_table(scenario_df, rows=40)}
+
+## 13. Monte Carlo Simulation
+Interpretation: Monte Carlo outputs characterize distributional risk and confidence intervals for key investment outcomes.
+{_to_markdown_table(monte_carlo_df, rows=40)}
+
+## 14. Risk and Mitigation
 Risk register impacts, commercial safeguards, and scenario analytics are embedded to produce risk-adjusted performance views and improve investor decision confidence.
 
-## 9. AI/RAG Supporting Insights
+## 15. AI/RAG Supporting Insights
 {insights or '_No additional RAG insights available. Run Document Indexing and Run the AI._'}
 
-## 10. Conclusion and Funding Case
+## 16. Conclusion and Funding Case
 The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios.
 """
 
 
 
-def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     financials = results.get("financials") if isinstance(results, dict) else None
     metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
 
@@ -3210,12 +3248,63 @@ def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) ->
         metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
         metrics_df = _round_nearest_100(metrics_df)
 
+    sensitivity_df = pd.DataFrame()
+    try:
+        base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        sensitivity_model = CassavaBioethanolModel(copy.deepcopy(base_page))
+        sensitivity_model.scenario = model.scenario
+        if DEFAULT_SENSITIVITY_SCENARIOS:
+            sensitivity_df = _round_nearest_100(run_sensitivity(sensitivity_model, DEFAULT_SENSITIVITY_SCENARIOS))
+    except Exception:
+        sensitivity_df = pd.DataFrame()
+
+    scenario_rows: List[Dict[str, object]] = []
+    try:
+        snapshot = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        for scenario_name in CassavaBioethanolModel.SCENARIOS:
+            scenario_model = CassavaBioethanolModel(copy.deepcopy(snapshot))
+            scenario_model.scenario = scenario_name
+            scenario_result = scenario_model.build(scenario_name)
+            scenario_metrics = scenario_result.get("metrics", {}) if isinstance(scenario_result, dict) else {}
+            scenario_rows.append(
+                {
+                    "Scenario": scenario_name,
+                    "Project NPV": scenario_metrics.get("Project NPV"),
+                    "Project IRR": scenario_metrics.get("Project IRR"),
+                    "Equity IRR": scenario_metrics.get("Equity IRR"),
+                    "Payback Period (years)": scenario_metrics.get("Payback Period (years)"),
+                    "DSCR (min)": scenario_metrics.get("DSCR (min)"),
+                }
+            )
+    except Exception:
+        scenario_rows = []
+    scenario_df = _round_nearest_100(pd.DataFrame(scenario_rows))
+
+    monte_carlo_summary = pd.DataFrame()
+    try:
+        cache: Dict[str, Dict[str, object]] = st.session_state.get(MC_CACHE_KEY, {})
+        cached_entry = cache.get(model.scenario, {})
+        mc_results = cached_entry.get("results")
+        if isinstance(mc_results, pd.DataFrame) and not mc_results.empty:
+            monte_carlo_summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T.reset_index()
+            monte_carlo_summary = monte_carlo_summary.rename(columns={"index": "Metric"})
+    except Exception:
+        monte_carlo_summary = pd.DataFrame()
+    monte_carlo_summary = _round_nearest_100(monte_carlo_summary)
+
     return {
         "Key Metrics": metrics_df,
+        "Key Metrics Dashboard": metrics_df,
+        "Financial Performance": income_annual,
+        "Financial Position": balance_annual,
+        "Cash Flow Statement": cashflow_annual,
         "Income Annual": income_annual,
         "Cash Flow Annual": cashflow_annual,
         "Balance Annual": balance_annual,
         "Forecast": forecast,
+        "Sensitivity Analyses": sensitivity_df,
+        "Scenario / IFs Analysis": scenario_df,
+        "Monte Carlo Simulation": monte_carlo_summary,
     }
 
 
@@ -3270,11 +3359,24 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
         else:
             doc.add_paragraph("")
 
+    section_notes = {
+        "Key Metrics": "Interpretation: this dashboard summarizes project returns, valuation, and covenant readiness.",
+        "Key Metrics Dashboard": "Interpretation: this dashboard summarizes project returns, valuation, and covenant readiness.",
+        "Financial Performance": "Interpretation: this table highlights revenue, profitability, and margin dynamics.",
+        "Financial Position": "Interpretation: this table shows solvency, leverage, and capital structure progression.",
+        "Cash Flow Statement": "Interpretation: this table captures operating, investing, and financing cash dynamics.",
+        "Sensitivity Analyses": "Interpretation: this section quantifies how outputs move when key assumptions are stressed.",
+        "Scenario / IFs Analysis": "Interpretation: this section compares strategic alternatives against the base case.",
+        "Monte Carlo Simulation": "Interpretation: this section summarizes distribution-based risk and confidence bands.",
+    }
+
     def _add_table(title: str, df: pd.DataFrame) -> None:
         view = _prepare_export_table(df, max_rows=50)
         if view.empty:
             return
         doc.add_heading(title, level=2)
+        if title in section_notes:
+            doc.add_paragraph(section_notes[title])
         table = doc.add_table(rows=1, cols=len(view.columns))
         table.style = "Table Grid"
 
@@ -3323,6 +3425,16 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
 
 def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
     out = io.BytesIO()
+    section_notes = {
+        "Key Metrics": "Interpretation: dashboard for returns, value, and covenant quality.",
+        "Key Metrics Dashboard": "Interpretation: dashboard for returns, value, and covenant quality.",
+        "Financial Performance": "Interpretation: trend in revenue, EBITDA and net income quality.",
+        "Financial Position": "Interpretation: leverage and balance-sheet resilience over time.",
+        "Cash Flow Statement": "Interpretation: cash generation and debt serviceability profile.",
+        "Sensitivity Analyses": "Interpretation: impact of assumption shifts on key outputs.",
+        "Scenario / IFs Analysis": "Interpretation: strategic-case comparison versus base case.",
+        "Monte Carlo Simulation": "Interpretation: probabilistic distribution of outcomes.",
+    }
     with PdfPages(out) as pdf:
         fig, ax = plt.subplots(figsize=(11.69, 8.27))
         ax.axis("off")
@@ -3339,6 +3451,9 @@ def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataF
             fig_t, ax_t = plt.subplots(figsize=(11.69, 8.27))
             ax_t.axis("off")
             ax_t.set_title(title, fontsize=14, pad=14)
+            note = section_notes.get(title)
+            if note:
+                ax_t.text(0.01, 0.95, note, transform=ax_t.transAxes, fontsize=9, ha="left", va="top")
             tbl = ax_t.table(
                 cellText=view.astype(str).values,
                 colLabels=[str(c) for c in view.columns],
@@ -3491,7 +3606,9 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         forecast_df = _round_nearest_100(_build_forecast(results, years))
         rag["forecast_table"] = forecast_df
         narrative = rag.get("insights") or ""
-        rag["business_plan"] = _compose_business_plan(results, narrative, years, forecast_df)
+        export_frames = _rag_export_frames(model, results, forecast_df)
+        rag["export_frames"] = export_frames
+        rag["business_plan"] = _compose_business_plan(results, narrative, years, forecast_df, export_frames)
         st.success("Business plan draft prepared with annual financial tables, professional write-ups, and chart coverage.")
 
     forecast_df = rag.get("forecast_table", pd.DataFrame())
@@ -3501,7 +3618,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
     st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
     if plan_text:
-        frames = _rag_export_frames(results, forecast_df)
+        frames = rag.get("export_frames") if isinstance(rag.get("export_frames"), dict) else _rag_export_frames(model, results, forecast_df)
         word_bytes = _generate_word_business_plan_bytes(plan_text, frames)
         pdf_bytes = _generate_pdf_business_plan_bytes(plan_text, frames)
 
@@ -3612,6 +3729,27 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                 _add_line_chart("Plot_Cashflow", "Cash Flow Trends")
                 _add_line_chart("Plot_Balance", "Balance Sheet Trends")
                 _add_line_chart("Plot_Forecast", "Forecast Trends")
+
+                # Ensure all business-plan analysis sections are exported in Excel as dedicated sheets.
+                existing_sheet_names = set(writer.sheets.keys())
+                for frame_title, frame_df in frames.items():
+                    frame_view = _prepare_export_table(frame_df, max_rows=500)
+                    if frame_view.empty:
+                        continue
+                    candidate = "".join(ch for ch in str(frame_title) if ch.isalnum() or ch in (" ", "_", "-"))[:31] or "Analysis"
+                    sheet_name = candidate
+                    suffix = 1
+                    while sheet_name in existing_sheet_names:
+                        trimmed = candidate[: max(0, 31 - len(str(suffix)) - 1)]
+                        sheet_name = f"{trimmed}_{suffix}"
+                        suffix += 1
+                    frame_view.to_excel(writer, sheet_name=sheet_name, index=False)
+                    existing_sheet_names.add(sheet_name)
+                    ws = writer.sheets[sheet_name]
+                    ws.set_landscape()
+                    ws.fit_to_pages(1, 0)
+                    ws.freeze_panes(1, 1)
+                    _fit_column_widths_excel(ws, frame_view)
         st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.download_button("Download Business Plan (PDF)", data=pdf_bytes, file_name="Business_Plan.pdf", mime="application/pdf")
     else:
