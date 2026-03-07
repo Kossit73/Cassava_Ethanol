@@ -3267,7 +3267,12 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
 
     st.markdown("### 4) Prepare Business Plan")
     if st.button("Prepare Business Plan", type="primary", key="rag_prepare_plan"):
-        years = int(forecast_years)
+        snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+        if isinstance(snapshot, InputLandingPage):
+            years = int(snapshot.projection.end_year) - int(snapshot.projection.start_year) + 1
+        else:
+            years = int(model.input_page.projection.end_year) - int(model.input_page.projection.start_year) + 1
+        years = max(1, years)
         forecast_df = _build_forecast(results, years)
         rag["forecast_table"] = forecast_df
         narrative = rag.get("insights") or ""
