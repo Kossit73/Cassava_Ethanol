@@ -3170,11 +3170,20 @@ The model output indicates a financeable platform when contract quality, feedsto
 
 def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     financials = results.get("financials") if isinstance(results, dict) else None
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+
     income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
     cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
     balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
     forecast = _round_nearest_100(forecast_df)
+
+    metrics_df = pd.DataFrame(list(metrics.items()), columns=["Key Metric", "Value"])
+    if not metrics_df.empty:
+        metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
+        metrics_df = _round_nearest_100(metrics_df)
+
     return {
+        "Key Metrics": metrics_df,
         "Income Annual": income_annual,
         "Cash Flow Annual": cashflow_annual,
         "Balance Annual": balance_annual,
@@ -3185,11 +3194,15 @@ def _rag_export_frames(results: Dict[str, object], forecast_df: pd.DataFrame) ->
 def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
     try:
         from docx import Document
+        from docx.enum.section import WD_ORIENT
         from docx.shared import Inches
     except Exception:
         return plan_text.encode("utf-8")
 
     doc = Document()
+    section = doc.sections[-1]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width, section.page_height = section.page_height, section.page_width
     doc.add_heading("Cassava Bioethanol Business Plan", level=0)
 
     for line in (plan_text or "").splitlines():
@@ -3208,7 +3221,9 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
     def _add_table(title: str, df: pd.DataFrame) -> None:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return
-        view = df.reset_index().copy()
+        view = df.copy()
+        if not isinstance(view.index, pd.RangeIndex) or view.index.name:
+            view = view.reset_index()
         doc.add_heading(title, level=2)
         table = doc.add_table(rows=1, cols=len(view.columns))
         table.style = "Light List"
@@ -3225,7 +3240,9 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
     def _add_chart(title: str, df: pd.DataFrame) -> None:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return
-        view = df.reset_index().copy()
+        view = df.copy()
+        if not isinstance(view.index, pd.RangeIndex) or view.index.name:
+            view = view.reset_index()
         if view.shape[1] < 2:
             return
         fig, ax = plt.subplots(figsize=(8, 3))
@@ -3253,7 +3270,7 @@ def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.Data
 def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
     out = io.BytesIO()
     with PdfPages(out) as pdf:
-        fig, ax = plt.subplots(figsize=(8.27, 11.69))
+        fig, ax = plt.subplots(figsize=(11.69, 8.27))
         ax.axis("off")
         wrapped = textwrap.fill((plan_text or "").replace("\n", " "), width=110)
         ax.text(0.01, 0.99, wrapped[:12000], va="top", ha="left", fontsize=8)
@@ -3263,7 +3280,10 @@ def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataF
         for title, df in frames.items():
             if not isinstance(df, pd.DataFrame) or df.empty:
                 continue
-            view = df.reset_index().head(25)
+            view = df.copy()
+            if not isinstance(view.index, pd.RangeIndex) or view.index.name:
+                view = view.reset_index()
+            view = view.head(25)
 
             fig_t, ax_t = plt.subplots(figsize=(11.69, 8.27))
             ax_t.axis("off")
@@ -3442,7 +3462,9 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
             if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
                 forecast_df.to_excel(writer, sheet_name="Forecast", index=False)
-            pd.DataFrame([results.get("metrics", {})]).to_excel(writer, sheet_name="Metrics", index=False)
+            metrics_df = pd.DataFrame(list(results.get("metrics", {}).items()), columns=["Key Metric", "Value"])
+            metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
+            _round_nearest_100(metrics_df).to_excel(writer, sheet_name="Metrics", index=False)
             fin = results.get("financials") if isinstance(results, dict) else None
             if fin is not None:
                 income_annual = getattr(fin, "income_annual", pd.DataFrame())
@@ -3513,6 +3535,28 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                     chart.set_title({"name": title})
                     chart.set_legend({"position": "bottom"})
                     ws.insert_chart('H2', chart)
+
+                def _format_sheet(sheet_name: str, df: pd.DataFrame | None = None) -> None:
+                    ws = writer.sheets.get(sheet_name)
+                    if ws is None:
+                        return
+                    ws.set_landscape()
+                    ws.fit_to_pages(1, 0)
+                    ws.set_zoom(90)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        max_cols = min(len(df.columns), 12)
+                        for col_idx in range(max_cols):
+                            ws.set_column(col_idx, col_idx, 18)
+
+                _format_sheet("Metrics", _round_nearest_100(metrics_df))
+                _format_sheet("Forecast", _round_nearest_100(forecast_df) if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame())
+                _format_sheet("Income_Annual", income_view)
+                _format_sheet("Cashflow_Annual", cash_view)
+                _format_sheet("Balance_Annual", balance_view)
+                _format_sheet("Plot_Income", income_plot)
+                _format_sheet("Plot_Cashflow", cash_plot)
+                _format_sheet("Plot_Balance", balance_plot)
+                _format_sheet("Plot_Forecast", _round_nearest_100(forecast_df) if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame())
 
                 _add_line_chart("Plot_Income", "Income Statement Trends")
                 _add_line_chart("Plot_Cashflow", "Cash Flow Trends")
