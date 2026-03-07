@@ -3024,10 +3024,21 @@ def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
 
 
 
+def _round_nearest_100(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Return a copy with numeric figures rounded to nearest 100."""
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    rounded = df.copy()
+    numeric_cols = rounded.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols):
+        rounded[numeric_cols] = (rounded[numeric_cols] / 100.0).round() * 100.0
+    return rounded
+
+
 def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
     if not isinstance(df, pd.DataFrame) or df.empty:
         return "_No data available._"
-    view = df.head(rows).copy()
+    view = _round_nearest_100(df).head(rows).copy()
     if isinstance(view.index, pd.DatetimeIndex):
         view.index = view.index.to_period("Y").astype(str)
     try:
@@ -3058,16 +3069,16 @@ def _compose_business_plan(results: Dict[str, object], insights: str, years: int
     financials = results.get("financials")
     metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
 
-    income_annual = getattr(financials, "income_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
-    cashflow_annual = getattr(financials, "cashflow_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
-    balance_annual = getattr(financials, "balance_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
+    income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
 
     production = results.get("production")
-    production_annual = getattr(production, "annual", pd.DataFrame()) if production is not None else pd.DataFrame()
+    production_annual = _round_nearest_100(getattr(production, "annual", pd.DataFrame())) if production is not None else pd.DataFrame()
     revenue = results.get("revenue")
-    revenue_annual = getattr(revenue, "annual", pd.DataFrame()) if revenue is not None else pd.DataFrame()
+    revenue_annual = _round_nearest_100(getattr(revenue, "annual", pd.DataFrame())) if revenue is not None else pd.DataFrame()
 
-    metric_table = pd.DataFrame([metrics]).T.reset_index()
+    metric_table = _round_nearest_100(pd.DataFrame([metrics]).T.reset_index())
     metric_table.columns = ["Key Metric", "Value"]
 
     income_plot_cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
@@ -3273,7 +3284,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         else:
             years = int(model.input_page.projection.end_year) - int(model.input_page.projection.start_year) + 1
         years = max(1, years)
-        forecast_df = _build_forecast(results, years)
+        forecast_df = _round_nearest_100(_build_forecast(results, years))
         rag["forecast_table"] = forecast_df
         narrative = rag.get("insights") or ""
         rag["business_plan"] = _compose_business_plan(results, narrative, years, forecast_df)
@@ -3285,7 +3296,36 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         fig = px.line(forecast_df, x="Year", y=["Forecast Revenue", "Forecast EBITDA"], title="Forecast Outlook")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.info("Annual financial statement reproductions and chart-ready outputs are included in the Word/PDF/Excel business plan downloads.")
+    st.markdown("### 5) Annual Financial Statements, Graphs and Plots")
+    financials = results.get("financials") if isinstance(results, dict) else None
+    if financials is not None:
+        income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame()))
+        cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame()))
+        balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame()))
+
+        if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
+            st.markdown("#### Annual Income Statement (Rounded to nearest 100)")
+            income_view = income_annual.reset_index()
+            st.dataframe(income_view, use_container_width=True)
+            cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
+            if cols:
+                st.plotly_chart(px.line(income_view, x=income_view.columns[0], y=cols, title="Income Statement Trends"), use_container_width=True)
+
+        if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
+            st.markdown("#### Annual Cash Flow Statement (Rounded to nearest 100)")
+            cash_view = cashflow_annual.reset_index()
+            st.dataframe(cash_view, use_container_width=True)
+            cf_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in cashflow_annual.columns]
+            if cf_cols:
+                st.plotly_chart(px.bar(cash_view, x=cash_view.columns[0], y=cf_cols, barmode="group", title="Cash Flow Profile"), use_container_width=True)
+
+        if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
+            st.markdown("#### Annual Balance Sheet (Rounded to nearest 100)")
+            balance_view = balance_annual.reset_index()
+            st.dataframe(balance_view, use_container_width=True)
+            bs_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in balance_annual.columns]
+            if bs_cols:
+                st.plotly_chart(px.line(balance_view, x=balance_view.columns[0], y=bs_cols, title="Balance Sheet Structure"), use_container_width=True)
 
     st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
@@ -3303,19 +3343,19 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                 balance_annual = getattr(fin, "balance_annual", pd.DataFrame())
 
                 if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
-                    income_view = income_annual.reset_index()
+                    income_view = _round_nearest_100(income_annual).reset_index()
                     income_view.to_excel(writer, sheet_name="Income_Annual", index=False)
                 else:
                     income_view = pd.DataFrame()
 
                 if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
-                    cash_view = cashflow_annual.reset_index()
+                    cash_view = _round_nearest_100(cashflow_annual).reset_index()
                     cash_view.to_excel(writer, sheet_name="Cashflow_Annual", index=False)
                 else:
                     cash_view = pd.DataFrame()
 
                 if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
-                    balance_view = balance_annual.reset_index()
+                    balance_view = _round_nearest_100(balance_annual).reset_index()
                     balance_view.to_excel(writer, sheet_name="Balance_Annual", index=False)
                 else:
                     balance_view = pd.DataFrame()
@@ -3325,9 +3365,9 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                 cash_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in getattr(cashflow_annual, 'columns', [])]
                 balance_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in getattr(balance_annual, 'columns', [])]
 
-                income_plot = income_annual[income_cols].reset_index() if income_cols else pd.DataFrame()
-                cash_plot = cashflow_annual[cash_cols].reset_index() if cash_cols else pd.DataFrame()
-                balance_plot = balance_annual[balance_cols].reset_index() if balance_cols else pd.DataFrame()
+                income_plot = _round_nearest_100(income_annual[income_cols]).reset_index() if income_cols else pd.DataFrame()
+                cash_plot = _round_nearest_100(cashflow_annual[cash_cols]).reset_index() if cash_cols else pd.DataFrame()
+                balance_plot = _round_nearest_100(balance_annual[balance_cols]).reset_index() if balance_cols else pd.DataFrame()
 
                 if not income_plot.empty:
                     income_plot.to_excel(writer, sheet_name="Plot_Income", index=False)
@@ -3336,7 +3376,7 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
                 if not balance_plot.empty:
                     balance_plot.to_excel(writer, sheet_name="Plot_Balance", index=False)
                 if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
-                    forecast_df.to_excel(writer, sheet_name="Plot_Forecast", index=False)
+                    _round_nearest_100(forecast_df).to_excel(writer, sheet_name="Plot_Forecast", index=False)
 
                 workbook = writer.book
 
