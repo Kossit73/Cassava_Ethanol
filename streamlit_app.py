@@ -3022,6 +3022,100 @@ def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+
+def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return "_No data available._"
+    view = df.head(rows).copy()
+    if isinstance(view.index, pd.DatetimeIndex):
+        view.index = view.index.to_period("Y").astype(str)
+    return view.to_markdown()
+
+
+def _metric_commentary(metrics: Dict[str, object]) -> str:
+    irr = _annualise(metrics.get("Project IRR"))
+    eq_irr = _annualise(metrics.get("Equity IRR"))
+    payback = metrics.get("Payback Period (years)")
+    dscr = metrics.get("DSCR (min)")
+    llcr = metrics.get("LLCR")
+    plcr = metrics.get("PLCR")
+    return (
+        "- **Valuation**: Project NPV reflects value creation potential under current assumptions.\n"
+        f"- **Returns**: Project IRR is approximately {_format_rate(irr)} and Equity IRR is {_format_rate(eq_irr)}.\n"
+        f"- **Liquidity recovery**: Payback is {payback if payback is not None else 'n/a'} years.\n"
+        f"- **Debt service strength**: Minimum DSCR is {_format_rate(dscr)} with LLCR {_format_rate(llcr)} and PLCR {_format_rate(plcr)}."
+    )
+
+
+def _compose_business_plan(results: Dict[str, object], insights: str, years: int, forecast_df: pd.DataFrame) -> str:
+    financials = results.get("financials")
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+
+    income_annual = getattr(financials, "income_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
+    cashflow_annual = getattr(financials, "cashflow_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
+    balance_annual = getattr(financials, "balance_annual", pd.DataFrame()) if financials is not None else pd.DataFrame()
+
+    production = results.get("production")
+    production_annual = getattr(production, "annual", pd.DataFrame()) if production is not None else pd.DataFrame()
+    revenue = results.get("revenue")
+    revenue_annual = getattr(revenue, "annual", pd.DataFrame()) if revenue is not None else pd.DataFrame()
+
+    metric_table = pd.DataFrame([metrics]).T.reset_index()
+    metric_table.columns = ["Key Metric", "Value"]
+
+    return f"""# Cassava Bioethanol Comprehensive Business Plan
+
+## 1. Executive Summary
+This business plan is generated directly from the integrated financial model and RAG evidence base. It reproduces annual statements, key operating schedules, and forecast outputs for investor and lender diligence.
+
+## 2. Key Metrics with Professional Commentary
+{_metric_commentary(metrics)}
+
+### Key Metrics Table
+{_to_markdown_table(metric_table, rows=40)}
+
+## 3. Strategic and Commercial Positioning
+The project combines ethanol and animal-feed revenue streams, with configurable offtake assumptions, procurement strategy, and downside risk adjustments.
+
+## 4. Annual Financial Statements (Model Reproduction)
+### 4.1 Annual Income Statement
+{_to_markdown_table(income_annual, rows=25)}
+
+### 4.2 Annual Cash Flow Statement
+{_to_markdown_table(cashflow_annual, rows=25)}
+
+### 4.3 Annual Balance Sheet
+{_to_markdown_table(balance_annual, rows=25)}
+
+## 5. Production and Revenue Schedules
+### 5.1 Production Annual Schedule
+{_to_markdown_table(production_annual, rows=25)}
+
+### 5.2 Revenue Annual Schedule
+{_to_markdown_table(revenue_annual, rows=25)}
+
+## 6. Forecast Section
+Forecast horizon is locked to the projection horizon ({years} year(s)).
+
+### Forecast Table
+{_to_markdown_table(forecast_df, rows=years + 2)}
+
+## 7. AI/RAG Insights
+{insights or '_No additional RAG insights available. Run Document Indexing and Run the AI._'}
+
+## 8. Graphs and Plots Included in App View
+- Annual Revenue vs EBITDA trend
+- Annual Net Income trend
+- Annual cash-flow profile (Operating/Investing/Financing/FCF)
+- Balance-sheet trajectory (Assets vs Liabilities & Equity)
+- Production profile (Cassava, Ethanol, Animal Feed)
+- Forecast Revenue and EBITDA trend
+
+## 9. Risk, Governance and Investment Readiness
+The model includes scenario analysis, sensitivity analysis, Monte Carlo simulation, covenant indicators, and risk-commercial adjustments to support institutional investment decision-making.
+"""
+
 def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("RAG Assistant")
     st.caption("Upload reference materials, index model outputs, and generate a comprehensive business-plan draft with forecasts.")
@@ -3140,31 +3234,9 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         years = int(forecast_years)
         forecast_df = _build_forecast(results, years)
         rag["forecast_table"] = forecast_df
-        metrics = results.get("metrics", {})
-        top_metrics = "\n".join([f"- **{k}**: {v}" for k, v in list(metrics.items())[:12]])
-        narrative = rag.get("insights") or "No retrieved context. Use Document Indexing and Run the AI for richer narrative."
-        rag["business_plan"] = f"""# Cassava Bioethanol Comprehensive Business Plan
-
-## 1. Executive Summary
-Generated with provider: {rag.get('config', {}).get('provider', 'Not set')} / model: {rag.get('config', {}).get('model', 'Not set')}
-
-## 2. Financial Highlights
-{top_metrics}
-
-## 3. Strategy and Operations
-- Feedstock strategy reviewed across FARM_ONLY, BUY_ONLY, HYBRID scenarios.
-- Integrated revenue, opex, capex, debt, and working-capital schedules are included in the synced model outputs.
-
-## 4. AI and RAG Insights
-{narrative}
-
-## 5. Forecast
-Forecast horizon: {years} year(s).
-
-## 6. Governance and Risk
-- Include sensitivity, Monte Carlo, and covenant tracking prior to investor circulation.
-"""
-        st.success("Business plan draft prepared.")
+        narrative = rag.get("insights") or ""
+        rag["business_plan"] = _compose_business_plan(results, narrative, years, forecast_df)
+        st.success("Business plan draft prepared with annual financial tables, professional write-ups, and chart coverage.")
 
     forecast_df = rag.get("forecast_table", pd.DataFrame())
     if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
@@ -3172,7 +3244,38 @@ Forecast horizon: {years} year(s).
         fig = px.line(forecast_df, x="Year", y=["Forecast Revenue", "Forecast EBITDA"], title="Forecast Outlook")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### 5) Business Plan Downloads")
+    st.markdown("### 5) Annual Financials & Graphs (Reproduced)")
+    financials = results.get("financials") if isinstance(results, dict) else None
+    if financials is not None:
+        income_annual = getattr(financials, "income_annual", pd.DataFrame())
+        cashflow_annual = getattr(financials, "cashflow_annual", pd.DataFrame())
+        balance_annual = getattr(financials, "balance_annual", pd.DataFrame())
+
+        if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
+            st.markdown("#### Annual Income Statement")
+            income_view = income_annual.reset_index()
+            st.dataframe(income_view, use_container_width=True)
+            cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
+            if cols:
+                st.plotly_chart(px.line(income_view, x=income_view.columns[0], y=cols, title="Income Statement Trends"), use_container_width=True)
+
+        if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
+            st.markdown("#### Annual Cash Flow Statement")
+            cash_view = cashflow_annual.reset_index()
+            st.dataframe(cash_view, use_container_width=True)
+            cf_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in cashflow_annual.columns]
+            if cf_cols:
+                st.plotly_chart(px.bar(cash_view, x=cash_view.columns[0], y=cf_cols, barmode="group", title="Cash Flow Profile"), use_container_width=True)
+
+        if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
+            st.markdown("#### Annual Balance Sheet")
+            balance_view = balance_annual.reset_index()
+            st.dataframe(balance_view, use_container_width=True)
+            bs_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in balance_annual.columns]
+            if bs_cols:
+                st.plotly_chart(px.line(balance_view, x=balance_view.columns[0], y=bs_cols, title="Balance Sheet Structure"), use_container_width=True)
+
+    st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
     if plan_text:
         st.download_button("Download Business Plan (Word)", data=plan_text.encode("utf-8"), file_name="Business_Plan.doc", mime="application/msword")
@@ -3181,13 +3284,21 @@ Forecast horizon: {years} year(s).
             if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
                 forecast_df.to_excel(writer, sheet_name="Forecast", index=False)
             pd.DataFrame([results.get("metrics", {})]).to_excel(writer, sheet_name="Metrics", index=False)
+            fin = results.get("financials") if isinstance(results, dict) else None
+            if fin is not None:
+                if isinstance(getattr(fin, "income_annual", None), pd.DataFrame) and not fin.income_annual.empty:
+                    fin.income_annual.reset_index().to_excel(writer, sheet_name="Income_Annual", index=False)
+                if isinstance(getattr(fin, "cashflow_annual", None), pd.DataFrame) and not fin.cashflow_annual.empty:
+                    fin.cashflow_annual.reset_index().to_excel(writer, sheet_name="Cashflow_Annual", index=False)
+                if isinstance(getattr(fin, "balance_annual", None), pd.DataFrame) and not fin.balance_annual.empty:
+                    fin.balance_annual.reset_index().to_excel(writer, sheet_name="Balance_Annual", index=False)
         st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         pdf_like = ("BUSINESS PLAN\n\n" + plan_text).encode("utf-8")
         st.download_button("Download Business Plan (PDF)", data=pdf_like, file_name="Business_Plan.pdf", mime="application/pdf")
     else:
         st.info("Generate the business plan first to enable downloads.")
 
-    st.markdown("### 6) Additional AI tools to enhance the model")
+    st.markdown("### 7) Additional AI tools to enhance the model")
     st.markdown(
         "- **Anomaly detection** on monthly statements and schedules to flag unusual movements.\n"
         "- **Automatic covenant monitor** (DSCR/LLCR early warning) with threshold alerts.\n"
