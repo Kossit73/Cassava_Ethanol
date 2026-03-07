@@ -3028,13 +3028,30 @@ def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
 
 
 def _round_nearest_100(df: pd.DataFrame | None) -> pd.DataFrame:
-    """Return a copy with numeric figures rounded to nearest 100."""
+    """Return a copy with numeric financial figures rounded to nearest 100.
+
+    Calendar/index columns such as ``Year`` are intentionally excluded.
+    """
+
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
+
     rounded = df.copy()
-    numeric_cols = rounded.select_dtypes(include=[np.number]).columns
-    if len(numeric_cols):
-        rounded[numeric_cols] = (rounded[numeric_cols] / 100.0).round() * 100.0
+    numeric_cols = list(rounded.select_dtypes(include=[np.number]).columns)
+    if not numeric_cols:
+        return rounded
+
+    protected = {
+        c
+        for c in numeric_cols
+        if str(c).strip().lower() in {"year", "month", "date", "period", "start year", "end year"}
+    }
+
+    for col in numeric_cols:
+        if col in protected:
+            continue
+        rounded[col] = (pd.to_numeric(rounded[col], errors="coerce") / 100.0).round() * 100.0
+
     return rounded
 
 
