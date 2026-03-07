@@ -2992,7 +2992,18 @@ def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
     if annual.empty or "Revenue" not in annual.columns:
         return pd.DataFrame()
     annual = annual.copy()
-    annual.index = pd.to_datetime(annual.index, errors="coerce")
+    if isinstance(annual.index, pd.DatetimeIndex):
+        idx = annual.index
+    elif isinstance(annual.index, pd.PeriodIndex):
+        idx = annual.index.to_timestamp()
+    else:
+        raw_index = pd.Index(annual.index)
+        numeric_years = pd.to_numeric(raw_index, errors="coerce")
+        if numeric_years.notna().all():
+            idx = pd.to_datetime(numeric_years.astype(int).astype(str), format="%Y", errors="coerce")
+        else:
+            idx = pd.to_datetime(raw_index, errors="coerce")
+    annual.index = idx
     annual = annual[~annual.index.isna()]
     if annual.empty:
         return pd.DataFrame()
@@ -3484,12 +3495,8 @@ def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str,
         st.success("Business plan draft prepared with annual financial tables, professional write-ups, and chart coverage.")
 
     forecast_df = rag.get("forecast_table", pd.DataFrame())
-    if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
-        st.dataframe(forecast_df, use_container_width=True)
-        fig = px.line(forecast_df, x="Year", y=["Forecast Revenue", "Forecast EBITDA"], title="Forecast Outlook")
-        st.plotly_chart(fig, use_container_width=True)
 
-    st.info("Annual financial statements, graphs, and plot datasets are included in the downloadable Word, PDF, and Excel business plan outputs only.")
+    st.info("Prepare Business Plan outputs (forecast tables, annual financials, graphs, and plot datasets) are provided in the downloadable Word, PDF, and Excel files only.")
 
     st.markdown("### 6) Business Plan Downloads")
     plan_text = rag.get("business_plan", "")
