@@ -52,7 +52,7 @@ def test_monte_carlo_simulation_supports_multiple_distributions() -> None:
 
     results = monte_carlo_simulation(model, config, iterations=3, random_seed=1)
     assert len(results) == 3
-    assert {"Project NPV", "Project IRR", "Equity IRR"}.issubset(results.columns)
+    assert {"Project NPV", "Project IRR", "Equity IRR", "DSCR (min)", "Payback Period (years)"}.issubset(results.columns)
     pd.testing.assert_frame_equal(
         model.input_page.global_inputs.data.reset_index(drop=True),
         base.reset_index(drop=True),
@@ -76,3 +76,26 @@ def test_parameter_adapters_capture_base_values() -> None:
     assert pytest.approx(cassava_state.base_value) == 600_000
     assert pytest.approx(loan_state.base_value) == 24_000_000
 
+
+def test_monte_carlo_simulation_accepts_correlation_matrix() -> None:
+    page = default_input_page()
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    config = pd.DataFrame(
+        [
+            {"Parameter": "Corporate tax rate", "Distribution": "Normal", "loc": 0.28, "scale": 0.02},
+            {"Parameter": "Discount rate", "Distribution": "Normal", "loc": 0.12, "scale": 0.02},
+            {"Parameter": "Investor share capital", "Distribution": "Normal", "loc": 0.45, "scale": 0.03},
+        ]
+    )
+    corr = pd.DataFrame(
+        [
+            [1.0, 0.6, -0.2],
+            [0.6, 1.0, -0.1],
+            [-0.2, -0.1, 1.0],
+        ],
+        index=["Corporate tax rate", "Discount rate", "Investor share capital"],
+        columns=["Corporate tax rate", "Discount rate", "Investor share capital"],
+    )
+
+    results = monte_carlo_simulation(model, config, iterations=4, random_seed=7, correlation_matrix=corr)
+    assert len(results) == 4

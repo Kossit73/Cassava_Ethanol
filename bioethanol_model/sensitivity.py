@@ -438,6 +438,7 @@ def monte_carlo_simulation(
     parameter_configs: Sequence[Mapping[str, Any]] | pd.DataFrame,
     iterations: int = DEFAULT_MONTE_CARLO_ITERATIONS,
     random_seed: int = DEFAULT_MONTE_CARLO_SEED,
+    correlation_matrix: pd.DataFrame | Mapping[str, Mapping[str, float]] | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_seed)
     table = model.input_page.global_inputs
@@ -464,12 +465,62 @@ def monte_carlo_simulation(
 
     results: List[Dict[str, Any]] = []
 
+    corr_df = _normalise_correlation_matrix(correlation_matrix)
+
+    normal_lookup: Dict[str, Dict[str, float]] = {}
+    for record in config_records:
+        param = str(record.get("Parameter", ""))
+        if str(record.get("Distribution", "")) != "Normal":
+            continue
+        if param in base_values:
+            base_value = _coerce_float(base_values[param])
+        else:
+            state = adapter_states.get(param)
+            base_value = state.base_value if state is not None else None
+        if base_value is None or (isinstance(base_value, float) and not np.isfinite(base_value)):
+            continue
+        loc_val = _coerce_float(record.get("loc"))
+        scale_val = _coerce_float(record.get("scale"))
+        loc = base_value if loc_val is None else loc_val
+        scale = max(abs(base_value) * 0.1, 1e-6) if scale_val is None else scale_val
+        normal_lookup[param] = {"loc": float(loc), "scale": max(float(scale), 1e-9)}
+
+    correlated_params: List[str] = []
+    corr_chol = None
+    if corr_df is not None and not corr_df.empty:
+        candidates = [p for p in corr_df.index.tolist() if p in normal_lookup]
+        if len(candidates) >= 3:
+            aligned = corr_df.loc[candidates, candidates].astype(float)
+            try:
+                corr_chol = np.linalg.cholesky(aligned.values)
+                correlated_params = candidates
+            except np.linalg.LinAlgError:
+                corr_chol = None
+
     for _ in range(int(iterations)):
         _reset_global_inputs(table.data, base_values)
+        correlated_samples: Dict[str, float] = {}
+        if corr_chol is not None and correlated_params:
+            z = rng.standard_normal(len(correlated_params))
+            shocks = corr_chol @ z
+            for idx, param in enumerate(correlated_params):
+                loc = normal_lookup[param]["loc"]
+                scale = normal_lookup[param]["scale"]
+                correlated_samples[param] = loc + scale * float(shocks[idx])
         for record in config_records:
             param = record["Parameter"]
             spec = MONTE_CARLO_DISTRIBUTIONS.get(record["Distribution"])
             if spec is None:
+                continue
+            if param in correlated_samples:
+                sampled = correlated_samples[param]
+                if param in base_values:
+                    table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
+                else:
+                    adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+                    state = adapter_states.get(param)
+                    if adapter is not None and state is not None:
+                        adapter.apply(model.input_page, sampled, state)
                 continue
             if param in base_values:
                 base_value = _coerce_float(base_values[param])
@@ -502,6 +553,8 @@ def monte_carlo_simulation(
                 "Project NPV": metrics.get("Project NPV"),
                 "Project IRR": metrics.get("Project IRR"),
                 "Equity IRR": metrics.get("Equity IRR"),
+                "DSCR (min)": metrics.get("DSCR (min)"),
+                "Payback Period (years)": metrics.get("Payback Period (years)"),
             }
         )
 
@@ -516,6 +569,31 @@ def monte_carlo_simulation(
         if adapter is not None:
             adapter.apply(model.input_page, state.base_value, state)
     return pd.DataFrame(results)
+
+
+def _normalise_correlation_matrix(
+    matrix: pd.DataFrame | Mapping[str, Mapping[str, float]] | None,
+) -> pd.DataFrame | None:
+    if matrix is None:
+        return None
+    if isinstance(matrix, pd.DataFrame):
+        corr = matrix.copy()
+    else:
+        corr = pd.DataFrame(matrix)
+    if corr.empty:
+        return None
+    corr.index = corr.index.astype(str)
+    corr.columns = corr.columns.astype(str)
+    common = [c for c in corr.columns if c in corr.index]
+    if not common:
+        return None
+    corr = corr.loc[common, common]
+    corr = corr.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    corr = (corr + corr.T) / 2.0
+    np.fill_diagonal(corr.values, 1.0)
+    corr = corr.clip(lower=-0.95, upper=0.95)
+    np.fill_diagonal(corr.values, 1.0)
+    return corr
 
 
 def _normalise_parameter_configs(

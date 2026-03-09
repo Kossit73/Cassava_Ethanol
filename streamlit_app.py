@@ -304,6 +304,7 @@ MC_PARAMETER_STATE_KEY = "mc_parameter_config"
 MC_SELECTED_PARAMETER_STATE_KEY = "mc_selected_parameters"
 MC_ITERATION_STATE_KEY = "mc_iteration_setting"
 MC_SEED_STATE_KEY = "mc_random_seed"
+MC_CORRELATION_STATE_KEY = "mc_correlation_matrix"
 
 SCENARIO_DEFINITIONS_KEY = "scenario_definitions"
 SCENARIO_SELECTION_STATE_KEY = "scenario_builder_selection"
@@ -429,6 +430,8 @@ def _ensure_monte_carlo_state() -> None:
         st.session_state[MC_ITERATION_STATE_KEY] = DEFAULT_MONTE_CARLO_ITERATIONS
     if MC_SEED_STATE_KEY not in st.session_state:
         st.session_state[MC_SEED_STATE_KEY] = DEFAULT_MONTE_CARLO_SEED
+    if MC_CORRELATION_STATE_KEY not in st.session_state:
+        st.session_state[MC_CORRELATION_STATE_KEY] = pd.DataFrame()
 
 
 def _monte_carlo_parameters() -> pd.DataFrame:
@@ -436,7 +439,12 @@ def _monte_carlo_parameters() -> pd.DataFrame:
     return st.session_state[MC_PARAMETER_STATE_KEY].copy()
 
 
-def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> str:
+def _monte_carlo_signature(
+    config: pd.DataFrame,
+    iterations: int,
+    seed: int,
+    correlation_matrix: pd.DataFrame | None = None,
+) -> str:
     filtered = (
         config.replace("", np.nan)
         .dropna(subset=["Parameter", "Distribution"], how="any")
@@ -447,6 +455,11 @@ def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> 
         "iterations": int(iterations),
         "seed": int(seed),
         "config": ordered.to_dict(orient="records"),
+        "correlation": (
+            correlation_matrix.round(6).fillna(0.0).to_dict(orient="index")
+            if isinstance(correlation_matrix, pd.DataFrame) and not correlation_matrix.empty
+            else {}
+        ),
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -3254,6 +3267,7 @@ Interpretation: scenario analysis compares strategic configurations and downside
 
 ## 13. Monte Carlo Simulation
 Interpretation: Monte Carlo outputs characterize distributional risk and confidence intervals for key investment outcomes.
+The table reports P10/P50/P90 for NPV, IRR, DSCR(min), and payback where simulation outputs are available, plus probability of DSCR covenant breach and probability of NPV < 0.
 {_to_markdown_table(monte_carlo_df, rows=40)}
 
 ## 14. Risk and Mitigation
@@ -3320,8 +3334,30 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         cached_entry = cache.get(model.scenario, {})
         mc_results = cached_entry.get("results")
         if isinstance(mc_results, pd.DataFrame) and not mc_results.empty:
-            monte_carlo_summary = mc_results.describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).T.reset_index()
-            monte_carlo_summary = monte_carlo_summary.rename(columns={"index": "Metric"})
+            metrics_of_interest = [
+                col
+                for col in ["Project NPV", "Project IRR", "DSCR (min)", "Payback Period (years)"]
+                if col in mc_results.columns
+            ]
+            if metrics_of_interest:
+                percentile_table = (
+                    mc_results[metrics_of_interest]
+                    .quantile([0.1, 0.5, 0.9])
+                    .T.reset_index()
+                    .rename(columns={"index": "Metric", 0.1: "P10", 0.5: "P50", 0.9: "P90"})
+                )
+            else:
+                percentile_table = pd.DataFrame()
+
+            prob_rows: List[Dict[str, object]] = []
+            if "DSCR (min)" in mc_results.columns:
+                dscr_prob = float((pd.to_numeric(mc_results["DSCR (min)"], errors="coerce") < 1.0).mean())
+                prob_rows.append({"Metric": "Probability DSCR covenant breach (<1.0x)", "P10": np.nan, "P50": dscr_prob, "P90": np.nan})
+            if "Project NPV" in mc_results.columns:
+                npv_prob = float((pd.to_numeric(mc_results["Project NPV"], errors="coerce") < 0.0).mean())
+                prob_rows.append({"Metric": "Probability Project NPV < 0", "P10": np.nan, "P50": npv_prob, "P90": np.nan})
+
+            monte_carlo_summary = pd.concat([percentile_table, pd.DataFrame(prob_rows)], ignore_index=True)
     except Exception:
         monte_carlo_summary = pd.DataFrame()
     monte_carlo_summary = _round_nearest_100(monte_carlo_summary)
@@ -4022,7 +4058,32 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
                 hide_index=True,
             )
 
-    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed))
+    st.subheader("Parameter Correlation Matrix")
+    st.caption("Optional: apply a correlation matrix to 3–5 core Monte Carlo drivers (Normal distribution parameters only).")
+    corr_candidates = [
+        p
+        for p in st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+        if p in edited_params.loc[edited_params["Distribution"].astype(str) == "Normal", "Parameter"].astype(str).tolist()
+    ][:5]
+    correlation_df = pd.DataFrame()
+    if len(corr_candidates) >= 3:
+        current_corr = st.session_state.get(MC_CORRELATION_STATE_KEY, pd.DataFrame())
+        if isinstance(current_corr, pd.DataFrame) and not current_corr.empty:
+            corr_base = current_corr.reindex(index=corr_candidates, columns=corr_candidates).fillna(0.0)
+        else:
+            corr_base = pd.DataFrame(np.eye(len(corr_candidates)), index=corr_candidates, columns=corr_candidates)
+        np.fill_diagonal(corr_base.values, 1.0)
+        corr_edited = st.data_editor(corr_base, use_container_width=True, key="mc_correlation_editor")
+        correlation_df = pd.DataFrame(corr_edited, index=corr_candidates, columns=corr_candidates).astype(float)
+        correlation_df = (correlation_df + correlation_df.T) / 2.0
+        np.fill_diagonal(correlation_df.values, 1.0)
+        correlation_df = correlation_df.clip(lower=-0.95, upper=0.95)
+        np.fill_diagonal(correlation_df.values, 1.0)
+    else:
+        st.info("Select at least 3 Normal-distribution parameters to enable correlation matrix input.")
+    st.session_state[MC_CORRELATION_STATE_KEY] = correlation_df
+
+    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed), correlation_df)
 
     cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(MC_CACHE_KEY, {})
     cached_entry = cache.get(current_scenario)
@@ -4049,6 +4110,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
                 parameter_configs=edited_params,
                 iterations=int(iterations),
                 random_seed=int(seed),
+                correlation_matrix=correlation_df,
             )
         cache[current_scenario] = {
             "version": current_version,
