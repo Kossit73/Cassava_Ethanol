@@ -3244,6 +3244,72 @@ def _metric_commentary(metrics: Dict[str, object]) -> str:
     )
 
 
+
+def _format_metric_value(metric: str, value: object) -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.notna(numeric):
+        if "IRR" in metric or "Rate" in metric or "Share" in metric:
+            return _format_rate(float(numeric))
+        if "Month" in metric and "Payback Month" not in metric and "Planning Start Month" not in metric:
+            return f"{float(numeric):,.2f}"
+        if any(k in metric for k in ["NPV", "CF", "Funding", "Debt", "Value", "Investment", "Revenue", "EBITDA", "Cash", "Service"]):
+            return _format_currency(float(numeric))
+        return f"{float(numeric):,.4f}"
+    return str(value)
+
+
+def _key_metrics_detailed_writeup(metrics: Dict[str, object]) -> str:
+    """Return expanded per-metric narrative for business-plan reporting."""
+
+    explanations = {
+        "Project NPV": "Net present value indicates aggregate value creation versus discount-rate-adjusted capital cost; positive values support economic viability.",
+        "Project IRR": "Project IRR reflects the unlevered return profile and should be read against hurdle rates and sector benchmarks.",
+        "Equity IRR": "Equity IRR measures sponsor return after financing effects and is the primary indicator for equity attractiveness.",
+        "Investor IRR": "Investor IRR isolates the investor tranche return and helps evaluate participation terms.",
+        "Owner IRR": "Owner IRR indicates return to founder/sponsor capital and helps align governance incentives.",
+        "DSCR (min)": "Minimum DSCR is the tightest debt-service month; sustained values below covenant trigger levels indicate refinance or restructuring risk.",
+        "DSCR (avg)": "Average DSCR indicates typical debt-service headroom across the projection horizon.",
+        "Debt Service Coverage Breach Months": "Counts months below DSCR covenant threshold and indicates monitoring intensity required by lenders.",
+        "LLCR": "LLCR compares present value of CFADS to outstanding debt and supports debt sizing discussions.",
+        "PLCR": "PLCR extends LLCR perspective over project life and captures long-term serviceability.",
+        "Minimum Monthly Cash Balance": "Minimum cash balance is a liquidity floor used to assess operating resilience under stress.",
+        "Months of Liquidity Cover (min)": "Liquidity cover indicates how long obligations can be met under constrained inflows.",
+        "Peak Funding Requirement": "Peak funding requirement captures the maximum external funding needed during execution and ramp-up.",
+        "Interest Coverage (avg annual)": "Interest coverage measures EBITDA capacity to service interest and is a core credit-quality signal.",
+        "Net Debt / EBITDA (avg annual)": "Net Debt/EBITDA indicates leverage intensity and refinancing capacity over time.",
+        "Risk Score": "Composite risk score summarises downside intensity from the modeled risk register and commercial stresses.",
+        "Assumption Quality Checks Passed": "Assumption quality status confirms validation/normalization gates were satisfied before calculation.",
+        "Bankability Scorecard Overall": "Overall bankability score compresses return, leverage, liquidity, contract, risk, and governance signals into one committee-friendly metric.",
+    }
+
+    ordered = [
+        "Project NPV", "Project IRR", "Equity IRR", "Investor IRR", "Owner IRR",
+        "Initial Project Outlay", "Initial Loan Draw", "Initial Equity Investment",
+        "Cumulative FCF", "Cumulative Equity CF", "Final Month Revenue", "Final Month EBITDA", "Final Month Equity CF",
+        "Payback Period (months)", "Payback Month",
+        "DSCR (min)", "DSCR (avg)", "Debt Service Coverage Breach Months", "LLCR", "PLCR", "PV CFADS",
+        "Outstanding Debt (opening)", "Terminal Value (post-tax)", "PV Terminal Value",
+        "Principal Service (total)", "Interest Service (total)",
+        "Minimum Monthly Cash Balance", "Months of Liquidity Cover (min)", "Peak Funding Requirement", "Peak Funding Month",
+        "Interest Coverage (avg annual)", "Interest Coverage (min annual)", "Net Debt / EBITDA (avg annual)", "Net Debt / EBITDA (max annual)",
+        "Working Capital Days (DSO avg)", "Working Capital Days (DIO avg)", "Working Capital Days (DPO avg)", "Working Capital Days (CCC avg)",
+        "Corporate Tax Rate", "Investor Share", "Owner Share", "Terminal Growth Rate", "Capital Gains Tax Rate", "Discount Rate",
+        "Total Initial Investment", "Initial Loan Funding", "Scenario", "Planning Start Month", "Assumption Quality Checks Passed", "Risk Score",
+        "Bankability Scorecard Overall",
+    ]
+
+    lines: List[str] = []
+    for key in ordered:
+        if key not in metrics:
+            continue
+        value_text = _format_metric_value(key, metrics.get(key))
+        meaning = explanations.get(key, "This metric provides supplemental context for valuation, risk, and financing decisions in the integrated model.")
+        lines.append(f"- **{key}** = `{value_text}`. {meaning} [Source ID: METRIC::{key}]")
+
+    if not lines:
+        return "_No key metrics available for detailed write-up._"
+    return "\n".join(lines)
+
 def _compose_business_plan(
     results: Dict[str, object],
     insights: str,
@@ -3304,6 +3370,9 @@ The current investment thesis is supported by diversified revenue (fuel ethanol 
 ### Key Metrics Dashboard
 Interpretation: this dashboard is the decision core for equity return quality, debt-service resilience, and valuation headroom. [Source ID: TABLE::Key Metrics Dashboard]
 {_to_markdown_table(metric_table, rows=50)}
+
+### Detailed Metric-by-Metric Interpretation
+{_key_metrics_detailed_writeup(metrics)}
 
 ## 3. Market, Commercial Strategy, and Operations
 ### 3.1 Commercial Positioning
