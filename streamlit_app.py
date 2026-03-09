@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import re
@@ -3221,10 +3222,16 @@ def _compose_business_plan(
     cash_plot_df = cashflow_annual[cash_plot_cols].copy() if cash_plot_cols else pd.DataFrame()
     balance_plot_df = balance_annual[balance_plot_cols].copy() if balance_plot_cols else pd.DataFrame()
 
-    scenario = metrics.get("Scenario", "FARM_ONLY")
-    dscr_min = _format_rate(metrics.get("DSCR (min)"))
-    llcr = _format_rate(metrics.get("LLCR"))
-    plcr = _format_rate(metrics.get("PLCR"))
+    snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+    snapshot_sig = snapshot.signature() if isinstance(snapshot, InputLandingPage) else "unknown"
+    model_version = _current_model_version()
+    scenario = str(metrics.get("Scenario", "FARM_ONLY"))
+    scenario_id = f"{scenario}:{snapshot_sig[:10]}"
+    model_hash = hashlib.sha1(f"v{model_version}|{scenario}|{snapshot_sig}".encode("utf-8")).hexdigest()[:16]
+    data_ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    dscr_min_raw = pd.to_numeric(metrics.get("DSCR (min)"), errors="coerce")
+    dscr_trigger_breach = bool(pd.notna(dscr_min_raw) and dscr_min_raw < 1.2)
 
     sensitivity_df = (frames or {}).get("Sensitivity Analyses", pd.DataFrame())
     scenario_df = (frames or {}).get("Scenario / IFs Analysis", pd.DataFrame())
@@ -3233,35 +3240,35 @@ def _compose_business_plan(
     return f"""# Cassava Bioethanol Comprehensive Business Plan
 
 ## 1. Executive Summary
-This plan is generated from the integrated cassava-ethanol financial model and RAG evidence base for scenario **{scenario}**.
-The current investment thesis is supported by diversified revenue (fuel ethanol + animal feed), integrated debt-service diagnostics, and projection-consistent forecasting.
+This plan is generated from the integrated cassava-ethanol financial model and RAG evidence base for scenario **{scenario}**. [Source ID: METRIC::Scenario]
+The current investment thesis is supported by diversified revenue (fuel ethanol + animal feed), integrated debt-service diagnostics, and projection-consistent forecasting. [Source ID: TABLE::Revenue Annual + METRIC::DSCR (min)]
 
 ## 2. Investment Highlights and Key Metrics
 ### Professional Interpretation
 {_metric_commentary(metrics)}
 
 ### Key Metrics Dashboard
-Interpretation: this dashboard is the decision core for equity return quality, debt-service resilience, and valuation headroom.
+Interpretation: this dashboard is the decision core for equity return quality, debt-service resilience, and valuation headroom. [Source ID: TABLE::Key Metrics Dashboard]
 {_to_markdown_table(metric_table, rows=50)}
 
 ## 3. Market, Commercial Strategy, and Operations
 ### 3.1 Commercial Positioning
-The model embeds offtake floor/ceiling assumptions, take-or-pay coverage, and contracted feedstock mechanisms to reflect realistic contract economics.
+The model embeds offtake floor/ceiling assumptions, take-or-pay coverage, and contracted feedstock mechanisms to reflect realistic contract economics. [Source ID: TABLE::Input Assumptions]
 
 ### 3.2 Operational Configuration
-Production planning, capex, staffing, opex, and working-capital assumptions are integrated into three-statement outputs and debt metrics.
+Production planning, capex, staffing, opex, and working-capital assumptions are integrated into three-statement outputs and debt metrics. [Source ID: TABLE::Production Annual + TABLE::Financial Performance]
 
 ## 4. Annual Financial Statements (Reproduced)
 ### 4.1 Annual Income Statement
-Interpretation: this section explains top-line growth, operating profitability, and net earnings conversion quality.
+Interpretation: this section explains top-line growth, operating profitability, and net earnings conversion quality. [Source ID: TABLE::Financial Performance]
 {_to_markdown_table(income_annual, rows=25)}
 
 ### 4.2 Annual Cash Flow Statement
-Interpretation: this section tracks cash generation, reinvestment intensity, and financing dependence over time.
+Interpretation: this section tracks cash generation, reinvestment intensity, and financing dependence over time. [Source ID: TABLE::Cash Flow Statement]
 {_to_markdown_table(cashflow_annual, rows=25)}
 
 ### 4.3 Annual Balance Sheet
-Interpretation: this section highlights capital structure strength, leverage trajectory, and net asset accumulation.
+Interpretation: this section highlights capital structure strength, leverage trajectory, and net asset accumulation. [Source ID: TABLE::Financial Position]
 {_to_markdown_table(balance_annual, rows=25)}
 
 ## 5. Schedules and Forecasts
@@ -3272,11 +3279,11 @@ Interpretation: this section highlights capital structure strength, leverage tra
 {_to_markdown_table(revenue_annual, rows=25)}
 
 ### 5.3 Forecast (Projection-Horizon Aligned)
-Forecast horizon: **{years} year(s)**.
+Forecast horizon: **{years} year(s)**. [Source ID: TABLE::Forecast]
 {_to_markdown_table(forecast_df, rows=years + 2)}
 
 ## 6. Graphs and Plot Data (Reproduced for Download Pack)
-The following data tables are the source series for the charts included in the download package.
+The following data tables are the source series for the charts included in the download package. [Source ID: TABLE::Plot_Income + TABLE::Plot_Cashflow + TABLE::Plot_Balance]
 
 ### 6.1 Income Statement Plot Data
 {_to_markdown_table(income_plot_df, rows=25)}
@@ -3291,43 +3298,42 @@ The following data tables are the source series for the charts included in the d
 {_to_markdown_table(forecast_df, rows=years + 2)}
 
 ## 7. Lender/Covenant Narrative
-Minimum DSCR is **{dscr_min}** with LLCR **{llcr}** and PLCR **{plcr}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions.
+Minimum DSCR is **{_format_rate(metrics.get('DSCR (min)'))}** with LLCR **{_format_rate(metrics.get('LLCR'))}** and PLCR **{_format_rate(metrics.get('PLCR'))}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions. [Source ID: METRIC::DSCR (min) + METRIC::LLCR + METRIC::PLCR]
 
-## 8. Financial Performance
-Interpretation: financial performance combines revenue scale-up, EBITDA quality, and bottom-line durability.
-{_to_markdown_table(income_annual, rows=25)}
+## 8. Sensitivity Analyses
+Interpretation: this section quantifies value sensitivity to key parameters and identifies principal downside drivers. [Source ID: TABLE::Sensitivity Analyses]
+{_to_markdown_table(sensitivity_df, rows=30)}
 
-## 9. Financial Position
-Interpretation: financial position demonstrates solvency, leverage profile, and balance-sheet risk absorption capacity.
-{_to_markdown_table(balance_annual, rows=25)}
+## 9. Scenario / IFs Analysis
+Interpretation: this table compares strategy outcomes across Base/Downside/Severe Downside/Upside to support credit-committee review. [Source ID: TABLE::Scenario / IFs Analysis]
+{_to_markdown_table(scenario_df, rows=20)}
 
-## 10. Cash Flow Statement
-Interpretation: cash flow analysis validates debt serviceability and reinvestment capacity under operating assumptions.
-{_to_markdown_table(cashflow_annual, rows=25)}
+## 10. Monte Carlo Simulation
+The table reports P10/P50/P90 for NPV, IRR, DSCR(min), and payback where simulation outputs are available, plus probability of DSCR covenant breach and probability of NPV < 0. [Source ID: TABLE::Monte Carlo Simulation]
+{_to_markdown_table(monte_carlo_df, rows=20)}
 
-## 11. Sensitivity Analyses
-Interpretation: sensitivity analyses quantify first-order valuation and return responses to key assumption shocks.
-{_to_markdown_table(sensitivity_df, rows=40)}
+## 11. Management Action Triggers
+- If DSCR < 1.2 for two consecutive quarters: freeze discretionary capex, initiate opex containment, and activate lender engagement plan. [Source ID: METRIC::DSCR (min)]
+- If monthly cash balance falls below minimum policy level: trigger 13-week cash-control mode and tighten working-capital collection cadence. [Source ID: METRIC::Minimum Monthly Cash Balance]
+- If refinancing economics deteriorate (fees + break costs exceed plan): suspend refinance and run downside covenant restatement. [Source ID: METRIC::Refinancing Costs]
+- Trigger status for current run: **{'Triggered' if dscr_trigger_breach else 'Not Triggered'}**. [Source ID: METRIC::DSCR (min)]
 
-## 12. Scenario / IFs Analysis
-Interpretation: scenario analysis compares strategic configurations and downside/upside outcomes across selected cases.
-{_to_markdown_table(scenario_df, rows=40)}
+## 12. RAG/AI Insights
+{(insights or 'No additional AI narrative provided.')} [Source ID: RAG::Retrieved Chunks]
 
-## 13. Monte Carlo Simulation
-Interpretation: Monte Carlo outputs characterize distributional risk and confidence intervals for key investment outcomes.
-The table reports P10/P50/P90 for NPV, IRR, DSCR(min), and payback where simulation outputs are available, plus probability of DSCR covenant breach and probability of NPV < 0.
-{_to_markdown_table(monte_carlo_df, rows=40)}
+## 13. Appendix
+### 13.1 Input Assumptions Table
+Refer to Appendix sheet/table: **Input Assumptions**. [Source ID: TABLE::Input Assumptions]
 
-## 14. Risk and Mitigation
-Risk register impacts, commercial safeguards, and scenario analytics are embedded to produce risk-adjusted performance views and improve investor decision confidence.
+### 13.2 Run Metadata
+- Data timestamp (UTC): **{data_ts}**. [Source ID: META::Timestamp]
+- Scenario ID: **{scenario_id}**. [Source ID: META::Scenario ID]
+- Model version hash: **{model_hash}**. [Source ID: META::Model Version Hash]
+- Input snapshot signature: **{snapshot_sig[:16]}...**. [Source ID: META::Input Signature]
 
-## 15. AI/RAG Supporting Insights
-{insights or '_No additional RAG insights available. Run Document Indexing and Run the AI._'}
-
-## 16. Conclusion and Funding Case
-The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios.
+## 14. Conclusion and Next Steps
+The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios. [Source ID: TABLE::Key Metrics Dashboard + TABLE::Scenario / IFs Analysis]
 """
-
 
 
 def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
@@ -3345,6 +3351,7 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         metrics_df = _round_nearest_100(metrics_df)
 
     assumption_audit = results.get("assumption_quality_audit") if isinstance(results, dict) else None
+    snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
     if isinstance(assumption_audit, dict):
         audit_rows = [
             {"Check": "Assumption quality checks", "Status": "Passed" if assumption_audit.get("passed") else "Failed"},
@@ -3424,6 +3431,22 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         monte_carlo_summary = pd.DataFrame()
     monte_carlo_summary = _round_nearest_100(monte_carlo_summary)
 
+    input_assumptions_df = pd.DataFrame()
+    if isinstance(snapshot, InputLandingPage):
+        input_assumptions_df = snapshot.global_inputs.model_frame.copy()
+        if not input_assumptions_df.empty:
+            input_assumptions_df = input_assumptions_df.rename(columns={"Parameter": "Assumption"})
+
+    scenario_name = str(metrics.get("Scenario", model.scenario))
+    snapshot_sig = snapshot.signature() if isinstance(snapshot, InputLandingPage) else "unknown"
+    model_hash = hashlib.sha1(f"v{_current_model_version()}|{scenario_name}|{snapshot_sig}".encode("utf-8")).hexdigest()[:16]
+    appendix_meta_df = pd.DataFrame([
+        {"Field": "Data Timestamp (UTC)", "Value": datetime.utcnow().isoformat(timespec="seconds") + "Z"},
+        {"Field": "Scenario ID", "Value": f"{scenario_name}:{snapshot_sig[:10]}"},
+        {"Field": "Model Version Hash", "Value": model_hash},
+        {"Field": "Input Snapshot Signature", "Value": snapshot_sig},
+    ])
+
     return {
         "Key Metrics": metrics_df,
         "Key Metrics Dashboard": metrics_df,
@@ -3438,6 +3461,8 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         "Scenario / IFs Analysis": scenario_df,
         "Monte Carlo Simulation": monte_carlo_summary,
         "Assumption Quality Audit": assumption_audit_df,
+        "Input Assumptions": input_assumptions_df,
+        "Appendix Metadata": appendix_meta_df,
     }
 
 
