@@ -1304,6 +1304,68 @@ def compute_key_metrics(
     dscr_series = dscr_series.replace([np.inf, -np.inf], np.nan)
 
     debt_balance = pd.to_numeric(financials.balance_monthly.get("Debt"), errors="coerce").fillna(0.0)
+    cash_balance = pd.to_numeric(financials.balance_monthly.get("Cash"), errors="coerce").fillna(0.0)
+
+    # Liquidity diagnostics.
+    operating_burn = pd.to_numeric(financials.income_monthly.get("COGS"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + pd.to_numeric(financials.income_monthly.get("Staff Costs"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + pd.to_numeric(financials.income_monthly.get("Other Opex"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + interest
+    with np.errstate(divide="ignore", invalid="ignore"):
+        liquidity_cover_months = cash_balance / operating_burn.replace(0.0, np.nan)
+    liquidity_cover_months = liquidity_cover_months.replace([np.inf, -np.inf], np.nan)
+
+    min_cash_balance = float(cash_balance.min()) if not cash_balance.empty else 0.0
+    min_liquidity_cover = float(liquidity_cover_months.min()) if not liquidity_cover_months.dropna().empty else float("nan")
+
+    peak_funding_requirement = max(0.0, float(-cash_balance.min())) if not cash_balance.empty else 0.0
+    peak_funding_month = None
+    if not cash_balance.empty:
+        peak_idx = cash_balance.idxmin()
+        if isinstance(peak_idx, pd.Timestamp):
+            peak_funding_month = peak_idx.strftime("%Y-%m")
+
+    # Annual leverage/coverage diagnostics.
+    income_annual = financials.income_annual if isinstance(financials.income_annual, pd.DataFrame) else pd.DataFrame()
+    balance_annual = financials.balance_annual if isinstance(financials.balance_annual, pd.DataFrame) else pd.DataFrame()
+
+    if not income_annual.empty:
+        ebitda_annual = pd.to_numeric(income_annual.get("EBITDA"), errors="coerce").fillna(0.0)
+        interest_annual = pd.to_numeric(income_annual.get("Interest"), errors="coerce").fillna(0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            interest_coverage_annual = ebitda_annual / interest_annual.replace(0.0, np.nan)
+        interest_coverage_annual = interest_coverage_annual.replace([np.inf, -np.inf], np.nan)
+    else:
+        interest_coverage_annual = pd.Series(dtype=float)
+
+    if not balance_annual.empty and not income_annual.empty:
+        debt_annual = pd.to_numeric(balance_annual.get("Debt"), errors="coerce").fillna(0.0)
+        cash_annual = pd.to_numeric(balance_annual.get("Cash"), errors="coerce").fillna(0.0)
+        net_debt_annual = debt_annual - cash_annual
+        ebitda_annual = pd.to_numeric(income_annual.get("EBITDA"), errors="coerce").fillna(0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            net_debt_to_ebitda_annual = net_debt_annual / ebitda_annual.replace(0.0, np.nan)
+        net_debt_to_ebitda_annual = net_debt_to_ebitda_annual.replace([np.inf, -np.inf], np.nan)
+    else:
+        net_debt_to_ebitda_annual = pd.Series(dtype=float)
+
+    # Working capital trend (proxy days) from modeled statements.
+    revenue_monthly = pd.to_numeric(financials.income_monthly.get("Revenue"), errors="coerce").fillna(0.0)
+    cogs_monthly = pd.to_numeric(financials.income_monthly.get("COGS"), errors="coerce").fillna(0.0)
+    ar_monthly = pd.to_numeric(financials.balance_monthly.get("Accounts Receivable & Other Assets"), errors="coerce").fillna(0.0)
+    inventory_monthly = pd.to_numeric(financials.balance_monthly.get("Inventory"), errors="coerce").fillna(0.0)
+    payables_monthly = pd.to_numeric(financials.balance_monthly.get("Accounts Payable"), errors="coerce").fillna(0.0) + pd.to_numeric(
+        financials.balance_monthly.get("Other Payables"), errors="coerce"
+    ).fillna(0.0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dso_series = 30.0 * ar_monthly / revenue_monthly.replace(0.0, np.nan)
+        dio_series = 30.0 * inventory_monthly / cogs_monthly.replace(0.0, np.nan)
+        dpo_series = 30.0 * payables_monthly / cogs_monthly.replace(0.0, np.nan)
+    dso_series = dso_series.replace([np.inf, -np.inf], np.nan)
+    dio_series = dio_series.replace([np.inf, -np.inf], np.nan)
+    dpo_series = dpo_series.replace([np.inf, -np.inf], np.nan)
+    ccc_series = dso_series + dio_series - dpo_series
     monthly_discount = max(-0.999999, float(discount_rate) / 12.0)
     discount_factors = pd.Series(
         [(1.0 / ((1.0 + monthly_discount) ** (i + 1))) for i in range(len(cfads))],
@@ -1368,6 +1430,18 @@ def compute_key_metrics(
         "PV Terminal Value": pv_terminal_value,
         "Principal Service (total)": float(principal.sum()),
         "Interest Service (total)": float(interest.sum()),
+        "Minimum Monthly Cash Balance": min_cash_balance,
+        "Months of Liquidity Cover (min)": min_liquidity_cover,
+        "Peak Funding Requirement": peak_funding_requirement,
+        "Peak Funding Month": peak_funding_month,
+        "Interest Coverage (avg annual)": float(interest_coverage_annual.mean()) if not interest_coverage_annual.dropna().empty else float("nan"),
+        "Interest Coverage (min annual)": float(interest_coverage_annual.min()) if not interest_coverage_annual.dropna().empty else float("nan"),
+        "Net Debt / EBITDA (avg annual)": float(net_debt_to_ebitda_annual.mean()) if not net_debt_to_ebitda_annual.dropna().empty else float("nan"),
+        "Net Debt / EBITDA (max annual)": float(net_debt_to_ebitda_annual.max()) if not net_debt_to_ebitda_annual.dropna().empty else float("nan"),
+        "Working Capital Days (DSO avg)": float(dso_series.mean()) if not dso_series.dropna().empty else float("nan"),
+        "Working Capital Days (DIO avg)": float(dio_series.mean()) if not dio_series.dropna().empty else float("nan"),
+        "Working Capital Days (DPO avg)": float(dpo_series.mean()) if not dpo_series.dropna().empty else float("nan"),
+        "Working Capital Days (CCC avg)": float(ccc_series.mean()) if not ccc_series.dropna().empty else float("nan"),
     }
     return metrics
 

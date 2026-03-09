@@ -51,6 +51,11 @@ def test_risk_and_commercial_metrics_are_exposed() -> None:
     assert "Commercial Cost Multiplier" in metrics
     assert "Risk Volume Stress (EV)" in metrics
     assert "Risk Schedule Stress (P90)" in metrics
+    assert "Minimum Monthly Cash Balance" in metrics
+    assert "Peak Funding Requirement" in metrics
+    assert "Interest Coverage (avg annual)" in metrics
+    assert "Net Debt / EBITDA (avg annual)" in metrics
+    assert "Working Capital Days (CCC avg)" in metrics
     assert 0 <= float(metrics["Risk Score"]) <= 1
 
 
