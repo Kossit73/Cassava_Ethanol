@@ -224,14 +224,25 @@ class CassavaBioethanolModel:
                     f"{page.projection.start_year}-{page.projection.end_year}"
                 )
 
-        def _validate_month_column(df: pd.DataFrame, table_name: str, column: str) -> None:
+        def _validate_month_column(
+            df: pd.DataFrame,
+            table_name: str,
+            column: str,
+            *,
+            enforce_projection_start: bool = True,
+        ) -> None:
             if df is None or df.empty or column not in df.columns:
                 return
             months = pd.to_datetime(df[column].astype(str), errors="coerce")
             if months.isna().any():
                 raise ValueError(f"{table_name}: invalid month values detected in '{column}'")
             periods = months.dt.to_period("M")
-            if ((periods < projection_start) | (periods > projection_end)).any():
+            if (periods > projection_end).any():
+                raise ValueError(
+                    f"{table_name}: month values in '{column}' must fall within projection window "
+                    f"{projection_start.strftime('%Y-%m')} to {projection_end.strftime('%Y-%m')}"
+                )
+            if enforce_projection_start and (periods < projection_start).any():
                 raise ValueError(
                     f"{table_name}: month values in '{column}' must fall within projection window "
                     f"{projection_start.strftime('%Y-%m')} to {projection_end.strftime('%Y-%m')}"
@@ -245,7 +256,12 @@ class CassavaBioethanolModel:
         _validate_month_column(page.other_opex_monthly.model_frame, "Other Opex Monthly", "Month")
         _validate_month_column(page.accounts_receivable.model_frame, "Accounts Receivable", "Effective Month")
         _validate_month_column(page.inventory_payable.model_frame, "Inventory/Payable", "Effective Month")
-        _validate_month_column(page.loan_schedule.model_frame, "Loan Schedule", "Start Month")
+        _validate_month_column(
+            page.loan_schedule.model_frame,
+            "Loan Schedule",
+            "Start Month",
+            enforce_projection_start=False,
+        )
 
         # Financing consistency checks.
         init_df = page.initial_investment.model_frame

@@ -104,3 +104,19 @@ def test_validation_rejects_loan_start_outside_projection() -> None:
     model = CassavaBioethanolModel(copy.deepcopy(page))
     with pytest.raises(ValueError, match="projection window"):
         model.build("FARM_ONLY")
+
+
+def test_validation_allows_loan_start_before_projection_start() -> None:
+    page = default_input_page()
+    page.projection.start_year = 2025
+    page.projection.end_year = 2034
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    loan = page.loan_schedule.data.copy()
+    loan.loc[:, "Start Month"] = "2024-01"
+    page.loan_schedule.set_data(loan, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    assert "metrics" in result
