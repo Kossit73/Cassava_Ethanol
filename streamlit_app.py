@@ -2026,6 +2026,30 @@ def _reset_period_index(df: pd.DataFrame, label: str) -> pd.DataFrame:
         result[label] = pd.to_datetime(result[label]).dt.to_period("M").astype(str)
     return result
 
+
+
+def _safe_bar_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render bar charts with a fallback that avoids hard Altair import failures."""
+    try:
+        st.bar_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Category", "Value"]
+        fig = px.bar(fallback_df, x="Category", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.bar(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", barmode="group", title=title)
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Rendered with Plotly fallback because Streamlit bar_chart backend is unavailable in this environment.")
+
 def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     metrics = results["metrics"]
     revenue = results["revenue"]
@@ -2160,7 +2184,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     if not production_annual.empty:
         chart_data = production_annual.select_dtypes(include=[np.number])
         if not chart_data.empty:
-            st.bar_chart(chart_data)
+            _safe_bar_chart(chart_data, title="Annual Operations & Production")
         else:
             st.info("No numeric production data available for charting.")
     else:
@@ -2198,7 +2222,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         else:
             mix_df = revenue_annual
         if not mix_df.empty:
-            st.bar_chart(mix_df)
+            _safe_bar_chart(mix_df, title="Revenue Mix")
         st.dataframe(revenue_annual.reset_index().rename(columns={"index": "Year"}), use_container_width=True)
     else:
         st.info("Revenue inputs are empty for the current projection.")
@@ -2236,7 +2260,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     st.markdown("### Capital Expenditure & Debt")
     capex_df = model.input_page.initial_investment.model_frame
     if not capex_df.empty:
-        st.bar_chart(capex_df.set_index("Item")["Cost"])
+        _safe_bar_chart(capex_df.set_index("Item")["Cost"], title="Capital Expenditure")
         st.dataframe(capex_df, use_container_width=True)
     debt_chart = loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum")
     if not debt_chart.empty:
