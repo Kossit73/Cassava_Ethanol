@@ -3259,7 +3259,7 @@ def _format_metric_value(metric: str, value: object) -> str:
 
 
 def _key_metrics_detailed_writeup(metrics: Dict[str, object]) -> str:
-    """Return expanded per-metric narrative for business-plan reporting."""
+    """Return expanded per-metric narrative table for business-plan reporting."""
 
     explanations = {
         "Project NPV": "Net present value indicates aggregate value creation versus discount-rate-adjusted capital cost; positive values support economic viability.",
@@ -3298,17 +3298,27 @@ def _key_metrics_detailed_writeup(metrics: Dict[str, object]) -> str:
         "Bankability Scorecard Overall",
     ]
 
-    lines: List[str] = []
-    for key in ordered:
-        if key not in metrics:
-            continue
+    rows: List[Dict[str, object]] = []
+    for idx, key in enumerate([k for k in ordered if k in metrics]):
         value_text = _format_metric_value(key, metrics.get(key))
-        meaning = explanations.get(key, "This metric provides supplemental context for valuation, risk, and financing decisions in the integrated model.")
-        lines.append(f"- **{key}** = `{value_text}`. {meaning} [Source ID: METRIC::{key}]")
+        meaning = explanations.get(
+            key,
+            "This metric provides supplemental context for valuation, risk, and financing decisions in the integrated model.",
+        )
+        rows.append(
+            {
+                "#": idx,
+                "Key metric name": key,
+                "Value": value_text,
+                "Narrative": f"{meaning} [Source ID: METRIC::{key}]",
+            }
+        )
 
-    if not lines:
+    if not rows:
         return "_No key metrics available for detailed write-up._"
-    return "\n".join(lines)
+
+    detailed_df = pd.DataFrame(rows)
+    return _to_markdown_table(detailed_df, rows=200)
 
 
 def _financial_section_detailed_writeup(
