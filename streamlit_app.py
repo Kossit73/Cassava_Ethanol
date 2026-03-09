@@ -3310,6 +3310,84 @@ def _key_metrics_detailed_writeup(metrics: Dict[str, object]) -> str:
         return "_No key metrics available for detailed write-up._"
     return "\n".join(lines)
 
+
+def _financial_section_detailed_writeup(
+    income_annual: pd.DataFrame,
+    cashflow_annual: pd.DataFrame,
+    balance_annual: pd.DataFrame,
+    production_annual: pd.DataFrame,
+    revenue_annual: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    income_plot_df: pd.DataFrame,
+    cash_plot_df: pd.DataFrame,
+    balance_plot_df: pd.DataFrame,
+) -> Dict[str, str]:
+    """Build expanded narrative blocks for business-plan sections 4, 5 and 6."""
+
+    out: Dict[str, str] = {}
+
+    def _num(df: pd.DataFrame, col: str) -> float:
+        if not isinstance(df, pd.DataFrame) or df.empty or col not in df.columns:
+            return float("nan")
+        s = pd.to_numeric(df[col], errors="coerce")
+        return float(s.iloc[-1]) if not s.dropna().empty else float("nan")
+
+    rev_last = _num(income_annual, "Revenue")
+    ebitda_last = _num(income_annual, "EBITDA")
+    ni_last = _num(income_annual, "Net Income")
+    out["income"] = "\n".join([
+        f"- Revenue reaches **{_format_currency(rev_last)}** in the final modeled year, indicating top-line scale at steady-state. [Source ID: TABLE::Financial Performance::Revenue]",
+        f"- EBITDA at **{_format_currency(ebitda_last)}** shows operating earnings before capital structure effects and supports debt capacity assessment. [Source ID: TABLE::Financial Performance::EBITDA]",
+        f"- Net Income of **{_format_currency(ni_last)}** indicates post-interest/post-tax profitability conversion from operations. [Source ID: TABLE::Financial Performance::Net Income]",
+        "- The 2027 negative EBIT/Net Income profile is consistent with pre-ramp fixed charges, followed by a strong step-up from 2028 onward. [Source ID: TABLE::Financial Performance::EBIT + Net Income]",
+    ])
+
+    ocf_last = _num(cashflow_annual, "Operating Cash Flow")
+    fcf_last = _num(cashflow_annual, "Free Cash Flow")
+    fin_last = _num(cashflow_annual, "Financing Cash Flow")
+    out["cash"] = "\n".join([
+        f"- Operating Cash Flow rises to **{_format_currency(ocf_last)}** by the terminal year, evidencing cash conversion quality from earnings. [Source ID: TABLE::Cash Flow Statement::Operating Cash Flow]",
+        f"- Free Cash Flow of **{_format_currency(fcf_last)}** indicates reinvestment-adjusted cash generation available for debt/equity value. [Source ID: TABLE::Cash Flow Statement::Free Cash Flow]",
+        f"- Financing Cash Flow at **{_format_currency(fin_last)}** (negative in steady state) reflects debt service outflows after initial project draw. [Source ID: TABLE::Cash Flow Statement::Financing Cash Flow]",
+        "- 2027 financing inflow aligns with first-year debt draw and establishes the funding bridge into operations. [Source ID: TABLE::Cash Flow Statement::Debt Draws + Debt Service]",
+    ])
+
+    assets_last = _num(balance_annual, "Total Assets")
+    debt_last = _num(balance_annual, "Debt")
+    equity_last = _num(balance_annual, "Equity")
+    out["balance"] = "\n".join([
+        f"- Total Assets expand to **{_format_currency(assets_last)}**, confirming cumulative value build through retained cash generation. [Source ID: TABLE::Financial Position::Total Assets]",
+        f"- Debt declines to **{_format_currency(debt_last)}**, showing amortization and deleveraging progression. [Source ID: TABLE::Financial Position::Debt]",
+        f"- Equity grows to **{_format_currency(equity_last)}**, indicating accumulation of residual value to sponsors. [Source ID: TABLE::Financial Position::Equity]",
+        "- Balance sheet integrity is supported by the parallel movement of Total Assets and Total Liabilities & Equity. [Source ID: TABLE::Financial Position::Total Assets + Total Liabilities & Equity]",
+    ])
+
+    ethanol_last = _num(production_annual, "Ethanol litres")
+    cassava_last = _num(production_annual, "Cassava ton")
+    total_rev_last = _num(revenue_annual, "Total Revenue")
+    out["schedules"] = "\n".join([
+        f"- Production stabilizes at **{cassava_last:,.0f} tons cassava** and **{ethanol_last:,.0f} litres ethanol** annually in steady state. [Source ID: TABLE::Production Annual]",
+        f"- Annual revenue reaches **{_format_currency(total_rev_last)}**, with fuel ethanol and animal-feed streams providing commercial diversification. [Source ID: TABLE::Revenue Annual]",
+        "- Forecast years show continued growth trajectory beyond base horizon, used for strategic extension and valuation narrative. [Source ID: TABLE::Forecast]",
+    ])
+
+    forecast_last = _num(forecast_df, "Forecast Revenue")
+    out["forecast"] = "\n".join([
+        f"- Forecast Revenue scales to **{_format_currency(forecast_last)}** in the final forecast year, supporting terminal outlook assumptions. [Source ID: TABLE::Forecast::Forecast Revenue]",
+        "- Forecast EBITDA trend mirrors revenue, indicating a stable modeled margin structure in out-years. [Source ID: TABLE::Forecast::Forecast EBITDA]",
+        "- Assumed Growth should be stress-tested to ensure downside conservatism in investment committee packs. [Source ID: TABLE::Forecast::Assumed Growth]",
+    ])
+
+    out["plots"] = "\n".join([
+        "- Income plot data visualizes ramp-to-steady-state transition in revenue, EBITDA and net income. [Source ID: TABLE::Plot_Income]",
+        "- Cash flow plot data shows operating cash dominance and financing normalization after initial draw period. [Source ID: TABLE::Plot_Cashflow]",
+        "- Balance plot data confirms assets expansion, debt amortization and equity build-up across the modeled horizon. [Source ID: TABLE::Plot_Balance]",
+        "- Forecast plot data supports communicated out-year strategic case assumptions used in lender/equity discussions. [Source ID: TABLE::Plot_Forecast]",
+    ])
+
+    return out
+
+
 def _compose_business_plan(
     results: Dict[str, object],
     insights: str,
@@ -3356,6 +3434,10 @@ def _compose_business_plan(
     sensitivity_df = (frames or {}).get("Sensitivity Analyses", pd.DataFrame())
     scenario_df = (frames or {}).get("Scenario / IFs Analysis", pd.DataFrame())
     monte_carlo_df = (frames or {}).get("Monte Carlo Simulation", pd.DataFrame())
+    section_detail = _financial_section_detailed_writeup(
+        income_annual, cashflow_annual, balance_annual, production_annual, revenue_annual,
+        forecast_df, income_plot_df, cash_plot_df, balance_plot_df
+    )
 
     return f"""# Cassava Bioethanol Comprehensive Business Plan
 
@@ -3386,13 +3468,22 @@ Production planning, capex, staffing, opex, and working-capital assumptions are 
 Interpretation: this section explains top-line growth, operating profitability, and net earnings conversion quality. [Source ID: TABLE::Financial Performance]
 {_to_markdown_table(income_annual, rows=25)}
 
+#### Expanded write-up
+{section_detail.get("income", "")}
+
 ### 4.2 Annual Cash Flow Statement
 Interpretation: this section tracks cash generation, reinvestment intensity, and financing dependence over time. [Source ID: TABLE::Cash Flow Statement]
 {_to_markdown_table(cashflow_annual, rows=25)}
 
+#### Expanded write-up
+{section_detail.get("cash", "")}
+
 ### 4.3 Annual Balance Sheet
 Interpretation: this section highlights capital structure strength, leverage trajectory, and net asset accumulation. [Source ID: TABLE::Financial Position]
 {_to_markdown_table(balance_annual, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("balance", "")}
 
 ## 5. Schedules and Forecasts
 ### 5.1 Production Annual Schedule
@@ -3401,9 +3492,15 @@ Interpretation: this section highlights capital structure strength, leverage tra
 ### 5.2 Revenue Annual Schedule
 {_to_markdown_table(revenue_annual, rows=25)}
 
+#### Expanded write-up
+{section_detail.get("schedules", "")}
+
 ### 5.3 Forecast (Projection-Horizon Aligned)
 Forecast horizon: **{years} year(s)**. [Source ID: TABLE::Forecast]
 {_to_markdown_table(forecast_df, rows=years + 2)}
+
+#### Expanded write-up
+{section_detail.get("forecast", "")}
 
 ## 6. Graphs and Plot Data (Reproduced for Download Pack)
 The following data tables are the source series for the charts included in the download package. [Source ID: TABLE::Plot_Income + TABLE::Plot_Cashflow + TABLE::Plot_Balance]
@@ -3419,6 +3516,9 @@ The following data tables are the source series for the charts included in the d
 
 ### 6.4 Forecast Plot Data
 {_to_markdown_table(forecast_df, rows=years + 2)}
+
+#### Expanded write-up
+{section_detail.get("plots", "")}
 
 ## 7. Lender/Covenant Narrative
 Minimum DSCR is **{_format_rate(metrics.get('DSCR (min)'))}** with LLCR **{_format_rate(metrics.get('LLCR'))}** and PLCR **{_format_rate(metrics.get('PLCR'))}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions. [Source ID: METRIC::DSCR (min) + METRIC::LLCR + METRIC::PLCR]
