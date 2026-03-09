@@ -69,6 +69,7 @@ MODEL_VERSION_KEY = "model_version"
 MC_CACHE_KEY = "mc_cache_store"
 SENSITIVITY_CACHE_KEY = "sensitivity_cache"
 SCENARIO_CACHE_KEY = "scenario_cache"
+CHART_KEY_COUNTER = "chart_key_counter"
 
 # Columns that are derived from other inputs and should not be editable via the
 # "Modify Default Inputs & Figures" pane or the general data editor. The map is
@@ -2029,6 +2030,12 @@ def _reset_period_index(df: pd.DataFrame, label: str) -> pd.DataFrame:
 
 
 
+def _next_chart_key(prefix: str) -> str:
+    counter = int(st.session_state.get(CHART_KEY_COUNTER, 0))
+    st.session_state[CHART_KEY_COUNTER] = counter + 1
+    return f"{prefix}_{counter}"
+
+
 def _safe_bar_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
     """Render bar charts with a fallback that avoids hard Altair import failures."""
     try:
@@ -2048,7 +2055,7 @@ def _safe_bar_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None)
         fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
         fig = px.bar(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", barmode="group", title=title)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("bar_fallback"))
     st.caption("Rendered with Plotly fallback because Streamlit bar_chart backend is unavailable in this environment.")
 
 
@@ -2072,7 +2079,7 @@ def _safe_line_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None
         fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
         fig = px.line(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("line_fallback"))
     st.caption("Rendered with Plotly fallback because Streamlit line_chart backend is unavailable in this environment.")
 
 
@@ -2095,7 +2102,7 @@ def _safe_area_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None
         fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
         fig = px.area(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("area_fallback"))
     st.caption("Rendered with Plotly fallback because Streamlit area_chart backend is unavailable in this environment.")
 
 def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
