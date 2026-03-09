@@ -246,3 +246,26 @@ def test_build_handles_empty_risk_schedule() -> None:
 
     assert "Risk Score" in metrics
     assert float(metrics["Risk Score"]) == 0.0
+
+
+def test_bankability_scorecard_metrics_are_exposed() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+
+    keys = [
+        "Bankability Returns Quality Score",
+        "Bankability Debt Capacity Score",
+        "Bankability Liquidity Resilience Score",
+        "Bankability Contract Coverage Quality Score",
+        "Bankability Risk Concentration Score",
+        "Bankability Governance Completeness Score",
+        "Bankability Scorecard Overall",
+    ]
+    for key in keys:
+        assert key in metrics
+        assert 0.0 <= float(metrics[key]) <= 100.0

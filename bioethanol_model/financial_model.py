@@ -819,6 +819,83 @@ class CassavaBioethanolModel:
             "Cash Sweep Share": cash_sweep_share,
         }
 
+    def _compute_bankability_scorecard(self, metrics: Dict[str, float], assumption_audit: Dict[str, object] | None = None) -> Dict[str, float]:
+        """Compute concise bankability scorecard dimensions (0-100)."""
+
+        def _num(key: str, default: float = float("nan")) -> float:
+            try:
+                return float(metrics.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def _score_linear(value: float, low: float, high: float) -> float:
+            if not np.isfinite(value):
+                return 0.0
+            if high <= low:
+                return 0.0
+            return float(np.clip((value - low) / (high - low), 0.0, 1.0) * 100.0)
+
+        # Returns quality: combine NPV sign/magnitude and IRR level.
+        npv = _num("Project NPV", 0.0)
+        irr = _num("Project IRR", float("nan"))
+        npv_component = 100.0 if npv > 0 else 0.0
+        irr_component = _score_linear(irr, 0.10, 0.25)
+        returns_quality = 0.5 * npv_component + 0.5 * irr_component
+
+        # Debt capacity: DSCR/LLCR/PLCR jointly.
+        dscr_min = _num("DSCR (min)")
+        llcr = _num("LLCR")
+        plcr = _num("PLCR")
+        debt_capacity = float(np.mean([
+            _score_linear(dscr_min, 1.0, 1.5),
+            _score_linear(llcr, 1.1, 1.8),
+            _score_linear(plcr, 1.1, 1.8),
+        ]))
+
+        # Liquidity resilience: minimum cash balance and liquidity cover months.
+        min_cash = _num("Minimum Monthly Cash Balance", 0.0)
+        liq_cover = _num("Liquidity Cover (months)", 0.0)
+        liquidity_resilience = float(np.mean([
+            100.0 if min_cash >= 0 else 0.0,
+            _score_linear(liq_cover, 1.5, 6.0),
+        ]))
+
+        # Contract coverage quality: take-or-pay and contracted feedstock assumptions.
+        take_or_pay = _num("Take-or-pay share", _num("Take-or-pay Share", 0.0))
+        contracted_share = _num("Contracted feedstock share", _num("Contracted Feedstock Share", 0.0))
+        contract_coverage = float(np.mean([
+            _score_linear(take_or_pay, 0.5, 0.9),
+            _score_linear(contracted_share, 0.4, 0.8),
+        ]))
+
+        # Risk concentration: lower risk score is better.
+        risk_score = _num("Risk Score", 0.0)
+        risk_concentration = float(np.clip((1.0 - np.clip(risk_score, 0.0, 1.0)) * 100.0, 0.0, 100.0))
+
+        # Governance/completeness checks from assumption/invariant gates.
+        quality_pass = bool((assumption_audit or {}).get("passed", False))
+        inv_bal = _num("Invariant Balance Sheet Balanced", 0.0)
+        inv_cf = _num("Invariant Cash Flow Bridge Consistent", 0.0)
+        inv_debt = _num("Invariant Debt Rollforward Consistent", 0.0)
+        governance = float(np.mean([
+            100.0 if quality_pass else 0.0,
+            100.0 if inv_bal >= 1.0 else 0.0,
+            100.0 if inv_cf >= 1.0 else 0.0,
+            100.0 if inv_debt >= 1.0 else 0.0,
+        ]))
+
+        dimensions = {
+            "Bankability Returns Quality Score": returns_quality,
+            "Bankability Debt Capacity Score": debt_capacity,
+            "Bankability Liquidity Resilience Score": liquidity_resilience,
+            "Bankability Contract Coverage Quality Score": contract_coverage,
+            "Bankability Risk Concentration Score": risk_concentration,
+            "Bankability Governance Completeness Score": governance,
+        }
+        overall = float(np.mean(list(dimensions.values()))) if dimensions else float("nan")
+        dimensions["Bankability Scorecard Overall"] = overall
+        return dimensions
+
     def _compute_accounting_invariants(self, financials, loan_schedule) -> Dict[str, float]:
         """Return invariant checks used for model-drift detection and audit."""
 
@@ -1034,6 +1111,8 @@ class CassavaBioethanolModel:
         )
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):
             metrics["Payback Period (years)"] = metrics["Payback Period (months)"] / 12.0
+
+        metrics.update(self._compute_bankability_scorecard(metrics, assumption_audit=assumption_audit))
 
         break_even = compute_break_even(revenue, cost_outputs)
         payback = compute_payback(
