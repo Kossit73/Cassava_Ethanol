@@ -154,6 +154,53 @@ class CassavaBioethanolModel:
             if table.placeholder and table.data is not None and not table.data.empty:
                 table.set_data(table.data, mark_user_input=True)
 
+    def _normalize_global_units(self, page: inputs.InputLandingPage) -> Dict[str, object]:
+        """Normalize percent-like global inputs so both 12 and 0.12 are accepted."""
+
+        df = page.global_inputs.model_frame
+        if df is None or df.empty:
+            return {"passed": True, "converted": [], "outliers": [], "notes": ["No global assumptions supplied"]}
+
+        if not {"Parameter", "Value"}.issubset(df.columns):
+            return {"passed": False, "converted": [], "outliers": ["Global Inputs missing Parameter/Value columns"], "notes": []}
+
+        working = df.copy()
+        converted: list[str] = []
+        outliers: list[str] = []
+
+        for idx, row in working.iterrows():
+            parameter = str(row.get("Parameter", "")).strip()
+            units = str(row.get("Units", "")).strip().lower()
+            try:
+                value = float(row.get("Value"))
+            except (TypeError, ValueError):
+                continue
+
+            is_percent = ("%" in units) or any(
+                token in parameter.lower()
+                for token in ("rate", "share", "growth", "discount", "tax", "trigger", "dscr")
+            )
+            if not is_percent:
+                continue
+
+            if 1.0 < value <= 100.0:
+                working.at[idx, "Value"] = value / 100.0
+                converted.append(parameter)
+                value = value / 100.0
+
+            if value < -1.0 or value > 2.0:
+                outliers.append(f"{parameter}={value}")
+
+        if not working.equals(df):
+            page.global_inputs.set_data(working, mark_user_input=page.global_inputs.placeholder)
+
+        return {
+            "passed": len(outliers) == 0,
+            "converted": converted,
+            "outliers": outliers,
+            "notes": ["Percent normalization: values in (1,100] are converted to decimal form by dividing by 100."],
+        }
+
     def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
         """Hard validation gate for investor-grade completeness checks."""
 
@@ -798,6 +845,7 @@ class CassavaBioethanolModel:
 
         page = self._prepare_page_for_scenario(scenario_name)
         self._materialize_required_defaults(page)
+        assumption_audit = self._normalize_global_units(page)
         self._validate_required_inputs(page)
         self._apply_debt_strategy_toggles(page)
 
@@ -931,6 +979,7 @@ class CassavaBioethanolModel:
                 ),
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
+                "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
                 **risk_commercial,
                 **debt_covenants,
             }
@@ -960,6 +1009,7 @@ class CassavaBioethanolModel:
             "scenario": scenario_name,
             "input_page_snapshot": page,
             "staff_schedule": staff_schedule,
+            "assumption_quality_audit": assumption_audit,
         }
         self._scenario_cache[scenario_name] = (signature, copy.deepcopy(results))
         return results

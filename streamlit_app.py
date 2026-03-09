@@ -1229,6 +1229,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     """Expose frequently tweaked assumptions inside the main page."""
 
     st.subheader("Key Assumptions")
+    st.caption("Unit hint: percentage/rate fields accept either decimal form (e.g., 0.12) or percent form (e.g., 12). The model auto-normalizes percent-form inputs.")
     original_df = table.data.copy()
     df = table.data.copy()
     updated = False
@@ -1272,6 +1273,29 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     table.set_data(df, mark_user_input=updated)
     if not df.equals(original_df):
         _update_table_editor_state(table)
+
+
+def _global_input_outlier_warnings(table: EditableTable) -> None:
+    if table.name != "Global Inputs" or table.data is None or table.data.empty:
+        return
+    if not {"Parameter", "Value"}.issubset(table.data.columns):
+        return
+    df = table.data.copy()
+    warnings: List[str] = []
+    for _, row in df.iterrows():
+        parameter = str(row.get("Parameter", "")).strip()
+        units = str(row.get("Units", "")).strip().lower()
+        value = pd.to_numeric(pd.Series([row.get("Value")]), errors="coerce").iloc[0]
+        if pd.isna(value):
+            continue
+        is_percent = ("%" in units) or any(
+            token in parameter.lower()
+            for token in ("rate", "share", "growth", "discount", "tax", "trigger", "dscr")
+        )
+        if is_percent and (value < -1.0 or value > 100.0):
+            warnings.append(f"{parameter}: {value}")
+    if warnings:
+        st.warning("Outlier assumption values detected (please verify units): " + "; ".join(warnings[:8]))
 
 
 def _numeric_step(value: float) -> float:
@@ -3296,6 +3320,20 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
         metrics_df = _round_nearest_100(metrics_df)
 
+    assumption_audit = results.get("assumption_quality_audit") if isinstance(results, dict) else None
+    if isinstance(assumption_audit, dict):
+        audit_rows = [
+            {"Check": "Assumption quality checks", "Status": "Passed" if assumption_audit.get("passed") else "Failed"},
+            {"Check": "Converted percent fields", "Status": ", ".join(map(str, assumption_audit.get("converted", []))) or "None"},
+            {"Check": "Outlier entries", "Status": ", ".join(map(str, assumption_audit.get("outliers", []))) or "None"},
+            {"Check": "Notes", "Status": " | ".join(map(str, assumption_audit.get("notes", []))) or ""},
+        ]
+        assumption_audit_df = pd.DataFrame(audit_rows)
+    else:
+        assumption_audit_df = pd.DataFrame([
+            {"Check": "Assumption quality checks", "Status": "Unknown"}
+        ])
+
     sensitivity_df = pd.DataFrame()
     try:
         base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
@@ -3375,6 +3413,7 @@ def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object]
         "Sensitivity Analyses": sensitivity_df,
         "Scenario / IFs Analysis": scenario_df,
         "Monte Carlo Simulation": monte_carlo_summary,
+        "Assumption Quality Audit": assumption_audit_df,
     }
 
 
@@ -4229,6 +4268,7 @@ def main() -> None:
         st.info("Edit the assumptions and press 'Recalculate model' to refresh the financial outputs.")
         _update_projection(input_page)
         _key_assumptions_controls(input_page.global_inputs)
+        _global_input_outlier_warnings(input_page.global_inputs)
         _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)

@@ -135,3 +135,22 @@ def test_validation_allows_tornado_like_share_variation() -> None:
     metrics = result["metrics"]
     assert "Investor Share" in metrics and "Owner Share" in metrics
     assert abs(float(metrics["Investor Share"]) + float(metrics["Owner Share"]) - 1.0) < 1e-6
+
+
+def test_percent_unit_normalization_accepts_whole_percent_inputs() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    _set_global(page, "Discount rate", 12.0)
+    _set_global(page, "Corporate tax rate", 28.0)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+    audit = result.get("assumption_quality_audit", {})
+
+    assert abs(float(metrics["Discount Rate"]) - 0.12) < 1e-9
+    assert abs(float(metrics["Corporate Tax Rate"]) - 0.28) < 1e-9
+    assert bool(audit.get("passed"))
+    assert "Discount rate" in set(audit.get("converted", []))
