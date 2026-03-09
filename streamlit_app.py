@@ -3332,7 +3332,7 @@ def _financial_section_detailed_writeup(
     cash_plot_df: pd.DataFrame,
     balance_plot_df: pd.DataFrame,
 ) -> Dict[str, str]:
-    """Build expanded narrative blocks for business-plan sections 4, 5 and 6."""
+    """Build expanded narrative tables for business-plan sections 4, 5 and 6."""
 
     out: Dict[str, str] = {}
 
@@ -3342,57 +3342,64 @@ def _financial_section_detailed_writeup(
         s = pd.to_numeric(df[col], errors="coerce")
         return float(s.iloc[-1]) if not s.dropna().empty else float("nan")
 
+    def _narrative_table(rows: List[Dict[str, object]]) -> str:
+        if not rows:
+            return "_No expanded interpretation available._"
+        df = pd.DataFrame(rows)
+        return _to_markdown_table(df, rows=200)
+
     rev_last = _num(income_annual, "Revenue")
     ebitda_last = _num(income_annual, "EBITDA")
     ni_last = _num(income_annual, "Net Income")
-    out["income"] = "\n".join([
-        f"- Revenue reaches **{_format_currency(rev_last)}** in the final modeled year, indicating top-line scale at steady-state. [Source ID: TABLE::Financial Performance::Revenue]",
-        f"- EBITDA at **{_format_currency(ebitda_last)}** shows operating earnings before capital structure effects and supports debt capacity assessment. [Source ID: TABLE::Financial Performance::EBITDA]",
-        f"- Net Income of **{_format_currency(ni_last)}** indicates post-interest/post-tax profitability conversion from operations. [Source ID: TABLE::Financial Performance::Net Income]",
-        "- The 2027 negative EBIT/Net Income profile is consistent with pre-ramp fixed charges, followed by a strong step-up from 2028 onward. [Source ID: TABLE::Financial Performance::EBIT + Net Income]",
+    out["income"] = _narrative_table([
+        {"#": 0, "Key metric name": "Revenue", "Value": _format_currency(rev_last), "Narrative": "Revenue reaches steady-state scale in the final modeled year. [Source ID: TABLE::Financial Performance::Revenue]"},
+        {"#": 1, "Key metric name": "EBITDA", "Value": _format_currency(ebitda_last), "Narrative": "EBITDA indicates operating earnings quality before capital structure effects. [Source ID: TABLE::Financial Performance::EBITDA]"},
+        {"#": 2, "Key metric name": "Net Income", "Value": _format_currency(ni_last), "Narrative": "Net income reflects post-interest and post-tax conversion of operating performance. [Source ID: TABLE::Financial Performance::Net Income]"},
+        {"#": 3, "Key metric name": "Ramp Profile", "Value": "2027 to 2028 step-up", "Narrative": "2027 pre-ramp losses transition to strong profitability from 2028 onward. [Source ID: TABLE::Financial Performance::EBIT + Net Income]"},
     ])
 
     ocf_last = _num(cashflow_annual, "Operating Cash Flow")
     fcf_last = _num(cashflow_annual, "Free Cash Flow")
     fin_last = _num(cashflow_annual, "Financing Cash Flow")
-    out["cash"] = "\n".join([
-        f"- Operating Cash Flow rises to **{_format_currency(ocf_last)}** by the terminal year, evidencing cash conversion quality from earnings. [Source ID: TABLE::Cash Flow Statement::Operating Cash Flow]",
-        f"- Free Cash Flow of **{_format_currency(fcf_last)}** indicates reinvestment-adjusted cash generation available for debt/equity value. [Source ID: TABLE::Cash Flow Statement::Free Cash Flow]",
-        f"- Financing Cash Flow at **{_format_currency(fin_last)}** (negative in steady state) reflects debt service outflows after initial project draw. [Source ID: TABLE::Cash Flow Statement::Financing Cash Flow]",
-        "- 2027 financing inflow aligns with first-year debt draw and establishes the funding bridge into operations. [Source ID: TABLE::Cash Flow Statement::Debt Draws + Debt Service]",
+    out["cash"] = _narrative_table([
+        {"#": 0, "Key metric name": "Operating Cash Flow", "Value": _format_currency(ocf_last), "Narrative": "Operating cash flow indicates core cash generation quality from operations. [Source ID: TABLE::Cash Flow Statement::Operating Cash Flow]"},
+        {"#": 1, "Key metric name": "Free Cash Flow", "Value": _format_currency(fcf_last), "Narrative": "Free cash flow represents reinvestment-adjusted cash available for value creation. [Source ID: TABLE::Cash Flow Statement::Free Cash Flow]"},
+        {"#": 2, "Key metric name": "Financing Cash Flow", "Value": _format_currency(fin_last), "Narrative": "Negative steady-state financing cash flow reflects ongoing debt-service outflows. [Source ID: TABLE::Cash Flow Statement::Financing Cash Flow]"},
+        {"#": 3, "Key metric name": "Funding Bridge", "Value": "Debt-led in 2027", "Narrative": "Initial debt draw establishes project liquidity prior to operating ramp-up. [Source ID: TABLE::Cash Flow Statement::Debt Draws + Debt Service]"},
     ])
 
     assets_last = _num(balance_annual, "Total Assets")
     debt_last = _num(balance_annual, "Debt")
     equity_last = _num(balance_annual, "Equity")
-    out["balance"] = "\n".join([
-        f"- Total Assets expand to **{_format_currency(assets_last)}**, confirming cumulative value build through retained cash generation. [Source ID: TABLE::Financial Position::Total Assets]",
-        f"- Debt declines to **{_format_currency(debt_last)}**, showing amortization and deleveraging progression. [Source ID: TABLE::Financial Position::Debt]",
-        f"- Equity grows to **{_format_currency(equity_last)}**, indicating accumulation of residual value to sponsors. [Source ID: TABLE::Financial Position::Equity]",
-        "- Balance sheet integrity is supported by the parallel movement of Total Assets and Total Liabilities & Equity. [Source ID: TABLE::Financial Position::Total Assets + Total Liabilities & Equity]",
+    out["balance"] = _narrative_table([
+        {"#": 0, "Key metric name": "Total Assets", "Value": _format_currency(assets_last), "Narrative": "Asset growth indicates cumulative value build from retained cash generation. [Source ID: TABLE::Financial Position::Total Assets]"},
+        {"#": 1, "Key metric name": "Debt", "Value": _format_currency(debt_last), "Narrative": "Debt decline evidences deleveraging through scheduled amortization. [Source ID: TABLE::Financial Position::Debt]"},
+        {"#": 2, "Key metric name": "Equity", "Value": _format_currency(equity_last), "Narrative": "Equity expansion reflects residual value accretion to sponsors. [Source ID: TABLE::Financial Position::Equity]"},
+        {"#": 3, "Key metric name": "Balance Integrity", "Value": "Balanced", "Narrative": "Total Assets and Total Liabilities & Equity move in lockstep across years. [Source ID: TABLE::Financial Position::Total Assets + Total Liabilities & Equity]"},
     ])
 
     ethanol_last = _num(production_annual, "Ethanol litres")
     cassava_last = _num(production_annual, "Cassava ton")
     total_rev_last = _num(revenue_annual, "Total Revenue")
-    out["schedules"] = "\n".join([
-        f"- Production stabilizes at **{cassava_last:,.0f} tons cassava** and **{ethanol_last:,.0f} litres ethanol** annually in steady state. [Source ID: TABLE::Production Annual]",
-        f"- Annual revenue reaches **{_format_currency(total_rev_last)}**, with fuel ethanol and animal-feed streams providing commercial diversification. [Source ID: TABLE::Revenue Annual]",
-        "- Forecast years show continued growth trajectory beyond base horizon, used for strategic extension and valuation narrative. [Source ID: TABLE::Forecast]",
-    ])
-
     forecast_last = _num(forecast_df, "Forecast Revenue")
-    out["forecast"] = "\n".join([
-        f"- Forecast Revenue scales to **{_format_currency(forecast_last)}** in the final forecast year, supporting terminal outlook assumptions. [Source ID: TABLE::Forecast::Forecast Revenue]",
-        "- Forecast EBITDA trend mirrors revenue, indicating a stable modeled margin structure in out-years. [Source ID: TABLE::Forecast::Forecast EBITDA]",
-        "- Assumed Growth should be stress-tested to ensure downside conservatism in investment committee packs. [Source ID: TABLE::Forecast::Assumed Growth]",
+    out["schedules"] = _narrative_table([
+        {"#": 0, "Key metric name": "Cassava Throughput", "Value": f"{cassava_last:,.0f} tons", "Narrative": "Production throughput stabilizes at designed steady-state input levels. [Source ID: TABLE::Production Annual]"},
+        {"#": 1, "Key metric name": "Ethanol Output", "Value": f"{ethanol_last:,.0f} litres", "Narrative": "Annual ethanol output aligns with operating capacity assumptions. [Source ID: TABLE::Production Annual]"},
+        {"#": 2, "Key metric name": "Total Revenue", "Value": _format_currency(total_rev_last), "Narrative": "Revenue combines ethanol and animal-feed streams for diversification. [Source ID: TABLE::Revenue Annual]"},
+        {"#": 3, "Key metric name": "Forecast Revenue (Terminal Year)", "Value": _format_currency(forecast_last), "Narrative": "Out-year forecast supports strategic planning beyond base horizon. [Source ID: TABLE::Forecast::Forecast Revenue]"},
     ])
 
-    out["plots"] = "\n".join([
-        "- Income plot data visualizes ramp-to-steady-state transition in revenue, EBITDA and net income. [Source ID: TABLE::Plot_Income]",
-        "- Cash flow plot data shows operating cash dominance and financing normalization after initial draw period. [Source ID: TABLE::Plot_Cashflow]",
-        "- Balance plot data confirms assets expansion, debt amortization and equity build-up across the modeled horizon. [Source ID: TABLE::Plot_Balance]",
-        "- Forecast plot data supports communicated out-year strategic case assumptions used in lender/equity discussions. [Source ID: TABLE::Plot_Forecast]",
+    out["forecast"] = _narrative_table([
+        {"#": 0, "Key metric name": "Forecast Revenue (Terminal Year)", "Value": _format_currency(forecast_last), "Narrative": "Forecast revenue in terminal year supports terminal outlook assumptions. [Source ID: TABLE::Forecast::Forecast Revenue]"},
+        {"#": 1, "Key metric name": "Forecast EBITDA", "Value": _format_currency(_num(forecast_df, "Forecast EBITDA")), "Narrative": "Forecast EBITDA trend indicates modeled out-year margin structure. [Source ID: TABLE::Forecast::Forecast EBITDA]"},
+        {"#": 2, "Key metric name": "Assumed Growth", "Value": f"{_num(forecast_df, "Assumed Growth"):.4f}", "Narrative": "Assumed growth should be stress-tested for downside conservatism. [Source ID: TABLE::Forecast::Assumed Growth]"},
+    ])
+
+    out["plots"] = _narrative_table([
+        {"#": 0, "Key metric name": "Income Plot", "Value": "Revenue/EBITDA/Net Income", "Narrative": "Shows ramp-to-steady-state profitability evolution. [Source ID: TABLE::Plot_Income]"},
+        {"#": 1, "Key metric name": "Cash Flow Plot", "Value": "Operating/Investing/Financing/FCF", "Narrative": "Highlights cash generation dominance and financing normalization. [Source ID: TABLE::Plot_Cashflow]"},
+        {"#": 2, "Key metric name": "Balance Plot", "Value": "Assets/Liabilities&Equity/Debt/Equity", "Narrative": "Confirms asset growth, debt amortization, and equity build-up. [Source ID: TABLE::Plot_Balance]"},
+        {"#": 3, "Key metric name": "Forecast Plot", "Value": "Forecast Revenue/EBITDA", "Narrative": "Supports out-year strategic case communication in lender/equity packs. [Source ID: TABLE::Plot_Forecast]"},
     ])
 
     return out
