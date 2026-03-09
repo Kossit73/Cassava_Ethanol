@@ -819,6 +819,53 @@ class CassavaBioethanolModel:
             "Cash Sweep Share": cash_sweep_share,
         }
 
+    def _compute_accounting_invariants(self, financials, loan_schedule) -> Dict[str, float]:
+        """Return invariant checks used for model-drift detection and audit."""
+
+        out: Dict[str, float] = {}
+
+        # 1) Annual balance-sheet balancing.
+        bal_annual = getattr(financials, "balance_annual", pd.DataFrame())
+        if isinstance(bal_annual, pd.DataFrame) and not bal_annual.empty:
+            assets = pd.to_numeric(bal_annual.get("Total Assets"), errors="coerce")
+            liab_eq = pd.to_numeric(bal_annual.get("Total Liabilities & Equity"), errors="coerce")
+            delta = (assets - liab_eq).abs()
+            out["Invariant Balance Sheet Max Delta"] = float(delta.max()) if not delta.dropna().empty else float("nan")
+            out["Invariant Balance Sheet Balanced"] = float(1.0 if (delta.fillna(0.0) < 1e-3).all() else 0.0)
+        else:
+            out["Invariant Balance Sheet Max Delta"] = float("nan")
+            out["Invariant Balance Sheet Balanced"] = float("nan")
+
+        # 2) Cash-flow bridge consistency.
+        cf = getattr(financials, "cashflow_monthly", pd.DataFrame())
+        if isinstance(cf, pd.DataFrame) and not cf.empty:
+            operating = pd.to_numeric(cf.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+            investing = pd.to_numeric(cf.get("Investing Cash Flow"), errors="coerce").fillna(0.0)
+            financing = pd.to_numeric(cf.get("Financing Cash Flow"), errors="coerce").fillna(0.0)
+            net = pd.to_numeric(cf.get("Net Cash Flow"), errors="coerce").fillna(0.0)
+            bridge_delta = (operating + investing + financing - net).abs()
+            out["Invariant Cash Flow Bridge Max Delta"] = float(bridge_delta.max()) if not bridge_delta.empty else float("nan")
+            out["Invariant Cash Flow Bridge Consistent"] = float(1.0 if (bridge_delta < 1e-3).all() else 0.0)
+        else:
+            out["Invariant Cash Flow Bridge Max Delta"] = float("nan")
+            out["Invariant Cash Flow Bridge Consistent"] = float("nan")
+
+        # 3) Debt opening/closing roll-forward integrity.
+        sched = getattr(loan_schedule, "schedule", pd.DataFrame())
+        if isinstance(sched, pd.DataFrame) and not sched.empty:
+            opening = pd.to_numeric(sched.get("Opening Balance"), errors="coerce").fillna(0.0)
+            draw = pd.to_numeric(sched.get("Draw"), errors="coerce").fillna(0.0)
+            principal = pd.to_numeric(sched.get("Principal"), errors="coerce").fillna(0.0)
+            closing = pd.to_numeric(sched.get("Closing Balance"), errors="coerce").fillna(0.0)
+            roll_delta = (opening + draw - principal - closing).abs()
+            out["Invariant Debt Rollforward Max Delta"] = float(roll_delta.max()) if not roll_delta.empty else float("nan")
+            out["Invariant Debt Rollforward Consistent"] = float(1.0 if (roll_delta < 1e-3).all() else 0.0)
+        else:
+            out["Invariant Debt Rollforward Max Delta"] = float("nan")
+            out["Invariant Debt Rollforward Consistent"] = float("nan")
+
+        return out
+
     # ------------------------------------------------------------------
     # Advanced analytics extensions
     # ------------------------------------------------------------------
@@ -982,6 +1029,7 @@ class CassavaBioethanolModel:
                 "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
                 **risk_commercial,
                 **debt_covenants,
+                **self._compute_accounting_invariants(financials, loan_schedule),
             }
         )
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):

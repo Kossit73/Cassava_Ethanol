@@ -154,3 +154,95 @@ def test_percent_unit_normalization_accepts_whole_percent_inputs() -> None:
     assert abs(float(metrics["Corporate Tax Rate"]) - 0.28) < 1e-9
     assert bool(audit.get("passed"))
     assert "Discount rate" in set(audit.get("converted", []))
+
+
+def test_accounting_invariants_metrics_are_exposed_and_consistent() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+
+    assert "Invariant Balance Sheet Balanced" in metrics
+    assert "Invariant Cash Flow Bridge Consistent" in metrics
+    assert "Invariant Debt Rollforward Consistent" in metrics
+    assert float(metrics["Invariant Balance Sheet Balanced"]) == 1.0
+    assert float(metrics["Invariant Cash Flow Bridge Consistent"]) == 1.0
+    assert float(metrics["Invariant Debt Rollforward Consistent"]) == 1.0
+
+
+def test_financial_metrics_regression_snapshot_smoke() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    model_a = CassavaBioethanolModel(copy.deepcopy(page))
+    metrics_a = model_a.build("FARM_ONLY")["metrics"]
+    model_b = CassavaBioethanolModel(copy.deepcopy(page))
+    metrics_b = model_b.build("FARM_ONLY")["metrics"]
+
+    snapshot_a = {
+        "Project NPV": round(float(metrics_a["Project NPV"]), 2),
+        "Project IRR": round(float(metrics_a["Project IRR"]), 6),
+        "DSCR (min)": round(float(metrics_a.get("DSCR (min)", 0.0)), 6),
+        "Simple Payback (years)": round(float(metrics_a["Simple Payback (years)"]), 6),
+    }
+    snapshot_b = {
+        "Project NPV": round(float(metrics_b["Project NPV"]), 2),
+        "Project IRR": round(float(metrics_b["Project IRR"]), 6),
+        "DSCR (min)": round(float(metrics_b.get("DSCR (min)", 0.0)), 6),
+        "Simple Payback (years)": round(float(metrics_b["Simple Payback (years)"]), 6),
+    }
+    assert snapshot_a == snapshot_b
+
+
+def test_build_handles_zero_volume_months_edge_case() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    prod = page.production_monthly.data.copy()
+    if "Ethanol litres" in prod.columns:
+        prod["Ethanol litres"] = 0.0
+    page.production_monthly.set_data(prod, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+
+    assert "Project NPV" in metrics
+    assert float(metrics["Invariant Balance Sheet Balanced"]) == 1.0
+
+
+def test_refinancing_year_outside_horizon_is_ignored() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    _set_global(page, "Refinancing enabled", 1.0)
+    _set_global(page, "Refinancing year", 2100.0)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+
+    assert "Refinancing Costs" in metrics
+    assert float(metrics["Refinancing Costs"]) == 0.0
+
+
+def test_build_handles_empty_risk_schedule() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    empty_risk = pd.DataFrame(columns=page.risk_schedule.columns)
+    page.risk_schedule.set_data(empty_risk, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+
+    assert "Risk Score" in metrics
+    assert float(metrics["Risk Score"]) == 0.0
