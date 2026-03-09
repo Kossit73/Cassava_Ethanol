@@ -2051,6 +2051,53 @@ def _safe_bar_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None)
     st.plotly_chart(fig, use_container_width=True)
     st.caption("Rendered with Plotly fallback because Streamlit bar_chart backend is unavailable in this environment.")
 
+
+
+def _safe_line_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render line charts with Plotly fallback when Streamlit chart backend fails."""
+    try:
+        st.line_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Index", "Value"]
+        fig = px.line(fallback_df, x="Index", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.line(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Rendered with Plotly fallback because Streamlit line_chart backend is unavailable in this environment.")
+
+
+def _safe_area_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render area charts with Plotly fallback when Streamlit chart backend fails."""
+    try:
+        st.area_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Index", "Value"]
+        fig = px.area(fallback_df, x="Index", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.area(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Rendered with Plotly fallback because Streamlit area_chart backend is unavailable in this environment.")
+
 def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     metrics = results["metrics"]
     revenue = results["revenue"]
@@ -2210,10 +2257,10 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         if c in financials.cashflow_monthly.columns
     ]
     if cash_columns:
-        st.line_chart(financials.cashflow_monthly[cash_columns])
+        _safe_line_chart(financials.cashflow_monthly[cash_columns])
         cumulative_df = financials.cashflow_monthly[cash_columns].cumsum()
         cumulative_df.columns = [f"Cumulative {col}" for col in cumulative_df.columns]
-        st.line_chart(cumulative_df)
+        _safe_line_chart(cumulative_df)
 
     st.markdown("### Revenue Mix")
     revenue_annual = revenue.annual.copy()
@@ -2230,7 +2277,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
 
     st.markdown("### Operating Cost Breakdown")
     if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.monthly.empty:
-        st.area_chart(expenses_summary.monthly)
+        _safe_area_chart(expenses_summary.monthly)
     else:
         cost_monthly = pd.DataFrame(
             {
@@ -2240,7 +2287,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
             }
         )
         if not cost_monthly.empty:
-            st.area_chart(cost_monthly)
+            _safe_area_chart(cost_monthly)
 
     if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.annual.empty:
         annual_expense = expenses_summary.annual.copy()
@@ -2265,7 +2312,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         st.dataframe(capex_df, use_container_width=True)
     debt_chart = loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum")
     if not debt_chart.empty:
-        st.line_chart(debt_chart)
+        _safe_line_chart(debt_chart)
 
     st.markdown("### Fixed Asset Summary")
     st.dataframe(depreciation.summary, use_container_width=True)
@@ -2273,7 +2320,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     st.markdown("### Debt Schedule Chart")
     debt_payments = loan_schedule.schedule.pivot_table(index="Month", values="Payment", aggfunc="sum")
     if not debt_payments.empty:
-        st.area_chart(debt_payments)
+        _safe_area_chart(debt_payments)
 
     st.markdown("### Yearly Loan Amortisation")
     yearly_amortisation = getattr(loan_schedule, "annual", pd.DataFrame())
@@ -2321,7 +2368,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
             monthly_chart = break_even_monthly[numeric_columns]
             if not monthly_chart.empty:
                 st.markdown("#### Monthly Break-even Trend")
-                st.line_chart(monthly_chart)
+                _safe_line_chart(monthly_chart)
 
                 aggregation: Dict[str, str] = {}
                 if "Monthly Margin" in monthly_chart.columns:
@@ -2334,7 +2381,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 if not annual_break_even.empty:
                     annual_break_even.index = annual_break_even.index.to_period("Y").astype(str)
                     st.markdown("#### Annual Break-even Trend")
-                    st.line_chart(annual_break_even)
+                    _safe_line_chart(annual_break_even)
 
 def _render_financial_performance(results: Dict[str, object]) -> None:
     financials = results["financials"]
@@ -2495,13 +2542,13 @@ def _render_cash_flow_page(results: Dict[str, object]) -> None:
         if c in cash_monthly.columns
     ]
     if cash_columns:
-        st.line_chart(cash_monthly[cash_columns])
+        _safe_line_chart(cash_monthly[cash_columns])
 
     st.subheader("Cumulative Equity Cash Flow")
     if "Equity Cash Flow" in cash_monthly.columns:
         cumulative_equity = cash_monthly[["Equity Cash Flow"]].cumsum()
         cumulative_equity.columns = ["Cumulative Equity Cash Flow"]
-        st.line_chart(cumulative_equity)
+        _safe_line_chart(cumulative_equity)
         cumulative_df = cumulative_equity.reset_index().rename(columns={cumulative_equity.index.name or "index": "Month"})
         st.dataframe(cumulative_df, use_container_width=True)
 
@@ -2958,7 +3005,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
                     st.plotly_chart(fig, use_container_width=True)
                     st.caption("Rolling standard deviation provides a volatility view of the revolver balance.")
                     std_chart = viz_df.set_index("Period")["Rolling Std"].rename("Rolling Std Dev")
-                    st.line_chart(std_chart)
+                    _safe_line_chart(std_chart)
             else:
                 st.info("Monthly free cash flow is required to analyse the revolver trajectory.")
         else:
