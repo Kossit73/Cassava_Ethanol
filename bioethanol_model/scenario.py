@@ -161,3 +161,117 @@ def scenario_parameter_catalog(page: InputLandingPage) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows)
+
+
+def credit_committee_scenario_configs(page: InputLandingPage) -> List[ScenarioConfig]:
+    """Return pre-baked credit committee scenarios with correlated stresses."""
+
+    catalog = scenario_parameter_catalog(page)
+    if catalog.empty:
+        return [ScenarioConfig("Base", {})]
+    base_map = {
+        str(row["Parameter"]): float(row["Base Value"])
+        for _, row in catalog.iterrows()
+        if pd.notna(row.get("Base Value"))
+    }
+
+    def _scaled(parameter: str, factor: float, fallback: float = 0.0) -> float:
+        return float(base_map.get(parameter, fallback) * factor)
+
+    # Correlated stress drivers: lower ethanol price proxy + higher feedstock + ramp delay proxy.
+    return [
+        ScenarioConfig("Base", {}),
+        ScenarioConfig(
+            "Downside",
+            {
+                "Revenue Inputs": _scaled("Revenue Inputs", 0.92, 1.0),
+                "Cassava feedstock": _scaled("Cassava feedstock", 1.12, 1.0),
+                "Production monthly": _scaled("Production monthly", 0.94, 1.0),
+            },
+        ),
+        ScenarioConfig(
+            "Severe Downside",
+            {
+                "Revenue Inputs": _scaled("Revenue Inputs", 0.82, 1.0),
+                "Cassava feedstock": _scaled("Cassava feedstock", 1.30, 1.0),
+                "Production monthly": _scaled("Production monthly", 0.85, 1.0),
+            },
+        ),
+        ScenarioConfig(
+            "Upside",
+            {
+                "Revenue Inputs": _scaled("Revenue Inputs", 1.08, 1.0),
+                "Cassava feedstock": _scaled("Cassava feedstock", 0.93, 1.0),
+                "Production monthly": _scaled("Production monthly", 1.06, 1.0),
+            },
+        ),
+    ]
+
+
+def reverse_stress_test(
+    model: CassavaBioethanolModel,
+    *,
+    dscr_floor: float = 1.0,
+    npv_floor: float = 0.0,
+) -> pd.DataFrame:
+    """Find correlated stress combinations that break DSCR covenant or NPV > 0."""
+
+    catalog = scenario_parameter_catalog(model.input_page)
+    if catalog.empty:
+        return pd.DataFrame()
+
+    base_map = {
+        str(row["Parameter"]): float(row["Base Value"])
+        for _, row in catalog.iterrows()
+        if pd.notna(row.get("Base Value"))
+    }
+    required = ["Revenue Inputs", "Cassava feedstock", "Production monthly"]
+    if any(p not in base_map for p in required):
+        return pd.DataFrame()
+
+    price_factors = np.linspace(1.0, 0.65, 8)
+    feed_factors = np.linspace(1.0, 1.45, 10)
+    ramp_factors = np.linspace(1.0, 0.75, 6)
+
+    breaches: Dict[str, Dict[str, float]] = {}
+
+    for pf in price_factors:
+        for ff in feed_factors:
+            for rf in ramp_factors:
+                config = ScenarioConfig(
+                    name="Reverse Stress Candidate",
+                    overrides={
+                        "Revenue Inputs": base_map["Revenue Inputs"] * float(pf),
+                        "Cassava feedstock": base_map["Cassava feedstock"] * float(ff),
+                        "Production monthly": base_map["Production monthly"] * float(rf),
+                    },
+                )
+                result = apply_scenario(model, config)
+                metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+                dscr_min = float(pd.to_numeric(pd.Series([metrics.get("DSCR (min)")]), errors="coerce").iloc[0])
+                npv_value = float(pd.to_numeric(pd.Series([metrics.get("Project NPV")]), errors="coerce").iloc[0])
+
+                if "DSCR Covenant Breach" not in breaches and np.isfinite(dscr_min) and dscr_min < dscr_floor:
+                    breaches["DSCR Covenant Breach"] = {
+                        "Condition": f"DSCR (min) < {dscr_floor:.2f}",
+                        "Price Factor": float(pf),
+                        "Feedstock Factor": float(ff),
+                        "Ramp Factor": float(rf),
+                        "DSCR (min)": dscr_min,
+                        "Project NPV": npv_value,
+                    }
+
+                if "NPV Breach" not in breaches and np.isfinite(npv_value) and npv_value < npv_floor:
+                    breaches["NPV Breach"] = {
+                        "Condition": f"Project NPV < {npv_floor:,.0f}",
+                        "Price Factor": float(pf),
+                        "Feedstock Factor": float(ff),
+                        "Ramp Factor": float(rf),
+                        "DSCR (min)": dscr_min,
+                        "Project NPV": npv_value,
+                    }
+
+                if len(breaches) >= 2:
+                    return pd.DataFrame(list(breaches.values()))
+
+    return pd.DataFrame(list(breaches.values()))

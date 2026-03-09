@@ -9,6 +9,8 @@ from bioethanol_model.inputs import default_input_page
 from bioethanol_model.scenario import (
     ScenarioConfig,
     apply_scenario,
+    credit_committee_scenario_configs,
+    reverse_stress_test,
     scenario_parameter_catalog,
 )
 
@@ -41,3 +43,19 @@ def test_apply_scenario_restores_input_tables() -> None:
         model.input_page.direct_costs_monthly.data.reset_index(drop=True),
         baseline_costs.reset_index(drop=True),
     )
+
+
+def test_credit_committee_scenarios_include_required_cases() -> None:
+    page = default_input_page()
+    configs = credit_committee_scenario_configs(page)
+    names = [c.name for c in configs]
+    assert names == ["Base", "Downside", "Severe Downside", "Upside"]
+    downside = next(c for c in configs if c.name == "Downside")
+    assert {"Revenue Inputs", "Cassava feedstock", "Production monthly"}.issubset(downside.overrides)
+
+
+def test_reverse_stress_test_returns_dataframe() -> None:
+    page = default_input_page()
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    out = reverse_stress_test(model, dscr_floor=1.0, npv_floor=0.0)
+    assert isinstance(out, pd.DataFrame)

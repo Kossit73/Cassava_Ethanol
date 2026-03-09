@@ -31,7 +31,9 @@ from bioethanol_model.inputs import (
 )
 from bioethanol_model.scenario import (
     ScenarioConfig,
+    credit_committee_scenario_configs,
     goal_seek_to_target,
+    reverse_stress_test,
     scenario_comparison,
     scenario_parameter_catalog,
 )
@@ -2506,6 +2508,26 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 
     options = parameter_catalog["Parameter"].tolist()
     scenario_definitions = st.session_state.setdefault(SCENARIO_DEFINITIONS_KEY, [])
+
+    st.subheader("Credit Committee Scenario Pack")
+    st.caption(
+        "Load pre-baked committee scenarios with correlated stresses (lower ethanol price proxy, "
+        "higher feedstock costs, and ramp-delay proxy)."
+    )
+    if st.button("Load Base / Downside / Severe Downside / Upside", key="load_credit_committee_pack"):
+        committee_configs = credit_committee_scenario_configs(base_page)
+        scenario_definitions = [
+            {
+                "name": cfg.name,
+                "overrides": cfg.overrides,
+                "deltas": {k: None for k in cfg.overrides},
+            }
+            for cfg in committee_configs
+        ]
+        st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+        st.success("Credit committee scenario pack loaded.")
+        _trigger_rerun()
+
     selected_defaults = st.session_state.setdefault(SCENARIO_SELECTION_STATE_KEY, [])
     selected_parameters = st.multiselect(
         "Select parameters to configure",
@@ -2724,6 +2746,18 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         display_cols = [col for col in preferred_cols if col in combined_df.columns]
         display_df = combined_df[display_cols] if display_cols else combined_df
         st.dataframe(display_df, use_container_width=True)
+
+    st.subheader("Reverse Stress Test (Correlated)")
+    st.caption(
+        "Search correlated stress combinations to answer: what breaks DSCR covenant and what breaks NPV > 0."
+    )
+    if st.button("Run Reverse Stress Test", key=f"reverse_stress_{model.scenario.lower()}"):
+        reverse_model = _scenario_model()
+        reverse_df = reverse_stress_test(reverse_model, dscr_floor=1.0, npv_floor=0.0)
+        if reverse_df.empty:
+            st.info("No breach combination found within the configured stress grid.")
+        else:
+            st.dataframe(reverse_df, use_container_width=True, hide_index=True)
 
     toolkit = comparison_model.advanced_toolkit()
     analysis_df = pd.DataFrame()
