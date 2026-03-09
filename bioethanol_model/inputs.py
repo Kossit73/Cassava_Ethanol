@@ -324,6 +324,13 @@ def default_input_page() -> InputLandingPage:
                 {"Parameter": "Refinancing enabled", "Value": 0.0, "Units": "0/1"},
                 {"Parameter": "Refinancing year", "Value": 2029, "Units": "Year"},
                 {"Parameter": "Refinancing interest rate", "Value": 0.075, "Units": "%"},
+                {"Parameter": "Repricing fee rate", "Value": 0.01, "Units": "%"},
+                {"Parameter": "Break cost rate", "Value": 0.005, "Units": "%"},
+                {"Parameter": "DSRA months", "Value": 6.0, "Units": "months"},
+                {"Parameter": "DSCR lock-up threshold", "Value": 1.15, "Units": "x"},
+                {"Parameter": "Cash sweep trigger DSCR", "Value": 1.35, "Units": "x"},
+                {"Parameter": "Cash sweep share", "Value": 0.5, "Units": "%"},
+                {"Parameter": "Breach cure window months", "Value": 3.0, "Units": "months"},
             ]
         ),
         placeholder=True,

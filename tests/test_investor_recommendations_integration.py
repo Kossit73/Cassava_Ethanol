@@ -67,8 +67,11 @@ def test_debt_strategy_toggles_adjust_schedule() -> None:
     result = model.build("FARM_ONLY")
 
     schedule = result["loan_schedule"].schedule
+    metrics = result["metrics"]
     assert not schedule.empty
     assert (pd.to_numeric(schedule["Interest Rate"], errors="coerce") <= 0.08).all()
+    assert "Cash Sweep Applied" in metrics
+    assert "DSRA Reset Amount" in metrics
 
 
 def test_validation_rejects_offtake_corridor_inversion() -> None:

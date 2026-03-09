@@ -602,6 +602,151 @@ class CassavaBioethanolModel:
 
         return schedule
 
+    def _apply_dynamic_debt_mechanics(
+        self,
+        page: inputs.InputLandingPage,
+        loan_schedule,
+        financials,
+    ) -> Dict[str, float]:
+        """Apply DSCR-based sculpting, refinancing economics, and covenant package."""
+
+        globals_df = page.global_inputs.model_frame
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict() if not globals_df.empty else {}
+
+        def _get(name: str, default: float = 0.0) -> float:
+            try:
+                return float(lookup.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        sculpting = _get("Debt sculpting enabled", 0.0) >= 0.5
+        target_dscr = max(0.5, _get("Target DSCR", 1.25))
+        refinancing = _get("Refinancing enabled", 0.0) >= 0.5
+        refinancing_year = int(_get("Refinancing year", page.projection.start_year + 3))
+        repricing_fee_rate = max(0.0, _get("Repricing fee rate", 0.0))
+        break_cost_rate = max(0.0, _get("Break cost rate", 0.0))
+        dsra_months = max(0.0, _get("DSRA months", 0.0))
+        lockup_threshold = max(0.0, _get("DSCR lock-up threshold", 1.0))
+        cash_sweep_trigger = max(lockup_threshold, _get("Cash sweep trigger DSCR", 1.35))
+        cash_sweep_share = float(np.clip(_get("Cash sweep share", 0.0), 0.0, 1.0))
+        cure_window = max(1, int(round(_get("Breach cure window months", 3.0))))
+
+        schedule = getattr(loan_schedule, "schedule", pd.DataFrame())
+        if not isinstance(schedule, pd.DataFrame) or schedule.empty:
+            return {}
+
+        cfads = pd.to_numeric(financials.cashflow_monthly.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+        cfads_by_month = cfads.to_dict()
+
+        refined = schedule.copy().sort_values(["Loan", "Month"]).reset_index(drop=True)
+        refined["Month"] = pd.to_datetime(refined["Month"], errors="coerce")
+        refinance_date = pd.Timestamp(refinancing_year, 1, 1)
+        refinancing_cost_total = 0.0
+        cash_sweep_total = 0.0
+        lockup_months = 0
+        cured_breaches = 0
+
+        for loan_name, idx in refined.groupby("Loan", sort=False).groups.items():
+            opening = 0.0
+            loan_idx = list(idx)
+            refinanced_once = False
+            breach_flags: list[bool] = []
+
+            for pos, i in enumerate(loan_idx):
+                row = refined.loc[i]
+                draw = float(pd.to_numeric(row.get("Draw"), errors="coerce") or 0.0)
+                rate = float(pd.to_numeric(row.get("Interest Rate"), errors="coerce") or 0.0)
+                month = pd.to_datetime(row.get("Month"), errors="coerce")
+
+                opening = max(0.0, opening + draw)
+                interest = opening * max(0.0, rate / 12.0)
+                original_principal = float(pd.to_numeric(row.get("Principal"), errors="coerce") or 0.0)
+
+                principal = original_principal
+                if sculpting and opening > 0 and original_principal > 0:
+                    cfads_m = float(cfads_by_month.get(month, 0.0))
+                    target_service = max(0.0, cfads_m / target_dscr)
+                    principal = np.clip(target_service - interest, 0.0, opening)
+
+                    if target_service > 0:
+                        dscr_m = cfads_m / max(interest + principal, 1e-9)
+                    else:
+                        dscr_m = float("inf") if cfads_m > 0 else 0.0
+                    if dscr_m < lockup_threshold:
+                        lockup_months += 1
+                    breach_flags.append(dscr_m < 1.0)
+
+                    if dscr_m > cash_sweep_trigger and opening > principal:
+                        excess_cfads = max(0.0, cfads_m - (cash_sweep_trigger * (interest + principal)))
+                        sweep = min(opening - principal, excess_cfads * cash_sweep_share)
+                        principal += sweep
+                        cash_sweep_total += sweep
+
+                closing = max(0.0, opening - principal)
+                payment = interest + principal
+
+                if refinancing and (not refinanced_once) and month >= refinance_date and opening > 0:
+                    one_off_cost = opening * (repricing_fee_rate + break_cost_rate)
+                    interest += one_off_cost
+                    payment += one_off_cost
+                    refinancing_cost_total += one_off_cost
+                    refinanced_once = True
+
+                refined.loc[i, "Opening Balance"] = opening
+                refined.loc[i, "Interest"] = interest
+                refined.loc[i, "Principal"] = principal
+                refined.loc[i, "Payment"] = payment
+                refined.loc[i, "Closing Balance"] = closing
+                opening = closing
+
+            for j, flag in enumerate(breach_flags):
+                if not flag:
+                    continue
+                window = breach_flags[j + 1 : j + 1 + cure_window]
+                if window and not any(window):
+                    cured_breaches += 1
+
+        loan_schedule.schedule = refined
+        if not refined.empty:
+            loan_schedule.summary = refined.groupby("Loan").agg({"Draw": "sum", "Interest": "sum", "Principal": "sum", "Payment": "sum"})
+            annual = (
+                refined.assign(Year=refined["Month"].dt.year)
+                .groupby(["Loan", "Year"]).agg(
+                    Interest_Rate=("Interest Rate", "first"),
+                    Yearly_Remaining_Balance=("Opening Balance", "first"),
+                    Interest_Paid=("Interest", "sum"),
+                    Principal_Paid=("Principal", "sum"),
+                    Total_Payment=("Payment", "sum"),
+                    Year_End_Balance=("Closing Balance", "last"),
+                )
+                .reset_index()
+                .rename(
+                    columns={
+                        "Interest_Rate": "Interest Rate",
+                        "Yearly_Remaining_Balance": "Yearly Remaining Balance",
+                        "Interest_Paid": "Interest Paid",
+                        "Principal_Paid": "Principal Paid",
+                        "Total_Payment": "Total Payment",
+                        "Year_End_Balance": "Year-End Balance",
+                    }
+                )
+            )
+            annual["Monthly Interest (Balance × Rate / 12)"] = annual["Yearly Remaining Balance"] * annual["Interest Rate"] / 12.0
+            loan_schedule.annual = annual
+
+        avg_debt_service = float(pd.to_numeric(refined.get("Payment"), errors="coerce").fillna(0.0).mean()) if not refined.empty else 0.0
+        dsra_reset_amount = avg_debt_service * dsra_months
+
+        return {
+            "Refinancing Economics Cost": refinancing_cost_total,
+            "Cash Sweep Applied": cash_sweep_total,
+            "DSRA Reset Amount": dsra_reset_amount,
+            "DSCR Lock-up Months": float(lockup_months),
+            "Breach Cure Assumed Months": float(cured_breaches),
+            "Cash Sweep Trigger DSCR": cash_sweep_trigger,
+            "Cash Sweep Share": cash_sweep_share,
+        }
+
     # ------------------------------------------------------------------
     # Advanced analytics extensions
     # ------------------------------------------------------------------
@@ -701,6 +846,17 @@ class CassavaBioethanolModel:
             tax_rate=tax_rate,
         )
 
+        debt_covenants = self._apply_dynamic_debt_mechanics(page, loan_schedule, financials)
+        if debt_covenants:
+            financials = compute_financial_statements(
+                revenue,
+                depreciation,
+                cost_outputs,
+                loan_schedule,
+                working_capital,
+                tax_rate=tax_rate,
+            )
+
         expenses: ExpenseSummary = extract_expense_summary(financials, cost_outputs)
 
         discount_rate = _get_global("Discount rate", 0.0)
@@ -744,6 +900,7 @@ class CassavaBioethanolModel:
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
                 **risk_commercial,
+                **debt_covenants,
             }
         )
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):
