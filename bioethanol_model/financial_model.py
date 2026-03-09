@@ -355,6 +355,7 @@ class CassavaBioethanolModel:
         production,
         revenue,
         cost_outputs: Dict[str, object],
+        loan_schedule,
     ) -> Dict[str, float]:
         """Integrate risk register and commercial contract assumptions."""
 
@@ -374,14 +375,47 @@ class CassavaBioethanolModel:
         contracted_discount = float(np.clip(_get("Contract feedstock discount", 0.0), 0.0, 0.8))
 
         risk_df = page.risk_schedule.model_frame
+        stress_vectors = {
+            "volume": 0.0,
+            "price": 0.0,
+            "cost": 0.0,
+            "schedule": 0.0,
+        }
+        p90_vectors = {
+            "volume": 0.0,
+            "price": 0.0,
+            "cost": 0.0,
+            "schedule": 0.0,
+        }
+        duration_vectors = {
+            "volume": 0.0,
+            "price": 0.0,
+            "cost": 0.0,
+            "schedule": 0.0,
+        }
         risk_score = 0.0
         if not risk_df.empty:
             impact_map = {"low": 0.35, "medium": 0.65, "high": 1.0}
+            class_map = {
+                "volume": "volume",
+                "yield": "volume",
+                "logistics": "volume",
+                "price": "price",
+                "market": "price",
+                "cost": "cost",
+                "feedstock": "cost",
+                "energy": "cost",
+                "schedule": "schedule",
+                "construction": "schedule",
+                "delay": "schedule",
+            }
             for _, row in risk_df.iterrows():
                 try:
                     prob = float(row.get("Probability", 0.0))
                 except (TypeError, ValueError):
                     prob = 0.0
+                prob = float(np.clip(prob, 0.0, 1.0))
+
                 impact_raw = row.get("Impact", 0.0)
                 if isinstance(impact_raw, str):
                     impact = impact_map.get(impact_raw.strip().lower(), 0.5)
@@ -390,8 +424,52 @@ class CassavaBioethanolModel:
                         impact = float(impact_raw)
                     except (TypeError, ValueError):
                         impact = 0.5
-                risk_score += max(0.0, prob) * max(0.0, impact)
+                impact = max(0.0, impact)
+
+                expected_raw = row.get("Expected Impact", impact)
+                try:
+                    expected_impact = float(expected_raw)
+                except (TypeError, ValueError):
+                    expected_impact = impact
+                expected_impact = max(0.0, expected_impact)
+
+                downside_raw = row.get("P90 Downside", expected_impact)
+                try:
+                    p90_downside = float(downside_raw)
+                except (TypeError, ValueError):
+                    p90_downside = expected_impact
+                p90_downside = max(expected_impact, p90_downside)
+
+                duration_raw = row.get("Duration Months", 0.0)
+                try:
+                    duration_months = max(0.0, float(duration_raw))
+                except (TypeError, ValueError):
+                    duration_months = 0.0
+
+                class_raw = str(row.get("Class", "")).strip().lower()
+                risk_name = str(row.get("Risk", "")).strip().lower()
+                key = class_map.get(class_raw)
+                if key is None:
+                    key = next((v for k, v in class_map.items() if k in risk_name), "cost")
+
+                expected_component = prob * expected_impact
+                downside_component = prob * p90_downside
+                stress_vectors[key] += expected_component
+                p90_vectors[key] += downside_component
+                duration_vectors[key] += prob * duration_months
+
+                risk_score += prob * impact
+
+        for k in list(stress_vectors.keys()):
+            stress_vectors[k] = float(np.clip(stress_vectors[k], 0.0, 1.0))
+            p90_vectors[k] = float(np.clip(p90_vectors[k], 0.0, 1.5))
+            duration_vectors[k] = float(max(0.0, duration_vectors[k]))
+
         risk_intensity = float(np.clip(risk_score, 0.0, 1.0))
+        volume_stress = stress_vectors["volume"]
+        price_stress = stress_vectors["price"]
+        cost_stress = stress_vectors["cost"]
+        schedule_stress = stress_vectors["schedule"]
 
         monthly_rev = revenue.monthly.copy()
         if "Total Revenue" in monthly_rev.columns and not monthly_rev.empty:
@@ -401,22 +479,74 @@ class CassavaBioethanolModel:
             adjusted_price = implied_price.clip(lower=floor_price if floor_price > 0 else None, upper=ceiling_price)
             price_factor = (adjusted_price / implied_price.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
             top_factor = np.clip(take_or_pay + (1 - take_or_pay) * 0.7, 0.0, 1.0)
-            risk_factor = max(0.0, 1.0 - 0.25 * risk_intensity)
-            overall = price_factor * top_factor * risk_factor
+            price_risk_factor = max(0.0, 1.0 - price_stress)
+            volume_risk_factor = max(0.0, 1.0 - volume_stress)
+            schedule_risk_factor = max(0.0, 1.0 - 0.5 * schedule_stress)
+            overall = price_factor * top_factor * price_risk_factor * volume_risk_factor * schedule_risk_factor
             monthly_rev = monthly_rev.mul(overall, axis=0)
             monthly_rev["Total Revenue"] = pd.to_numeric(monthly_rev.sum(axis=1), errors="coerce").fillna(0.0)
+
+            schedule_delay_months = int(round(duration_vectors["schedule"] * schedule_stress))
+            if schedule_delay_months > 0:
+                monthly_rev = monthly_rev.shift(schedule_delay_months, fill_value=0.0)
+
             revenue.monthly = monthly_rev
             revenue.annual = monthly_rev.resample("YE").sum()
             revenue.annual.index = revenue.annual.index.year
 
+            monthly_prod = getattr(production, "monthly", pd.DataFrame())
+            if isinstance(monthly_prod, pd.DataFrame) and not monthly_prod.empty:
+                monthly_prod_adj = monthly_prod.copy()
+                if "Ethanol litres" in monthly_prod_adj.columns:
+                    monthly_prod_adj["Ethanol litres"] = pd.to_numeric(monthly_prod_adj["Ethanol litres"], errors="coerce").fillna(0.0) * volume_risk_factor
+                if "Cassava ton" in monthly_prod_adj.columns:
+                    monthly_prod_adj["Cassava ton"] = pd.to_numeric(monthly_prod_adj["Cassava ton"], errors="coerce").fillna(0.0) * volume_risk_factor
+                if schedule_delay_months > 0:
+                    monthly_prod_adj = monthly_prod_adj.shift(schedule_delay_months, fill_value=0.0)
+                production.monthly = monthly_prod_adj
+                production.annual = monthly_prod_adj.resample("YE").sum()
+                production.annual.index = production.annual.index.year
+
         direct = cost_outputs.get("Direct Costs")
         feedstock_saving = contracted_share * contracted_discount
-        risk_cost_uplift = 0.2 * risk_intensity
+        risk_cost_uplift = 0.2 * risk_intensity + 0.35 * cost_stress
         cost_multiplier = max(0.0, 1.0 - feedstock_saving + risk_cost_uplift)
         if direct is not None and hasattr(direct, "monthly"):
             direct.monthly = direct.monthly * cost_multiplier
             direct.annual = direct.monthly.resample("YE").sum()
             direct.annual.index = direct.annual.index.year
+
+        schedule_delay_months = int(round(duration_vectors["schedule"] * schedule_stress))
+        if schedule_delay_months > 0 and loan_schedule is not None and hasattr(loan_schedule, "schedule"):
+            debt_schedule = getattr(loan_schedule, "schedule", pd.DataFrame())
+            if isinstance(debt_schedule, pd.DataFrame) and not debt_schedule.empty and "Month" in debt_schedule.columns:
+                shifted = debt_schedule.copy()
+                shifted["Month"] = pd.to_datetime(shifted["Month"], errors="coerce") + pd.DateOffset(months=schedule_delay_months)
+                loan_schedule.schedule = shifted
+                if hasattr(loan_schedule, "annual") and isinstance(loan_schedule.annual, pd.DataFrame) and not loan_schedule.annual.empty:
+                    annual = shifted.copy()
+                    annual["Year"] = pd.to_datetime(annual["Month"], errors="coerce").dt.year
+                    loan_schedule.annual = (
+                        annual.groupby(["Loan", "Year"]).agg(
+                            Interest_Rate=("Interest Rate", "first"),
+                            Yearly_Remaining_Balance=("Opening Balance", "first"),
+                            Interest_Paid=("Interest", "sum"),
+                            Principal_Paid=("Principal", "sum"),
+                            Total_Payment=("Payment", "sum"),
+                            Year_End_Balance=("Closing Balance", "last"),
+                        )
+                        .reset_index()
+                        .rename(
+                            columns={
+                                "Interest_Rate": "Interest Rate",
+                                "Yearly_Remaining_Balance": "Yearly Remaining Balance",
+                                "Interest_Paid": "Interest Paid",
+                                "Principal_Paid": "Principal Paid",
+                                "Total_Payment": "Total Payment",
+                                "Year_End_Balance": "Year-End Balance",
+                            }
+                        )
+                    )
 
         return {
             "Risk Score": risk_intensity,
@@ -426,6 +556,18 @@ class CassavaBioethanolModel:
             "Feedstock Contract Share": contracted_share,
             "Feedstock Contract Discount": contracted_discount,
             "Commercial Cost Multiplier": cost_multiplier,
+            "Risk Volume Stress (EV)": volume_stress,
+            "Risk Price Stress (EV)": price_stress,
+            "Risk Cost Stress (EV)": cost_stress,
+            "Risk Schedule Stress (EV)": schedule_stress,
+            "Risk Volume Stress (P90)": p90_vectors["volume"],
+            "Risk Price Stress (P90)": p90_vectors["price"],
+            "Risk Cost Stress (P90)": p90_vectors["cost"],
+            "Risk Schedule Stress (P90)": p90_vectors["schedule"],
+            "Risk Volume Duration (months, EV)": duration_vectors["volume"],
+            "Risk Price Duration (months, EV)": duration_vectors["price"],
+            "Risk Cost Duration (months, EV)": duration_vectors["cost"],
+            "Risk Schedule Duration (months, EV)": duration_vectors["schedule"],
         }
 
     def _apply_staff_schedule(self, page: inputs.InputLandingPage):
@@ -548,7 +690,7 @@ class CassavaBioethanolModel:
 
         tax_rate = _get_global("Corporate tax rate", 0.0)
 
-        risk_commercial = self._apply_risk_and_contract_mechanics(page, production, revenue, cost_outputs)
+        risk_commercial = self._apply_risk_and_contract_mechanics(page, production, revenue, cost_outputs, loan_schedule)
 
         financials = compute_financial_statements(
             revenue,

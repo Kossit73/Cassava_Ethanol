@@ -49,6 +49,8 @@ def test_risk_and_commercial_metrics_are_exposed() -> None:
 
     assert "Risk Score" in metrics
     assert "Commercial Cost Multiplier" in metrics
+    assert "Risk Volume Stress (EV)" in metrics
+    assert "Risk Schedule Stress (P90)" in metrics
     assert 0 <= float(metrics["Risk Score"]) <= 1
 
 
