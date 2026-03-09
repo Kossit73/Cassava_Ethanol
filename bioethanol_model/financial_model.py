@@ -278,8 +278,17 @@ class CassavaBioethanolModel:
 
         investor_share = float(lookup.get("Investor share capital", 0.0))
         owner_share = float(lookup.get("Owner share capital", max(0.0, 1.0 - investor_share)))
-        if not np.isclose(investor_share + owner_share, 1.0, atol=1e-6):
-            raise ValueError("Investor share capital plus owner share capital must equal 1.0")
+        if investor_share > 1.0 or owner_share > 1.0:
+            if 0.0 <= investor_share <= 100.0 and 0.0 <= owner_share <= 100.0:
+                investor_share /= 100.0
+                owner_share /= 100.0
+            else:
+                raise ValueError("Investor/Owner share capital must be expressed as decimal fractions or percentages")
+        total_share = investor_share + owner_share
+        if total_share <= 0:
+            raise ValueError("Investor share capital plus owner share capital must be positive")
+        if not np.isclose(total_share, 1.0, atol=0.10):
+            raise ValueError("Investor share capital plus owner share capital must approximately equal 1.0")
         implied_equity = capex - debt_draw
         if implied_equity < -1e-6:
             raise ValueError("Equity plus debt draw must reconcile to the initial capex envelope")
@@ -878,8 +887,15 @@ class CassavaBioethanolModel:
         discount_rate = _get_global("Discount rate", 0.0)
         investor_share = _get_global("Investor share capital", 0.0)
         owner_share = _get_global("Owner share capital", float("nan"))
+        if investor_share > 1.0 or (np.isfinite(owner_share) and owner_share > 1.0):
+            investor_share = investor_share / 100.0 if investor_share > 1.0 else investor_share
+            owner_share = owner_share / 100.0 if np.isfinite(owner_share) and owner_share > 1.0 else owner_share
         if not np.isfinite(owner_share):
             owner_share = max(0.0, 1.0 - investor_share)
+        share_total = investor_share + owner_share
+        if share_total > 0:
+            investor_share = investor_share / share_total
+            owner_share = owner_share / share_total
         init_df = page.initial_investment.model_frame
         total_investment = float(init_df["Cost"].sum()) if "Cost" in init_df.columns else 0.0
 

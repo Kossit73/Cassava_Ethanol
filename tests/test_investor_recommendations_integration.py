@@ -120,3 +120,18 @@ def test_validation_allows_loan_start_before_projection_start() -> None:
     model = CassavaBioethanolModel(copy.deepcopy(page))
     result = model.build("FARM_ONLY")
     assert "metrics" in result
+
+
+def test_validation_allows_tornado_like_share_variation() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    _set_global(page, "Investor share capital", 0.495)
+    _set_global(page, "Owner share capital", 0.55)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+    assert "Investor Share" in metrics and "Owner Share" in metrics
+    assert abs(float(metrics["Investor Share"]) + float(metrics["Owner Share"]) - 1.0) < 1e-6
