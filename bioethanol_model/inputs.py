@@ -317,6 +317,7 @@ def default_input_page() -> InputLandingPage:
                 {"Parameter": "Offtake ceiling price (USD/L)", "Value": 0.9, "Units": "USD/L"},
                 {"Parameter": "Take-or-pay share", "Value": 0.85, "Units": "%"},
                 {"Parameter": "Contracted feedstock share", "Value": 0.6, "Units": "%"},
+                {"Parameter": "Open market feedstock share", "Value": 0.4, "Units": "%"},
                 {"Parameter": "Contract feedstock discount", "Value": 0.08, "Units": "%"},
                 {"Parameter": "Debt sculpting enabled", "Value": 0.0, "Units": "0/1"},
                 {"Parameter": "Target DSCR", "Value": 1.25, "Units": "x"},

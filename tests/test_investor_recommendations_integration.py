@@ -67,3 +67,30 @@ def test_debt_strategy_toggles_adjust_schedule() -> None:
     schedule = result["loan_schedule"].schedule
     assert not schedule.empty
     assert (pd.to_numeric(schedule["Interest Rate"], errors="coerce") <= 0.08).all()
+
+
+def test_validation_rejects_offtake_corridor_inversion() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    _set_global(page, "Offtake floor price (USD/L)", 1.0)
+    _set_global(page, "Offtake ceiling price (USD/L)", 0.8)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    with pytest.raises(ValueError, match="ceiling price"):
+        model.build("FARM_ONLY")
+
+
+def test_validation_rejects_loan_start_outside_projection() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    loan = page.loan_schedule.data.copy()
+    loan.loc[:, "Start Month"] = "2040-01"
+    page.loan_schedule.set_data(loan, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    with pytest.raises(ValueError, match="projection window"):
+        model.build("FARM_ONLY")

@@ -194,6 +194,104 @@ class CassavaBioethanolModel:
         if not (0.0 <= take_or_pay <= 1.0):
             raise ValueError("Take-or-pay share must be between 0 and 1")
 
+        floor_price = _must("Offtake floor price (USD/L)")
+        ceiling_price = _must("Offtake ceiling price (USD/L)")
+        if ceiling_price < floor_price:
+            raise ValueError("Offtake ceiling price must be greater than or equal to the offtake floor price")
+
+        contracted_share = _must("Contracted feedstock share")
+        if not (0.0 <= contracted_share <= 1.0):
+            raise ValueError("Contracted feedstock share must be between 0 and 1")
+        open_market_share = float(lookup.get("Open market feedstock share", 1.0 - contracted_share))
+        if not (0.0 <= open_market_share <= 1.0):
+            raise ValueError("Open market feedstock share must be between 0 and 1")
+        if not np.isclose(contracted_share + open_market_share, 1.0, atol=1e-6):
+            raise ValueError("Contracted feedstock share plus open market feedstock share must equal 1.0")
+
+        # Projection horizon consistency for annual/monthly inputs.
+        projection_start = pd.Period(f"{int(page.projection.start_year)}-01", freq="M")
+        projection_end = pd.Period(f"{int(page.projection.end_year)}-12", freq="M")
+
+        def _validate_year_column(df: pd.DataFrame, table_name: str, column: str = "Year") -> None:
+            if df is None or df.empty or column not in df.columns:
+                return
+            years = pd.to_numeric(df[column], errors="coerce")
+            if years.isna().any():
+                raise ValueError(f"{table_name}: invalid year values detected")
+            if ((years < page.projection.start_year) | (years > page.projection.end_year)).any():
+                raise ValueError(
+                    f"{table_name}: year values must be within projection horizon "
+                    f"{page.projection.start_year}-{page.projection.end_year}"
+                )
+
+        def _validate_month_column(df: pd.DataFrame, table_name: str, column: str) -> None:
+            if df is None or df.empty or column not in df.columns:
+                return
+            months = pd.to_datetime(df[column].astype(str), errors="coerce")
+            if months.isna().any():
+                raise ValueError(f"{table_name}: invalid month values detected in '{column}'")
+            periods = months.dt.to_period("M")
+            if ((periods < projection_start) | (periods > projection_end)).any():
+                raise ValueError(
+                    f"{table_name}: month values in '{column}' must fall within projection window "
+                    f"{projection_start.strftime('%Y-%m')} to {projection_end.strftime('%Y-%m')}"
+                )
+
+        _validate_year_column(page.production_annual.model_frame, "Production Annual")
+        _validate_year_column(page.inflation_schedule.model_frame, "Inflation Schedule")
+        _validate_month_column(page.production_monthly.model_frame, "Production Monthly", "Start Month")
+        _validate_month_column(page.direct_costs_monthly.model_frame, "Direct Costs Monthly", "Month")
+        _validate_month_column(page.staff_costs_monthly.model_frame, "Staff Costs Monthly", "Month")
+        _validate_month_column(page.other_opex_monthly.model_frame, "Other Opex Monthly", "Month")
+        _validate_month_column(page.accounts_receivable.model_frame, "Accounts Receivable", "Effective Month")
+        _validate_month_column(page.inventory_payable.model_frame, "Inventory/Payable", "Effective Month")
+        _validate_month_column(page.loan_schedule.model_frame, "Loan Schedule", "Start Month")
+
+        # Financing consistency checks.
+        init_df = page.initial_investment.model_frame
+        capex = float(pd.to_numeric(init_df.get("Cost"), errors="coerce").fillna(0.0).sum()) if not init_df.empty else 0.0
+        loan_df = page.loan_schedule.model_frame
+        debt_draw = float(
+            pd.to_numeric(
+                loan_df.get("Loan Amount", loan_df.get("Amount", loan_df.get("Draw Amount"))),
+                errors="coerce",
+            ).fillna(0.0).sum()
+        ) if not loan_df.empty else 0.0
+        if debt_draw - capex > 1e-6:
+            raise ValueError("Total debt draw cannot exceed total initial investment envelope")
+
+        investor_share = float(lookup.get("Investor share capital", 0.0))
+        owner_share = float(lookup.get("Owner share capital", max(0.0, 1.0 - investor_share)))
+        if not np.isclose(investor_share + owner_share, 1.0, atol=1e-6):
+            raise ValueError("Investor share capital plus owner share capital must equal 1.0")
+        implied_equity = capex - debt_draw
+        if implied_equity < -1e-6:
+            raise ValueError("Equity plus debt draw must reconcile to the initial capex envelope")
+
+        # Revenue volume linkage: enforce only when sales-volume column exists.
+        rev_df = page.revenue_inputs.model_frame
+        prod_df = page.production_monthly.model_frame
+        volume_cols = ["Volume", "Sales Volume", "Ethanol litres sold"]
+        volume_col = next((c for c in volume_cols if c in rev_df.columns), None)
+        if volume_col and not rev_df.empty and "Product" in rev_df.columns and not prod_df.empty:
+            sold = pd.to_numeric(
+                rev_df.loc[rev_df["Product"].astype(str).str.contains("ethanol", case=False, na=False), volume_col],
+                errors="coerce",
+            ).fillna(0.0).sum()
+            produced = pd.to_numeric(prod_df.get("Ethanol litres"), errors="coerce").fillna(0.0).sum()
+            inventory_draw_litres = 0.0
+            inv_df = page.inventory_payable.model_frame
+            if not inv_df.empty and "Metric" in inv_df.columns and "Value" in inv_df.columns:
+                inventory_draw_litres = pd.to_numeric(
+                    inv_df.loc[
+                        inv_df["Metric"].astype(str).str.contains("inventory draw litres", case=False, na=False),
+                        "Value",
+                    ],
+                    errors="coerce",
+                ).fillna(0.0).sum()
+            if sold > produced + inventory_draw_litres + 1e-6:
+                raise ValueError("Revenue sales volume cannot exceed produced ethanol litres unless inventory draw is modeled")
+
     def _apply_debt_strategy_toggles(self, page: inputs.InputLandingPage) -> None:
         globals_df = page.global_inputs.model_frame
         if globals_df.empty:
@@ -226,6 +324,18 @@ class CassavaBioethanolModel:
                 tenor = pd.to_numeric(adjusted["Tenor Years"], errors="coerce").fillna(0.0)
                 tenor_extension = 1.0 if target_dscr >= 1.2 else 2.0
                 adjusted["Tenor Years"] = tenor + tenor_extension
+
+        if "Tenor Years" in adjusted.columns:
+            tenor = pd.to_numeric(adjusted["Tenor Years"], errors="coerce").fillna(8.0)
+            adjusted["Tenor Years"] = np.clip(tenor, 3.0, 20.0)
+        if "Grace Years" in adjusted.columns:
+            grace = pd.to_numeric(adjusted["Grace Years"], errors="coerce").fillna(1.0)
+            adjusted["Grace Years"] = np.clip(grace, 0.0, 5.0)
+        if {"Tenor Years", "Grace Years"}.issubset(adjusted.columns):
+            adjusted["Grace Years"] = np.minimum(
+                pd.to_numeric(adjusted["Grace Years"], errors="coerce").fillna(0.0),
+                pd.to_numeric(adjusted["Tenor Years"], errors="coerce").fillna(3.0) - 1.0,
+            )
 
         if refinancing and refinancing_rate > 0 and "Interest Rate" in adjusted.columns:
             start_period = pd.Period(f"{refinancing_year}-01", freq="M")
