@@ -54,7 +54,10 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
         life_years = row.get("Life (years)") or row.get("Life") or 10
         rate = row.get("Depreciation Rate")
         cost = float(row["Cost"])
-        if rate in (None, 0, np.nan):
+        # pd.isna() catches NaN from blank cells — np.nan != np.nan so the old
+        # `rate in (None, 0, np.nan)` check silently fell through for NaN,
+        # producing NaN depreciation and understating financial metrics.
+        if pd.isna(rate) or not rate:
             annual_dep = cost / life_years if life_years else 0
         else:
             annual_dep = cost * float(rate)
@@ -84,7 +87,11 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
 
     summary = initial_investment.copy()
     summary["Annual Depreciation"] = summary.apply(
-        lambda r: (r["Cost"] / r.get("Life (years)") if r.get("Depreciation Rate") in (None, 0, np.nan) else r["Cost"] * r.get("Depreciation Rate")),
+        lambda r: (
+            r["Cost"] / r.get("Life (years)")
+            if pd.isna(r.get("Depreciation Rate")) or not r.get("Depreciation Rate")
+            else r["Cost"] * r.get("Depreciation Rate")
+        ),
         axis=1,
     )
     summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
