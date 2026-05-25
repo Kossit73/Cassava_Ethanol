@@ -717,6 +717,34 @@ def _update_projection(page: InputLandingPage) -> None:
     page.projection.clamp_planning_start()
 
 
+def _shift_year_column(table: EditableTable, year_delta: int) -> bool:
+    """Shift an integer ``Year`` column by *year_delta* years.
+
+    Used for annual tables (inflation_schedule, production_annual) so they
+    stay within the projection horizon when the start year is changed.
+    """
+    if year_delta == 0 or table.data.empty:
+        return False
+
+    year_col = next(
+        (c for c in table.data.columns if str(c).strip().lower() == "year"), None
+    )
+    if year_col is None:
+        return False
+
+    try:
+        years = pd.to_numeric(table.data[year_col], errors="coerce")
+        if years.isna().any():
+            return False
+        new_years = (years + year_delta).astype(int)
+        if (table.data[year_col].astype(int) == new_years).all():
+            return False
+        table.data.loc[:, year_col] = new_years
+        return True
+    except Exception:  # pragma: no cover
+        return False
+
+
 def _shift_month_column(table: EditableTable, year_delta: int) -> bool:
     """Shift a table's ``Month`` column by *year_delta* years.
 
@@ -777,6 +805,8 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     st.session_state[planning_key] = page.projection.planning_start
 
     year_delta = start - previous_start
+
+    # Monthly tables — shift the Period/Month column.
     tables_to_shift = [
         page.production_monthly,
         page.direct_costs_monthly,
@@ -789,6 +819,16 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     any_shifted = False
     for tbl in tables_to_shift:
         if _shift_month_column(tbl, year_delta):
+            any_shifted = True
+
+    # Annual tables — shift the integer Year column so they stay inside the
+    # new projection horizon and don't fail the _validate_year_column check.
+    annual_tables_to_shift = [
+        page.inflation_schedule,
+        page.production_annual,
+    ]
+    for tbl in annual_tables_to_shift:
+        if _shift_year_column(tbl, year_delta):
             any_shifted = True
 
     if (
