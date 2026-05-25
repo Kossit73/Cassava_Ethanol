@@ -256,6 +256,11 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
                 _get_metric("Total Initial Investment"),
                 _get_metric("Initial Equity Investment"),
                 _get_metric("Initial Loan Funding"),
+                (
+                    "Passed"
+                    if bool((results.get("assumption_quality_audit") or {}).get("passed", False))
+                    else "Failed"
+                ),
             ]
         },
         index=[
@@ -269,6 +274,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
             "Total Initial Investment",
             "Initial Equity Investment",
             "Initial Loan Funding",
+            "Assumption Quality Checks",
         ],
     )
 

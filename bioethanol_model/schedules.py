@@ -54,7 +54,10 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
         life_years = row.get("Life (years)") or row.get("Life") or 10
         rate = row.get("Depreciation Rate")
         cost = float(row["Cost"])
-        if rate in (None, 0, np.nan):
+        # pd.isna() catches NaN from blank cells — np.nan != np.nan so the old
+        # `rate in (None, 0, np.nan)` check silently fell through for NaN,
+        # producing NaN depreciation and understating financial metrics.
+        if pd.isna(rate) or not rate:
             annual_dep = cost / life_years if life_years else 0
         else:
             annual_dep = cost * float(rate)
@@ -84,7 +87,11 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
 
     summary = initial_investment.copy()
     summary["Annual Depreciation"] = summary.apply(
-        lambda r: (r["Cost"] / r.get("Life (years)") if r.get("Depreciation Rate") in (None, 0, np.nan) else r["Cost"] * r.get("Depreciation Rate")),
+        lambda r: (
+            r["Cost"] / r.get("Life (years)")
+            if pd.isna(r.get("Depreciation Rate")) or not r.get("Depreciation Rate")
+            else r["Cost"] * r.get("Depreciation Rate")
+        ),
         axis=1,
     )
     summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
@@ -1254,6 +1261,8 @@ def compute_key_metrics(
     owner_share: float,
     *,
     revenue: RevenueOutput | None = None,
+    terminal_growth_rate: float = 0.0,
+    capital_gains_tax_rate: float = 0.0,
 ) -> Dict[str, float]:
     raw_free_cash_flow = financials.cashflow_monthly["Free Cash Flow"].astype(float)
     (
@@ -1291,6 +1300,103 @@ def compute_key_metrics(
     investor_irr = irr(investor_cashflows)
     owner_irr = irr(owner_cashflows)
 
+    operating_cf = pd.to_numeric(financials.cashflow_monthly.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+    debt_service = pd.to_numeric(financials.cashflow_monthly.get("Debt Service"), errors="coerce").fillna(0.0)
+    interest = pd.to_numeric(financials.income_monthly.get("Interest"), errors="coerce").fillna(0.0)
+    principal = (debt_service - interest).clip(lower=0.0)
+    cfads = operating_cf
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dscr_series = cfads / debt_service.replace(0.0, np.nan)
+    dscr_series = dscr_series.replace([np.inf, -np.inf], np.nan)
+
+    debt_balance = pd.to_numeric(financials.balance_monthly.get("Debt"), errors="coerce").fillna(0.0)
+    cash_balance = pd.to_numeric(financials.balance_monthly.get("Cash"), errors="coerce").fillna(0.0)
+
+    # Liquidity diagnostics.
+    operating_burn = pd.to_numeric(financials.income_monthly.get("COGS"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + pd.to_numeric(financials.income_monthly.get("Staff Costs"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + pd.to_numeric(financials.income_monthly.get("Other Opex"), errors="coerce").fillna(0.0)
+    operating_burn = operating_burn + interest
+    with np.errstate(divide="ignore", invalid="ignore"):
+        liquidity_cover_months = cash_balance / operating_burn.replace(0.0, np.nan)
+    liquidity_cover_months = liquidity_cover_months.replace([np.inf, -np.inf], np.nan)
+
+    min_cash_balance = float(cash_balance.min()) if not cash_balance.empty else 0.0
+    min_liquidity_cover = float(liquidity_cover_months.min()) if not liquidity_cover_months.dropna().empty else float("nan")
+
+    peak_funding_requirement = max(0.0, float(-cash_balance.min())) if not cash_balance.empty else 0.0
+    peak_funding_month = None
+    if not cash_balance.empty:
+        peak_idx = cash_balance.idxmin()
+        if isinstance(peak_idx, pd.Timestamp):
+            peak_funding_month = peak_idx.strftime("%Y-%m")
+
+    # Annual leverage/coverage diagnostics.
+    income_annual = financials.income_annual if isinstance(financials.income_annual, pd.DataFrame) else pd.DataFrame()
+    balance_annual = financials.balance_annual if isinstance(financials.balance_annual, pd.DataFrame) else pd.DataFrame()
+
+    if not income_annual.empty:
+        ebitda_annual = pd.to_numeric(income_annual.get("EBITDA"), errors="coerce").fillna(0.0)
+        interest_annual = pd.to_numeric(income_annual.get("Interest"), errors="coerce").fillna(0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            interest_coverage_annual = ebitda_annual / interest_annual.replace(0.0, np.nan)
+        interest_coverage_annual = interest_coverage_annual.replace([np.inf, -np.inf], np.nan)
+    else:
+        interest_coverage_annual = pd.Series(dtype=float)
+
+    if not balance_annual.empty and not income_annual.empty:
+        debt_annual = pd.to_numeric(balance_annual.get("Debt"), errors="coerce").fillna(0.0)
+        cash_annual = pd.to_numeric(balance_annual.get("Cash"), errors="coerce").fillna(0.0)
+        net_debt_annual = debt_annual - cash_annual
+        ebitda_annual = pd.to_numeric(income_annual.get("EBITDA"), errors="coerce").fillna(0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            net_debt_to_ebitda_annual = net_debt_annual / ebitda_annual.replace(0.0, np.nan)
+        net_debt_to_ebitda_annual = net_debt_to_ebitda_annual.replace([np.inf, -np.inf], np.nan)
+    else:
+        net_debt_to_ebitda_annual = pd.Series(dtype=float)
+
+    # Working capital trend (proxy days) from modeled statements.
+    revenue_monthly = pd.to_numeric(financials.income_monthly.get("Revenue"), errors="coerce").fillna(0.0)
+    cogs_monthly = pd.to_numeric(financials.income_monthly.get("COGS"), errors="coerce").fillna(0.0)
+    ar_monthly = pd.to_numeric(financials.balance_monthly.get("Accounts Receivable & Other Assets"), errors="coerce").fillna(0.0)
+    inventory_monthly = pd.to_numeric(financials.balance_monthly.get("Inventory"), errors="coerce").fillna(0.0)
+    payables_monthly = pd.to_numeric(financials.balance_monthly.get("Accounts Payable"), errors="coerce").fillna(0.0) + pd.to_numeric(
+        financials.balance_monthly.get("Other Payables"), errors="coerce"
+    ).fillna(0.0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dso_series = 30.0 * ar_monthly / revenue_monthly.replace(0.0, np.nan)
+        dio_series = 30.0 * inventory_monthly / cogs_monthly.replace(0.0, np.nan)
+        dpo_series = 30.0 * payables_monthly / cogs_monthly.replace(0.0, np.nan)
+    dso_series = dso_series.replace([np.inf, -np.inf], np.nan)
+    dio_series = dio_series.replace([np.inf, -np.inf], np.nan)
+    dpo_series = dpo_series.replace([np.inf, -np.inf], np.nan)
+    ccc_series = dso_series + dio_series - dpo_series
+    monthly_discount = max(-0.999999, float(discount_rate) / 12.0)
+    discount_factors = pd.Series(
+        [(1.0 / ((1.0 + monthly_discount) ** (i + 1))) for i in range(len(cfads))],
+        index=cfads.index,
+        dtype=float,
+    ) if len(cfads) else pd.Series(dtype=float)
+
+    pv_cfads_total = float((cfads * discount_factors).sum()) if not discount_factors.empty else 0.0
+    outstanding_debt = float(debt_balance.iloc[0]) if not debt_balance.empty else 0.0
+    llcr = (pv_cfads_total / outstanding_debt) if outstanding_debt > 0 else float("nan")
+
+    if not cfads.empty:
+        tail_cfads = float(cfads.iloc[-1])
+    else:
+        tail_cfads = 0.0
+    effective_growth = min(float(terminal_growth_rate), max(float(discount_rate) - 1e-4, -0.99))
+    terminal_value = 0.0
+    if discount_rate > effective_growth and tail_cfads > 0:
+        terminal_value = tail_cfads * (1.0 + effective_growth) / max(discount_rate - effective_growth, 1e-6)
+    terminal_value_after_tax = terminal_value * (1.0 - max(0.0, float(capital_gains_tax_rate)))
+    terminal_discount = float(discount_factors.iloc[-1]) if not discount_factors.empty else 0.0
+    pv_terminal_value = terminal_value_after_tax * terminal_discount
+    plcr = ((pv_cfads_total + pv_terminal_value) / outstanding_debt) if outstanding_debt > 0 else float("nan")
+
     cumulative_project = np.cumsum(project_cashflows)
     payback_months = float("nan")
     payback_label = None
@@ -1320,6 +1426,29 @@ def compute_key_metrics(
         "Final Month Equity CF": _final_value(equity_cash_flow),
         "Payback Period (months)": payback_months,
         "Payback Month": payback_label,
+        "DSCR (min)": float(dscr_series.min()) if not dscr_series.dropna().empty else float("nan"),
+        "DSCR (avg)": float(dscr_series.mean()) if not dscr_series.dropna().empty else float("nan"),
+        "Debt Service Coverage Breach Months": float((dscr_series < 1.0).sum()) if not dscr_series.empty else 0.0,
+        "LLCR": llcr,
+        "PLCR": plcr,
+        "PV CFADS": pv_cfads_total,
+        "Outstanding Debt (opening)": outstanding_debt,
+        "Terminal Value (post-tax)": terminal_value_after_tax,
+        "PV Terminal Value": pv_terminal_value,
+        "Principal Service (total)": float(principal.sum()),
+        "Interest Service (total)": float(interest.sum()),
+        "Minimum Monthly Cash Balance": min_cash_balance,
+        "Months of Liquidity Cover (min)": min_liquidity_cover,
+        "Peak Funding Requirement": peak_funding_requirement,
+        "Peak Funding Month": peak_funding_month,
+        "Interest Coverage (avg annual)": float(interest_coverage_annual.mean()) if not interest_coverage_annual.dropna().empty else float("nan"),
+        "Interest Coverage (min annual)": float(interest_coverage_annual.min()) if not interest_coverage_annual.dropna().empty else float("nan"),
+        "Net Debt / EBITDA (avg annual)": float(net_debt_to_ebitda_annual.mean()) if not net_debt_to_ebitda_annual.dropna().empty else float("nan"),
+        "Net Debt / EBITDA (max annual)": float(net_debt_to_ebitda_annual.max()) if not net_debt_to_ebitda_annual.dropna().empty else float("nan"),
+        "Working Capital Days (DSO avg)": float(dso_series.mean()) if not dso_series.dropna().empty else float("nan"),
+        "Working Capital Days (DIO avg)": float(dio_series.mean()) if not dio_series.dropna().empty else float("nan"),
+        "Working Capital Days (DPO avg)": float(dpo_series.mean()) if not dpo_series.dropna().empty else float("nan"),
+        "Working Capital Days (CCC avg)": float(ccc_series.mean()) if not ccc_series.dropna().empty else float("nan"),
     }
     return metrics
 

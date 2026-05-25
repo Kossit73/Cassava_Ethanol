@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import json
 import re
 import tempfile
+from datetime import datetime
+import textwrap
 from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
@@ -13,6 +17,8 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
@@ -26,7 +32,9 @@ from bioethanol_model.inputs import (
 )
 from bioethanol_model.scenario import (
     ScenarioConfig,
+    credit_committee_scenario_configs,
     goal_seek_to_target,
+    reverse_stress_test,
     scenario_comparison,
     scenario_parameter_catalog,
 )
@@ -61,6 +69,7 @@ MODEL_VERSION_KEY = "model_version"
 MC_CACHE_KEY = "mc_cache_store"
 SENSITIVITY_CACHE_KEY = "sensitivity_cache"
 SCENARIO_CACHE_KEY = "scenario_cache"
+CHART_KEY_COUNTER = "chart_key_counter"
 
 # Columns that are derived from other inputs and should not be editable via the
 # "Modify Default Inputs & Figures" pane or the general data editor. The map is
@@ -297,6 +306,7 @@ MC_PARAMETER_STATE_KEY = "mc_parameter_config"
 MC_SELECTED_PARAMETER_STATE_KEY = "mc_selected_parameters"
 MC_ITERATION_STATE_KEY = "mc_iteration_setting"
 MC_SEED_STATE_KEY = "mc_random_seed"
+MC_CORRELATION_STATE_KEY = "mc_correlation_matrix"
 
 SCENARIO_DEFINITIONS_KEY = "scenario_definitions"
 SCENARIO_SELECTION_STATE_KEY = "scenario_builder_selection"
@@ -422,6 +432,8 @@ def _ensure_monte_carlo_state() -> None:
         st.session_state[MC_ITERATION_STATE_KEY] = DEFAULT_MONTE_CARLO_ITERATIONS
     if MC_SEED_STATE_KEY not in st.session_state:
         st.session_state[MC_SEED_STATE_KEY] = DEFAULT_MONTE_CARLO_SEED
+    if MC_CORRELATION_STATE_KEY not in st.session_state:
+        st.session_state[MC_CORRELATION_STATE_KEY] = pd.DataFrame()
 
 
 def _monte_carlo_parameters() -> pd.DataFrame:
@@ -429,7 +441,12 @@ def _monte_carlo_parameters() -> pd.DataFrame:
     return st.session_state[MC_PARAMETER_STATE_KEY].copy()
 
 
-def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> str:
+def _monte_carlo_signature(
+    config: pd.DataFrame,
+    iterations: int,
+    seed: int,
+    correlation_matrix: pd.DataFrame | None = None,
+) -> str:
     filtered = (
         config.replace("", np.nan)
         .dropna(subset=["Parameter", "Distribution"], how="any")
@@ -440,6 +457,11 @@ def _monte_carlo_signature(config: pd.DataFrame, iterations: int, seed: int) -> 
         "iterations": int(iterations),
         "seed": int(seed),
         "config": ordered.to_dict(orient="records"),
+        "correlation": (
+            correlation_matrix.round(6).fillna(0.0).to_dict(orient="index")
+            if isinstance(correlation_matrix, pd.DataFrame) and not correlation_matrix.empty
+            else {}
+        ),
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -695,6 +717,34 @@ def _update_projection(page: InputLandingPage) -> None:
     page.projection.clamp_planning_start()
 
 
+def _shift_year_column(table: EditableTable, year_delta: int) -> bool:
+    """Shift an integer ``Year`` column by *year_delta* years.
+
+    Used for annual tables (inflation_schedule, production_annual) so they
+    stay within the projection horizon when the start year is changed.
+    """
+    if year_delta == 0 or table.data.empty:
+        return False
+
+    year_col = next(
+        (c for c in table.data.columns if str(c).strip().lower() == "year"), None
+    )
+    if year_col is None:
+        return False
+
+    try:
+        years = pd.to_numeric(table.data[year_col], errors="coerce")
+        if years.isna().any():
+            return False
+        new_years = (years + year_delta).astype(int)
+        if (table.data[year_col].astype(int) == new_years).all():
+            return False
+        table.data.loc[:, year_col] = new_years
+        return True
+    except Exception:  # pragma: no cover
+        return False
+
+
 def _shift_month_column(table: EditableTable, year_delta: int) -> bool:
     """Shift a table's ``Month`` column by *year_delta* years.
 
@@ -755,6 +805,8 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     st.session_state[planning_key] = page.projection.planning_start
 
     year_delta = start - previous_start
+
+    # Monthly tables — shift the Period/Month column.
     tables_to_shift = [
         page.production_monthly,
         page.direct_costs_monthly,
@@ -767,6 +819,16 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     any_shifted = False
     for tbl in tables_to_shift:
         if _shift_month_column(tbl, year_delta):
+            any_shifted = True
+
+    # Annual tables — shift the integer Year column so they stay inside the
+    # new projection horizon and don't fail the _validate_year_column check.
+    annual_tables_to_shift = [
+        page.inflation_schedule,
+        page.production_annual,
+    ]
+    for tbl in annual_tables_to_shift:
+        if _shift_year_column(tbl, year_delta):
             any_shifted = True
 
     if (
@@ -1209,6 +1271,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     """Expose frequently tweaked assumptions inside the main page."""
 
     st.subheader("Key Assumptions")
+    st.caption("Unit hint: percentage/rate fields accept either decimal form (e.g., 0.12) or percent form (e.g., 12). The model auto-normalizes percent-form inputs.")
     original_df = table.data.copy()
     df = table.data.copy()
     updated = False
@@ -1252,6 +1315,29 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     table.set_data(df, mark_user_input=updated)
     if not df.equals(original_df):
         _update_table_editor_state(table)
+
+
+def _global_input_outlier_warnings(table: EditableTable) -> None:
+    if table.name != "Global Inputs" or table.data is None or table.data.empty:
+        return
+    if not {"Parameter", "Value"}.issubset(table.data.columns):
+        return
+    df = table.data.copy()
+    warnings: List[str] = []
+    for _, row in df.iterrows():
+        parameter = str(row.get("Parameter", "")).strip()
+        units = str(row.get("Units", "")).strip().lower()
+        value = pd.to_numeric(pd.Series([row.get("Value")]), errors="coerce").iloc[0]
+        if pd.isna(value):
+            continue
+        is_percent = ("%" in units) or any(
+            token in parameter.lower()
+            for token in ("rate", "share", "growth", "discount", "tax", "trigger", "dscr")
+        )
+        if is_percent and (value < -1.0 or value > 100.0):
+            warnings.append(f"{parameter}: {value}")
+    if warnings:
+        st.warning("Outlier assumption values detected (please verify units): " + "; ".join(warnings[:8]))
 
 
 def _numeric_step(value: float) -> float:
@@ -1982,6 +2068,83 @@ def _reset_period_index(df: pd.DataFrame, label: str) -> pd.DataFrame:
         result[label] = pd.to_datetime(result[label]).dt.to_period("M").astype(str)
     return result
 
+
+
+def _next_chart_key(prefix: str) -> str:
+    counter = int(st.session_state.get(CHART_KEY_COUNTER, 0))
+    st.session_state[CHART_KEY_COUNTER] = counter + 1
+    return f"{prefix}_{counter}"
+
+
+def _safe_bar_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render bar charts with a fallback that avoids hard Altair import failures."""
+    try:
+        st.bar_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Category", "Value"]
+        fig = px.bar(fallback_df, x="Category", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.bar(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", barmode="group", title=title)
+
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("bar_fallback"))
+    st.caption("Rendered with Plotly fallback because Streamlit bar_chart backend is unavailable in this environment.")
+
+
+
+def _safe_line_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render line charts with Plotly fallback when Streamlit chart backend fails."""
+    try:
+        st.line_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Index", "Value"]
+        fig = px.line(fallback_df, x="Index", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.line(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
+
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("line_fallback"))
+    st.caption("Rendered with Plotly fallback because Streamlit line_chart backend is unavailable in this environment.")
+
+
+def _safe_area_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None) -> None:
+    """Render area charts with Plotly fallback when Streamlit chart backend fails."""
+    try:
+        st.area_chart(data)
+        return
+    except Exception:
+        pass
+
+    if isinstance(data, pd.Series):
+        fallback_df = data.reset_index()
+        fallback_df.columns = ["Index", "Value"]
+        fig = px.area(fallback_df, x="Index", y="Value", title=title)
+    else:
+        fallback_df = data.copy()
+        if fallback_df.index.name is None:
+            fallback_df.index.name = "Index"
+        fallback_df = fallback_df.reset_index().melt(id_vars=[fallback_df.index.name], var_name="Metric", value_name="Value")
+        fig = px.area(fallback_df, x=fallback_df.columns[0], y="Value", color="Metric", title=title)
+
+    st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("area_fallback"))
+    st.caption("Rendered with Plotly fallback because Streamlit area_chart backend is unavailable in this environment.")
+
 def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     metrics = results["metrics"]
     revenue = results["revenue"]
@@ -2063,12 +2226,60 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     )
     st.dataframe(drivers, use_container_width=True, hide_index=True)
 
+    st.markdown("### Lender Coverage Metrics")
+    lender_df = pd.DataFrame(
+        {
+            "Metric": [
+                "DSCR (min)",
+                "DSCR (avg)",
+                "Debt Service Coverage Breach Months",
+                "LLCR",
+                "PLCR",
+                "Outstanding Debt (opening)",
+                "PV CFADS",
+                "PV Terminal Value",
+            ],
+            "Value": [
+                _format_rate(metrics.get("DSCR (min)")),
+                _format_rate(metrics.get("DSCR (avg)")),
+                f"{metrics.get('Debt Service Coverage Breach Months', 0):,.0f}",
+                _format_rate(metrics.get("LLCR")),
+                _format_rate(metrics.get("PLCR")),
+                _format_currency(metrics.get("Outstanding Debt (opening)")),
+                _format_currency(metrics.get("PV CFADS")),
+                _format_currency(metrics.get("PV Terminal Value")),
+            ],
+        }
+    )
+    st.dataframe(lender_df, use_container_width=True, hide_index=True)
+
+    st.markdown("### Covenant Heatmap (DSCR)")
+    dscr_base = pd.to_numeric(financials.cashflow_monthly.get("Operating Cash Flow"), errors="coerce").fillna(0.0)
+    dscr_debt = pd.to_numeric(financials.cashflow_monthly.get("Debt Service"), errors="coerce").replace(0.0, np.nan)
+    dscr_series = (dscr_base / dscr_debt).replace([np.inf, -np.inf], np.nan)
+    if not dscr_series.dropna().empty:
+        dscr_df = dscr_series.to_frame("DSCR")
+        dscr_df["Month"] = dscr_df.index.to_period("M").astype(str)
+        dscr_df["Breach (<1.0x)"] = dscr_df["DSCR"] < 1.0
+        heat = px.imshow(
+            np.array([dscr_df["DSCR"].fillna(0.0).values]),
+            aspect="auto",
+            color_continuous_scale="RdYlGn",
+            labels={"x": "Month", "y": "Metric", "color": "DSCR"},
+        )
+        heat.update_xaxes(tickmode="array", tickvals=list(range(len(dscr_df))), ticktext=dscr_df["Month"].tolist())
+        heat.update_yaxes(tickmode="array", tickvals=[0], ticktext=["DSCR"])
+        st.plotly_chart(heat, use_container_width=True)
+        st.dataframe(dscr_df[["Month", "DSCR", "Breach (<1.0x)"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("No DSCR series available for covenant heatmap.")
+
     st.markdown("### Annual Operations & Production")
     production_annual = production.annual.copy()
     if not production_annual.empty:
         chart_data = production_annual.select_dtypes(include=[np.number])
         if not chart_data.empty:
-            st.bar_chart(chart_data)
+            _safe_bar_chart(chart_data, title="Annual Operations & Production")
         else:
             st.info("No numeric production data available for charting.")
     else:
@@ -2093,10 +2304,10 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         if c in financials.cashflow_monthly.columns
     ]
     if cash_columns:
-        st.line_chart(financials.cashflow_monthly[cash_columns])
+        _safe_line_chart(financials.cashflow_monthly[cash_columns])
         cumulative_df = financials.cashflow_monthly[cash_columns].cumsum()
         cumulative_df.columns = [f"Cumulative {col}" for col in cumulative_df.columns]
-        st.line_chart(cumulative_df)
+        _safe_line_chart(cumulative_df)
 
     st.markdown("### Revenue Mix")
     revenue_annual = revenue.annual.copy()
@@ -2106,14 +2317,14 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
         else:
             mix_df = revenue_annual
         if not mix_df.empty:
-            st.bar_chart(mix_df)
+            _safe_bar_chart(mix_df, title="Revenue Mix")
         st.dataframe(revenue_annual.reset_index().rename(columns={"index": "Year"}), use_container_width=True)
     else:
         st.info("Revenue inputs are empty for the current projection.")
 
     st.markdown("### Operating Cost Breakdown")
     if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.monthly.empty:
-        st.area_chart(expenses_summary.monthly)
+        _safe_area_chart(expenses_summary.monthly)
     else:
         cost_monthly = pd.DataFrame(
             {
@@ -2123,7 +2334,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
             }
         )
         if not cost_monthly.empty:
-            st.area_chart(cost_monthly)
+            _safe_area_chart(cost_monthly)
 
     if isinstance(expenses_summary, ExpenseSummary) and not expenses_summary.annual.empty:
         annual_expense = expenses_summary.annual.copy()
@@ -2144,11 +2355,11 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     st.markdown("### Capital Expenditure & Debt")
     capex_df = model.input_page.initial_investment.model_frame
     if not capex_df.empty:
-        st.bar_chart(capex_df.set_index("Item")["Cost"])
+        _safe_bar_chart(capex_df.set_index("Item")["Cost"], title="Capital Expenditure")
         st.dataframe(capex_df, use_container_width=True)
     debt_chart = loan_schedule.schedule.pivot_table(index="Month", values="Closing Balance", aggfunc="sum")
     if not debt_chart.empty:
-        st.line_chart(debt_chart)
+        _safe_line_chart(debt_chart)
 
     st.markdown("### Fixed Asset Summary")
     st.dataframe(depreciation.summary, use_container_width=True)
@@ -2156,7 +2367,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     st.markdown("### Debt Schedule Chart")
     debt_payments = loan_schedule.schedule.pivot_table(index="Month", values="Payment", aggfunc="sum")
     if not debt_payments.empty:
-        st.area_chart(debt_payments)
+        _safe_area_chart(debt_payments)
 
     st.markdown("### Yearly Loan Amortisation")
     yearly_amortisation = getattr(loan_schedule, "annual", pd.DataFrame())
@@ -2204,7 +2415,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
             monthly_chart = break_even_monthly[numeric_columns]
             if not monthly_chart.empty:
                 st.markdown("#### Monthly Break-even Trend")
-                st.line_chart(monthly_chart)
+                _safe_line_chart(monthly_chart)
 
                 aggregation: Dict[str, str] = {}
                 if "Monthly Margin" in monthly_chart.columns:
@@ -2217,7 +2428,7 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 if not annual_break_even.empty:
                     annual_break_even.index = annual_break_even.index.to_period("Y").astype(str)
                     st.markdown("#### Annual Break-even Trend")
-                    st.line_chart(annual_break_even)
+                    _safe_line_chart(annual_break_even)
 
 def _render_financial_performance(results: Dict[str, object]) -> None:
     financials = results["financials"]
@@ -2378,13 +2589,13 @@ def _render_cash_flow_page(results: Dict[str, object]) -> None:
         if c in cash_monthly.columns
     ]
     if cash_columns:
-        st.line_chart(cash_monthly[cash_columns])
+        _safe_line_chart(cash_monthly[cash_columns])
 
     st.subheader("Cumulative Equity Cash Flow")
     if "Equity Cash Flow" in cash_monthly.columns:
         cumulative_equity = cash_monthly[["Equity Cash Flow"]].cumsum()
         cumulative_equity.columns = ["Cumulative Equity Cash Flow"]
-        st.line_chart(cumulative_equity)
+        _safe_line_chart(cumulative_equity)
         cumulative_df = cumulative_equity.reset_index().rename(columns={cumulative_equity.index.name or "index": "Month"})
         st.dataframe(cumulative_df, use_container_width=True)
 
@@ -2453,6 +2664,26 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
 
     options = parameter_catalog["Parameter"].tolist()
     scenario_definitions = st.session_state.setdefault(SCENARIO_DEFINITIONS_KEY, [])
+
+    st.subheader("Credit Committee Scenario Pack")
+    st.caption(
+        "Load pre-baked committee scenarios with correlated stresses (lower ethanol price proxy, "
+        "higher feedstock costs, and ramp-delay proxy)."
+    )
+    if st.button("Load Base / Downside / Severe Downside / Upside", key="load_credit_committee_pack"):
+        committee_configs = credit_committee_scenario_configs(base_page)
+        scenario_definitions = [
+            {
+                "name": cfg.name,
+                "overrides": cfg.overrides,
+                "deltas": {k: None for k in cfg.overrides},
+            }
+            for cfg in committee_configs
+        ]
+        st.session_state[SCENARIO_DEFINITIONS_KEY] = scenario_definitions
+        st.success("Credit committee scenario pack loaded.")
+        _trigger_rerun()
+
     selected_defaults = st.session_state.setdefault(SCENARIO_SELECTION_STATE_KEY, [])
     selected_parameters = st.multiselect(
         "Select parameters to configure",
@@ -2672,6 +2903,18 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         display_df = combined_df[display_cols] if display_cols else combined_df
         st.dataframe(display_df, use_container_width=True)
 
+    st.subheader("Reverse Stress Test (Correlated)")
+    st.caption(
+        "Search correlated stress combinations to answer: what breaks DSCR covenant and what breaks NPV > 0."
+    )
+    if st.button("Run Reverse Stress Test", key=f"reverse_stress_{model.scenario.lower()}"):
+        reverse_model = _scenario_model()
+        reverse_df = reverse_stress_test(reverse_model, dscr_floor=1.0, npv_floor=0.0)
+        if reverse_df.empty:
+            st.info("No breach combination found within the configured stress grid.")
+        else:
+            st.dataframe(reverse_df, use_container_width=True, hide_index=True)
+
     toolkit = comparison_model.advanced_toolkit()
     analysis_df = pd.DataFrame()
     feature_cols: List[str] = []
@@ -2809,7 +3052,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
                     st.plotly_chart(fig, use_container_width=True)
                     st.caption("Rolling standard deviation provides a volatility view of the revolver balance.")
                     std_chart = viz_df.set_index("Period")["Rolling Std"].rename("Rolling Std Dev")
-                    st.line_chart(std_chart)
+                    _safe_line_chart(std_chart)
             else:
                 st.info("Monthly free cash flow is required to analyse the revolver trajectory.")
         else:
@@ -2859,6 +3102,1104 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         st.info(goal_message)
 
     st.dataframe(goal_df, use_container_width=True)
+
+
+
+RAG_PROVIDER_OPTIONS = ["OpenAI", "Copilot", "Vertex", "Anthropic", "DeepSeek", "Custom"]
+
+
+def _rag_state() -> Dict[str, object]:
+    return st.session_state.setdefault(
+        "rag_assistant",
+        {
+            "indexed_docs": [],
+            "chunks": [],
+            "config": {},
+            "insights": "",
+            "business_plan": "",
+            "forecast_table": pd.DataFrame(),
+        },
+    )
+
+
+def _chunk_text(text: str, chunk_size: int = 1400) -> List[str]:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[i : i + chunk_size] for i in range(0, len(cleaned), chunk_size)]
+
+
+def _build_model_knowledge_pack(results: Dict[str, object]) -> str:
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+    financials = results.get("financials") if isinstance(results, dict) else None
+    sections: List[str] = ["# Financial Model Knowledge Pack"]
+
+    if metrics:
+        metric_rows = [f"- {k}: {v}" for k, v in list(metrics.items())[:25]]
+        sections.append("## Core Metrics\n" + "\n".join(metric_rows))
+
+    def _df_section(title: str, df: pd.DataFrame | None, rows: int = 24) -> None:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            sections.append(f"## {title}\n" + df.head(rows).to_markdown())
+
+    if financials is not None:
+        _df_section("Income Statement (Monthly excerpt)", getattr(financials, "income_monthly", None))
+        _df_section("Cash Flow Statement (Monthly excerpt)", getattr(financials, "cashflow_monthly", None))
+        _df_section("Balance Sheet (Monthly excerpt)", getattr(financials, "balance_monthly", None))
+
+    for key in ("production", "revenue", "break_even", "payback"):
+        payload = results.get(key) if isinstance(results, dict) else None
+        if isinstance(payload, pd.DataFrame):
+            _df_section(key.replace("_", " ").title(), payload)
+        elif hasattr(payload, "monthly") and isinstance(payload.monthly, pd.DataFrame):
+            _df_section(f"{key.title()} Monthly", payload.monthly)
+        elif hasattr(payload, "annual") and isinstance(payload.annual, pd.DataFrame):
+            _df_section(f"{key.title()} Annual", payload.annual)
+
+    return "\n\n".join(sections)
+
+
+def _simple_retrieve(chunks: List[str], question: str, top_k: int = 6) -> List[str]:
+    if not chunks:
+        return []
+    terms = [t for t in re.findall(r"[a-zA-Z0-9]+", (question or "").lower()) if len(t) > 2]
+    if not terms:
+        return chunks[:top_k]
+    scored = []
+    for chunk in chunks:
+        lower = chunk.lower()
+        score = sum(lower.count(term) for term in terms)
+        scored.append((score, chunk))
+    ranked = [c for s, c in sorted(scored, key=lambda x: x[0], reverse=True) if s > 0]
+    return (ranked or chunks)[:top_k]
+
+
+def _build_forecast(results: Dict[str, object], years: int) -> pd.DataFrame:
+    financials = results.get("financials") if isinstance(results, dict) else None
+    if financials is None:
+        return pd.DataFrame()
+    annual = getattr(financials, "income_annual", pd.DataFrame())
+    if annual.empty or "Revenue" not in annual.columns:
+        return pd.DataFrame()
+    annual = annual.copy()
+    if isinstance(annual.index, pd.DatetimeIndex):
+        idx = annual.index
+    elif isinstance(annual.index, pd.PeriodIndex):
+        idx = annual.index.to_timestamp()
+    else:
+        raw_index = pd.Index(annual.index)
+        numeric_years = pd.to_numeric(raw_index, errors="coerce")
+        if numeric_years.notna().all():
+            idx = pd.to_datetime(numeric_years.astype(int).astype(str), format="%Y", errors="coerce")
+        else:
+            idx = pd.to_datetime(raw_index, errors="coerce")
+    annual.index = idx
+    annual = annual[~annual.index.isna()]
+    if annual.empty:
+        return pd.DataFrame()
+
+    rev = pd.to_numeric(annual["Revenue"], errors="coerce").dropna()
+    ebitda = pd.to_numeric(annual.get("EBITDA"), errors="coerce").dropna() if "EBITDA" in annual.columns else pd.Series(dtype=float)
+    if rev.empty:
+        return pd.DataFrame()
+
+    if len(rev) > 1 and rev.iloc[0] > 0:
+        cagr = (rev.iloc[-1] / rev.iloc[0]) ** (1 / (len(rev) - 1)) - 1
+    else:
+        cagr = 0.03
+
+    last_year = int(rev.index[-1].year)
+    last_rev = float(rev.iloc[-1])
+    last_ebitda = float(ebitda.iloc[-1]) if not ebitda.empty else 0.0
+    margin = (last_ebitda / last_rev) if last_rev else 0.0
+
+    rows = []
+    cur_rev = last_rev
+    for i in range(1, max(1, years) + 1):
+        cur_rev *= 1 + cagr
+        rows.append({
+            "Year": last_year + i,
+            "Forecast Revenue": cur_rev,
+            "Forecast EBITDA": cur_rev * margin,
+            "Assumed Growth": cagr,
+        })
+    return pd.DataFrame(rows)
+
+
+
+
+def _round_nearest_100(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Return a copy with numeric financial figures rounded to nearest 100.
+
+    Calendar/index columns such as ``Year`` are intentionally excluded.
+    """
+
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+
+    rounded = df.copy()
+    numeric_cols = list(rounded.select_dtypes(include=[np.number]).columns)
+    if not numeric_cols:
+        return rounded
+
+    protected = {
+        c
+        for c in numeric_cols
+        if str(c).strip().lower() in {"year", "month", "date", "period", "start year", "end year"}
+    }
+
+    for col in numeric_cols:
+        if col in protected:
+            continue
+        rounded[col] = (pd.to_numeric(rounded[col], errors="coerce") / 100.0).round() * 100.0
+
+    return rounded
+
+
+def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return "_No data available._"
+    view = _round_nearest_100(df).head(rows).copy()
+    if isinstance(view.index, pd.DatetimeIndex):
+        view.index = view.index.to_period("Y").astype(str)
+    try:
+        return view.to_markdown()
+    except ImportError:
+        # `to_markdown` requires optional `tabulate`; provide a robust fallback.
+        return "```\n" + view.to_string() + "\n```"
+
+
+def _metric_commentary(metrics: Dict[str, object]) -> str:
+    irr = _annualise(metrics.get("Project IRR"))
+    eq_irr = _annualise(metrics.get("Equity IRR"))
+    payback = metrics.get("Payback Period (years)")
+    dscr = metrics.get("DSCR (min)")
+    llcr = metrics.get("LLCR")
+    plcr = metrics.get("PLCR")
+    return (
+        "- **Valuation**: Project NPV reflects value creation potential under current assumptions.\n"
+        f"- **Returns**: Project IRR is approximately {_format_rate(irr)} and Equity IRR is {_format_rate(eq_irr)}.\n"
+        f"- **Liquidity recovery**: Payback is {payback if payback is not None else 'n/a'} years.\n"
+        f"- **Debt service strength**: Minimum DSCR is {_format_rate(dscr)} with LLCR {_format_rate(llcr)} and PLCR {_format_rate(plcr)}."
+    )
+
+
+
+def _format_metric_value(metric: str, value: object) -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.notna(numeric):
+        if "IRR" in metric or "Rate" in metric or "Share" in metric:
+            return _format_rate(float(numeric))
+        if "Month" in metric and "Payback Month" not in metric and "Planning Start Month" not in metric:
+            return f"{float(numeric):,.2f}"
+        if any(k in metric for k in ["NPV", "CF", "Funding", "Debt", "Value", "Investment", "Revenue", "EBITDA", "Cash", "Service"]):
+            return _format_currency(float(numeric))
+        return f"{float(numeric):,.4f}"
+    return str(value)
+
+
+def _key_metrics_detailed_writeup(metrics: Dict[str, object]) -> str:
+    """Return expanded per-metric narrative table for business-plan reporting."""
+
+    explanations = {
+        "Project NPV": "Net present value indicates aggregate value creation versus discount-rate-adjusted capital cost; positive values support economic viability.",
+        "Project IRR": "Project IRR reflects the unlevered return profile and should be read against hurdle rates and sector benchmarks.",
+        "Equity IRR": "Equity IRR measures sponsor return after financing effects and is the primary indicator for equity attractiveness.",
+        "Investor IRR": "Investor IRR isolates the investor tranche return and helps evaluate participation terms.",
+        "Owner IRR": "Owner IRR indicates return to founder/sponsor capital and helps align governance incentives.",
+        "DSCR (min)": "Minimum DSCR is the tightest debt-service month; sustained values below covenant trigger levels indicate refinance or restructuring risk.",
+        "DSCR (avg)": "Average DSCR indicates typical debt-service headroom across the projection horizon.",
+        "Debt Service Coverage Breach Months": "Counts months below DSCR covenant threshold and indicates monitoring intensity required by lenders.",
+        "LLCR": "LLCR compares present value of CFADS to outstanding debt and supports debt sizing discussions.",
+        "PLCR": "PLCR extends LLCR perspective over project life and captures long-term serviceability.",
+        "Minimum Monthly Cash Balance": "Minimum cash balance is a liquidity floor used to assess operating resilience under stress.",
+        "Months of Liquidity Cover (min)": "Liquidity cover indicates how long obligations can be met under constrained inflows.",
+        "Peak Funding Requirement": "Peak funding requirement captures the maximum external funding needed during execution and ramp-up.",
+        "Interest Coverage (avg annual)": "Interest coverage measures EBITDA capacity to service interest and is a core credit-quality signal.",
+        "Net Debt / EBITDA (avg annual)": "Net Debt/EBITDA indicates leverage intensity and refinancing capacity over time.",
+        "Risk Score": "Composite risk score summarises downside intensity from the modeled risk register and commercial stresses.",
+        "Assumption Quality Checks Passed": "Assumption quality status confirms validation/normalization gates were satisfied before calculation.",
+        "Bankability Scorecard Overall": "Overall bankability score compresses return, leverage, liquidity, contract, risk, and governance signals into one committee-friendly metric.",
+    }
+
+    ordered = [
+        "Project NPV", "Project IRR", "Equity IRR", "Investor IRR", "Owner IRR",
+        "Initial Project Outlay", "Initial Loan Draw", "Initial Equity Investment",
+        "Cumulative FCF", "Cumulative Equity CF", "Final Month Revenue", "Final Month EBITDA", "Final Month Equity CF",
+        "Payback Period (months)", "Payback Month",
+        "DSCR (min)", "DSCR (avg)", "Debt Service Coverage Breach Months", "LLCR", "PLCR", "PV CFADS",
+        "Outstanding Debt (opening)", "Terminal Value (post-tax)", "PV Terminal Value",
+        "Principal Service (total)", "Interest Service (total)",
+        "Minimum Monthly Cash Balance", "Months of Liquidity Cover (min)", "Peak Funding Requirement", "Peak Funding Month",
+        "Interest Coverage (avg annual)", "Interest Coverage (min annual)", "Net Debt / EBITDA (avg annual)", "Net Debt / EBITDA (max annual)",
+        "Working Capital Days (DSO avg)", "Working Capital Days (DIO avg)", "Working Capital Days (DPO avg)", "Working Capital Days (CCC avg)",
+        "Corporate Tax Rate", "Investor Share", "Owner Share", "Terminal Growth Rate", "Capital Gains Tax Rate", "Discount Rate",
+        "Total Initial Investment", "Initial Loan Funding", "Scenario", "Planning Start Month", "Assumption Quality Checks Passed", "Risk Score",
+        "Bankability Scorecard Overall",
+    ]
+
+    rows: List[Dict[str, object]] = []
+    for idx, key in enumerate([k for k in ordered if k in metrics]):
+        value_text = _format_metric_value(key, metrics.get(key))
+        meaning = explanations.get(
+            key,
+            "This metric provides supplemental context for valuation, risk, and financing decisions in the integrated model.",
+        )
+        rows.append(
+            {
+                "#": idx,
+                "Key metric name": key,
+                "Value": value_text,
+                "Narrative": f"{meaning} [Source ID: METRIC::{key}]",
+            }
+        )
+
+    if not rows:
+        return "_No key metrics available for detailed write-up._"
+
+    detailed_df = pd.DataFrame(rows)
+    return _to_markdown_table(detailed_df, rows=200)
+
+
+def _financial_section_detailed_writeup(
+    income_annual: pd.DataFrame,
+    cashflow_annual: pd.DataFrame,
+    balance_annual: pd.DataFrame,
+    production_annual: pd.DataFrame,
+    revenue_annual: pd.DataFrame,
+    forecast_df: pd.DataFrame,
+    income_plot_df: pd.DataFrame,
+    cash_plot_df: pd.DataFrame,
+    balance_plot_df: pd.DataFrame,
+) -> Dict[str, str]:
+    """Build expanded narrative tables for business-plan sections 4, 5 and 6."""
+
+    out: Dict[str, str] = {}
+
+    def _num(df: pd.DataFrame, col: str) -> float:
+        if not isinstance(df, pd.DataFrame) or df.empty or col not in df.columns:
+            return float("nan")
+        s = pd.to_numeric(df[col], errors="coerce")
+        return float(s.iloc[-1]) if not s.dropna().empty else float("nan")
+
+    def _narrative_table(rows: List[Dict[str, object]]) -> str:
+        if not rows:
+            return "_No expanded interpretation available._"
+        df = pd.DataFrame(rows)
+        return _to_markdown_table(df, rows=200)
+
+    rev_last = _num(income_annual, "Revenue")
+    ebitda_last = _num(income_annual, "EBITDA")
+    ni_last = _num(income_annual, "Net Income")
+    out["income"] = _narrative_table([
+        {"#": 0, "Key metric name": "Revenue", "Value": _format_currency(rev_last), "Narrative": "Revenue reaches steady-state scale in the final modeled year. [Source ID: TABLE::Financial Performance::Revenue]"},
+        {"#": 1, "Key metric name": "EBITDA", "Value": _format_currency(ebitda_last), "Narrative": "EBITDA indicates operating earnings quality before capital structure effects. [Source ID: TABLE::Financial Performance::EBITDA]"},
+        {"#": 2, "Key metric name": "Net Income", "Value": _format_currency(ni_last), "Narrative": "Net income reflects post-interest and post-tax conversion of operating performance. [Source ID: TABLE::Financial Performance::Net Income]"},
+        {"#": 3, "Key metric name": "Ramp Profile", "Value": "2027 to 2028 step-up", "Narrative": "2027 pre-ramp losses transition to strong profitability from 2028 onward. [Source ID: TABLE::Financial Performance::EBIT + Net Income]"},
+    ])
+
+    ocf_last = _num(cashflow_annual, "Operating Cash Flow")
+    fcf_last = _num(cashflow_annual, "Free Cash Flow")
+    fin_last = _num(cashflow_annual, "Financing Cash Flow")
+    out["cash"] = _narrative_table([
+        {"#": 0, "Key metric name": "Operating Cash Flow", "Value": _format_currency(ocf_last), "Narrative": "Operating cash flow indicates core cash generation quality from operations. [Source ID: TABLE::Cash Flow Statement::Operating Cash Flow]"},
+        {"#": 1, "Key metric name": "Free Cash Flow", "Value": _format_currency(fcf_last), "Narrative": "Free cash flow represents reinvestment-adjusted cash available for value creation. [Source ID: TABLE::Cash Flow Statement::Free Cash Flow]"},
+        {"#": 2, "Key metric name": "Financing Cash Flow", "Value": _format_currency(fin_last), "Narrative": "Negative steady-state financing cash flow reflects ongoing debt-service outflows. [Source ID: TABLE::Cash Flow Statement::Financing Cash Flow]"},
+        {"#": 3, "Key metric name": "Funding Bridge", "Value": "Debt-led in 2027", "Narrative": "Initial debt draw establishes project liquidity prior to operating ramp-up. [Source ID: TABLE::Cash Flow Statement::Debt Draws + Debt Service]"},
+    ])
+
+    assets_last = _num(balance_annual, "Total Assets")
+    debt_last = _num(balance_annual, "Debt")
+    equity_last = _num(balance_annual, "Equity")
+    out["balance"] = _narrative_table([
+        {"#": 0, "Key metric name": "Total Assets", "Value": _format_currency(assets_last), "Narrative": "Asset growth indicates cumulative value build from retained cash generation. [Source ID: TABLE::Financial Position::Total Assets]"},
+        {"#": 1, "Key metric name": "Debt", "Value": _format_currency(debt_last), "Narrative": "Debt decline evidences deleveraging through scheduled amortization. [Source ID: TABLE::Financial Position::Debt]"},
+        {"#": 2, "Key metric name": "Equity", "Value": _format_currency(equity_last), "Narrative": "Equity expansion reflects residual value accretion to sponsors. [Source ID: TABLE::Financial Position::Equity]"},
+        {"#": 3, "Key metric name": "Balance Integrity", "Value": "Balanced", "Narrative": "Total Assets and Total Liabilities & Equity move in lockstep across years. [Source ID: TABLE::Financial Position::Total Assets + Total Liabilities & Equity]"},
+    ])
+
+    ethanol_last = _num(production_annual, "Ethanol litres")
+    cassava_last = _num(production_annual, "Cassava ton")
+    total_rev_last = _num(revenue_annual, "Total Revenue")
+    forecast_last = _num(forecast_df, "Forecast Revenue")
+    out["schedules"] = _narrative_table([
+        {"#": 0, "Key metric name": "Cassava Throughput", "Value": f"{cassava_last:,.0f} tons", "Narrative": "Production throughput stabilizes at designed steady-state input levels. [Source ID: TABLE::Production Annual]"},
+        {"#": 1, "Key metric name": "Ethanol Output", "Value": f"{ethanol_last:,.0f} litres", "Narrative": "Annual ethanol output aligns with operating capacity assumptions. [Source ID: TABLE::Production Annual]"},
+        {"#": 2, "Key metric name": "Total Revenue", "Value": _format_currency(total_rev_last), "Narrative": "Revenue combines ethanol and animal-feed streams for diversification. [Source ID: TABLE::Revenue Annual]"},
+        {"#": 3, "Key metric name": "Forecast Revenue (Terminal Year)", "Value": _format_currency(forecast_last), "Narrative": "Out-year forecast supports strategic planning beyond base horizon. [Source ID: TABLE::Forecast::Forecast Revenue]"},
+    ])
+
+    out["forecast"] = _narrative_table([
+        {"#": 0, "Key metric name": "Forecast Revenue (Terminal Year)", "Value": _format_currency(forecast_last), "Narrative": "Forecast revenue in terminal year supports terminal outlook assumptions. [Source ID: TABLE::Forecast::Forecast Revenue]"},
+        {"#": 1, "Key metric name": "Forecast EBITDA", "Value": _format_currency(_num(forecast_df, "Forecast EBITDA")), "Narrative": "Forecast EBITDA trend indicates modeled out-year margin structure. [Source ID: TABLE::Forecast::Forecast EBITDA]"},
+        {"#": 2, "Key metric name": "Assumed Growth", "Value": f"{_num(forecast_df, "Assumed Growth"):.4f}", "Narrative": "Assumed growth should be stress-tested for downside conservatism. [Source ID: TABLE::Forecast::Assumed Growth]"},
+    ])
+
+    out["plots"] = _narrative_table([
+        {"#": 0, "Key metric name": "Income Plot", "Value": "Revenue/EBITDA/Net Income", "Narrative": "Shows ramp-to-steady-state profitability evolution. [Source ID: TABLE::Plot_Income]"},
+        {"#": 1, "Key metric name": "Cash Flow Plot", "Value": "Operating/Investing/Financing/FCF", "Narrative": "Highlights cash generation dominance and financing normalization. [Source ID: TABLE::Plot_Cashflow]"},
+        {"#": 2, "Key metric name": "Balance Plot", "Value": "Assets/Liabilities&Equity/Debt/Equity", "Narrative": "Confirms asset growth, debt amortization, and equity build-up. [Source ID: TABLE::Plot_Balance]"},
+        {"#": 3, "Key metric name": "Forecast Plot", "Value": "Forecast Revenue/EBITDA", "Narrative": "Supports out-year strategic case communication in lender/equity packs. [Source ID: TABLE::Plot_Forecast]"},
+    ])
+
+    return out
+
+
+def _compose_business_plan(
+    results: Dict[str, object],
+    insights: str,
+    years: int,
+    forecast_df: pd.DataFrame,
+    frames: Dict[str, pd.DataFrame] | None = None,
+) -> str:
+    """Build a professional investor-style business plan text package."""
+
+    financials = results.get("financials")
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+
+    income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+
+    production = results.get("production")
+    production_annual = _round_nearest_100(getattr(production, "annual", pd.DataFrame())) if production is not None else pd.DataFrame()
+    revenue = results.get("revenue")
+    revenue_annual = _round_nearest_100(getattr(revenue, "annual", pd.DataFrame())) if revenue is not None else pd.DataFrame()
+
+    metric_table = _round_nearest_100(pd.DataFrame([metrics]).T.reset_index())
+    metric_table.columns = ["Key Metric", "Value"]
+
+    income_plot_cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in income_annual.columns]
+    cash_plot_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in cashflow_annual.columns]
+    balance_plot_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in balance_annual.columns]
+
+    income_plot_df = income_annual[income_plot_cols].copy() if income_plot_cols else pd.DataFrame()
+    cash_plot_df = cashflow_annual[cash_plot_cols].copy() if cash_plot_cols else pd.DataFrame()
+    balance_plot_df = balance_annual[balance_plot_cols].copy() if balance_plot_cols else pd.DataFrame()
+
+    snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+    snapshot_sig = snapshot.signature() if isinstance(snapshot, InputLandingPage) else "unknown"
+    model_version = _current_model_version()
+    scenario = str(metrics.get("Scenario", "FARM_ONLY"))
+    scenario_id = f"{scenario}:{snapshot_sig[:10]}"
+    model_hash = hashlib.sha1(f"v{model_version}|{scenario}|{snapshot_sig}".encode("utf-8")).hexdigest()[:16]
+    data_ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    dscr_min_raw = pd.to_numeric(metrics.get("DSCR (min)"), errors="coerce")
+    dscr_trigger_breach = bool(pd.notna(dscr_min_raw) and dscr_min_raw < 1.2)
+
+    sensitivity_df = (frames or {}).get("Sensitivity Analyses", pd.DataFrame())
+    scenario_df = (frames or {}).get("Scenario / IFs Analysis", pd.DataFrame())
+    monte_carlo_df = (frames or {}).get("Monte Carlo Simulation", pd.DataFrame())
+    section_detail = _financial_section_detailed_writeup(
+        income_annual, cashflow_annual, balance_annual, production_annual, revenue_annual,
+        forecast_df, income_plot_df, cash_plot_df, balance_plot_df
+    )
+
+    return f"""# Cassava Bioethanol Comprehensive Business Plan
+
+## 1. Executive Summary
+This plan is generated from the integrated cassava-ethanol financial model and RAG evidence base for scenario **{scenario}**. [Source ID: METRIC::Scenario]
+The current investment thesis is supported by diversified revenue (fuel ethanol + animal feed), integrated debt-service diagnostics, and projection-consistent forecasting. [Source ID: TABLE::Revenue Annual + METRIC::DSCR (min)]
+
+## 2. Investment Highlights and Key Metrics
+### Professional Interpretation
+{_metric_commentary(metrics)}
+
+### Key Metrics Dashboard
+Interpretation: this dashboard is the decision core for equity return quality, debt-service resilience, and valuation headroom. [Source ID: TABLE::Key Metrics Dashboard]
+{_to_markdown_table(metric_table, rows=50)}
+
+### Detailed Metric-by-Metric Interpretation
+{_key_metrics_detailed_writeup(metrics)}
+
+## 3. Market, Commercial Strategy, and Operations
+### 3.1 Commercial Positioning
+The model embeds offtake floor/ceiling assumptions, take-or-pay coverage, and contracted feedstock mechanisms to reflect realistic contract economics. [Source ID: TABLE::Input Assumptions]
+
+### 3.2 Operational Configuration
+Production planning, capex, staffing, opex, and working-capital assumptions are integrated into three-statement outputs and debt metrics. [Source ID: TABLE::Production Annual + TABLE::Financial Performance]
+
+## 4. Annual Financial Statements (Reproduced)
+### 4.1 Annual Income Statement
+Interpretation: this section explains top-line growth, operating profitability, and net earnings conversion quality. [Source ID: TABLE::Financial Performance]
+{_to_markdown_table(income_annual, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("income", "")}
+
+### 4.2 Annual Cash Flow Statement
+Interpretation: this section tracks cash generation, reinvestment intensity, and financing dependence over time. [Source ID: TABLE::Cash Flow Statement]
+{_to_markdown_table(cashflow_annual, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("cash", "")}
+
+### 4.3 Annual Balance Sheet
+Interpretation: this section highlights capital structure strength, leverage trajectory, and net asset accumulation. [Source ID: TABLE::Financial Position]
+{_to_markdown_table(balance_annual, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("balance", "")}
+
+## 5. Schedules and Forecasts
+### 5.1 Production Annual Schedule
+{_to_markdown_table(production_annual, rows=25)}
+
+### 5.2 Revenue Annual Schedule
+{_to_markdown_table(revenue_annual, rows=25)}
+
+#### Expanded write-up
+{section_detail.get("schedules", "")}
+
+### 5.3 Forecast (Projection-Horizon Aligned)
+Forecast horizon: **{years} year(s)**. [Source ID: TABLE::Forecast]
+{_to_markdown_table(forecast_df, rows=years + 2)}
+
+#### Expanded write-up
+{section_detail.get("forecast", "")}
+
+## 6. Graphs and Plot Data (Reproduced for Download Pack)
+The following data tables are the source series for the charts included in the download package. [Source ID: TABLE::Plot_Income + TABLE::Plot_Cashflow + TABLE::Plot_Balance]
+
+### 6.1 Income Statement Plot Data
+{_to_markdown_table(income_plot_df, rows=25)}
+
+### 6.2 Cash Flow Plot Data
+{_to_markdown_table(cash_plot_df, rows=25)}
+
+### 6.3 Balance Sheet Plot Data
+{_to_markdown_table(balance_plot_df, rows=25)}
+
+### 6.4 Forecast Plot Data
+{_to_markdown_table(forecast_df, rows=years + 2)}
+
+#### Expanded write-up
+{section_detail.get("plots", "")}
+
+## 7. Lender/Covenant Narrative
+Minimum DSCR is **{_format_rate(metrics.get('DSCR (min)'))}** with LLCR **{_format_rate(metrics.get('LLCR'))}** and PLCR **{_format_rate(metrics.get('PLCR'))}**. These indicators frame debt-service resilience and refinancing feasibility under the modeled assumptions. [Source ID: METRIC::DSCR (min) + METRIC::LLCR + METRIC::PLCR]
+
+## 8. Sensitivity Analyses
+Interpretation: this section quantifies value sensitivity to key parameters and identifies principal downside drivers. [Source ID: TABLE::Sensitivity Analyses]
+{_to_markdown_table(sensitivity_df, rows=30)}
+
+## 9. Scenario / IFs Analysis
+Interpretation: this table compares strategy outcomes across Base/Downside/Severe Downside/Upside to support credit-committee review. [Source ID: TABLE::Scenario / IFs Analysis]
+{_to_markdown_table(scenario_df, rows=20)}
+
+## 10. Monte Carlo Simulation
+The table reports P10/P50/P90 for NPV, IRR, DSCR(min), and payback where simulation outputs are available, plus probability of DSCR covenant breach and probability of NPV < 0. [Source ID: TABLE::Monte Carlo Simulation]
+{_to_markdown_table(monte_carlo_df, rows=20)}
+
+## 11. Management Action Triggers
+- If DSCR < 1.2 for two consecutive quarters: freeze discretionary capex, initiate opex containment, and activate lender engagement plan. [Source ID: METRIC::DSCR (min)]
+- If monthly cash balance falls below minimum policy level: trigger 13-week cash-control mode and tighten working-capital collection cadence. [Source ID: METRIC::Minimum Monthly Cash Balance]
+- If refinancing economics deteriorate (fees + break costs exceed plan): suspend refinance and run downside covenant restatement. [Source ID: METRIC::Refinancing Costs]
+- Trigger status for current run: **{'Triggered' if dscr_trigger_breach else 'Not Triggered'}**. [Source ID: METRIC::DSCR (min)]
+
+## 12. RAG/AI Insights
+{(insights or 'No additional AI narrative provided.')} [Source ID: RAG::Retrieved Chunks]
+
+## 13. Appendix
+### 13.1 Input Assumptions Table
+Refer to Appendix sheet/table: **Input Assumptions**. [Source ID: TABLE::Input Assumptions]
+
+### 13.2 Run Metadata
+- Data timestamp (UTC): **{data_ts}**. [Source ID: META::Timestamp]
+- Scenario ID: **{scenario_id}**. [Source ID: META::Scenario ID]
+- Model version hash: **{model_hash}**. [Source ID: META::Model Version Hash]
+- Input snapshot signature: **{snapshot_sig[:16]}...**. [Source ID: META::Input Signature]
+
+## 14. Conclusion and Next Steps
+The model output indicates a financeable platform when contract quality, feedstock reliability, and covenant headroom are maintained. Recommended next step is lender term-sheet calibration against DSCR/LLCR/PLCR constraints and downside scenarios. [Source ID: TABLE::Key Metrics Dashboard + TABLE::Scenario / IFs Analysis]
+"""
+
+
+def _rag_export_frames(model: CassavaBioethanolModel, results: Dict[str, object], forecast_df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    financials = results.get("financials") if isinstance(results, dict) else None
+    metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
+
+    income_annual = _round_nearest_100(getattr(financials, "income_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    cashflow_annual = _round_nearest_100(getattr(financials, "cashflow_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    balance_annual = _round_nearest_100(getattr(financials, "balance_annual", pd.DataFrame())) if financials is not None else pd.DataFrame()
+    forecast = _round_nearest_100(forecast_df)
+
+    metrics_df = pd.DataFrame(list(metrics.items()), columns=["Key Metric", "Value"])
+    if not metrics_df.empty:
+        metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
+        metrics_df = _round_nearest_100(metrics_df)
+
+    assumption_audit = results.get("assumption_quality_audit") if isinstance(results, dict) else None
+    snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+    if isinstance(assumption_audit, dict):
+        audit_rows = [
+            {"Check": "Assumption quality checks", "Status": "Passed" if assumption_audit.get("passed") else "Failed"},
+            {"Check": "Converted percent fields", "Status": ", ".join(map(str, assumption_audit.get("converted", []))) or "None"},
+            {"Check": "Outlier entries", "Status": ", ".join(map(str, assumption_audit.get("outliers", []))) or "None"},
+            {"Check": "Notes", "Status": " | ".join(map(str, assumption_audit.get("notes", []))) or ""},
+        ]
+        assumption_audit_df = pd.DataFrame(audit_rows)
+    else:
+        assumption_audit_df = pd.DataFrame([
+            {"Check": "Assumption quality checks", "Status": "Unknown"}
+        ])
+
+    sensitivity_df = pd.DataFrame()
+    try:
+        base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        sensitivity_model = CassavaBioethanolModel(copy.deepcopy(base_page))
+        sensitivity_model.scenario = model.scenario
+        if DEFAULT_SENSITIVITY_SCENARIOS:
+            sensitivity_df = _round_nearest_100(run_sensitivity(sensitivity_model, DEFAULT_SENSITIVITY_SCENARIOS))
+    except Exception:
+        sensitivity_df = pd.DataFrame()
+
+    scenario_rows: List[Dict[str, object]] = []
+    try:
+        snapshot = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+        for scenario_name in CassavaBioethanolModel.SCENARIOS:
+            scenario_model = CassavaBioethanolModel(copy.deepcopy(snapshot))
+            scenario_model.scenario = scenario_name
+            scenario_result = scenario_model.build(scenario_name)
+            scenario_metrics = scenario_result.get("metrics", {}) if isinstance(scenario_result, dict) else {}
+            scenario_rows.append(
+                {
+                    "Scenario": scenario_name,
+                    "Project NPV": scenario_metrics.get("Project NPV"),
+                    "Project IRR": scenario_metrics.get("Project IRR"),
+                    "Equity IRR": scenario_metrics.get("Equity IRR"),
+                    "Payback Period (years)": scenario_metrics.get("Payback Period (years)"),
+                    "DSCR (min)": scenario_metrics.get("DSCR (min)"),
+                }
+            )
+    except Exception:
+        scenario_rows = []
+    scenario_df = _round_nearest_100(pd.DataFrame(scenario_rows))
+
+    monte_carlo_summary = pd.DataFrame()
+    try:
+        cache: Dict[str, Dict[str, object]] = st.session_state.get(MC_CACHE_KEY, {})
+        cached_entry = cache.get(model.scenario, {})
+        mc_results = cached_entry.get("results")
+        if isinstance(mc_results, pd.DataFrame) and not mc_results.empty:
+            metrics_of_interest = [
+                col
+                for col in ["Project NPV", "Project IRR", "DSCR (min)", "Payback Period (years)"]
+                if col in mc_results.columns
+            ]
+            if metrics_of_interest:
+                percentile_table = (
+                    mc_results[metrics_of_interest]
+                    .quantile([0.1, 0.5, 0.9])
+                    .T.reset_index()
+                    .rename(columns={"index": "Metric", 0.1: "P10", 0.5: "P50", 0.9: "P90"})
+                )
+            else:
+                percentile_table = pd.DataFrame()
+
+            prob_rows: List[Dict[str, object]] = []
+            if "DSCR (min)" in mc_results.columns:
+                dscr_prob = float((pd.to_numeric(mc_results["DSCR (min)"], errors="coerce") < 1.0).mean())
+                prob_rows.append({"Metric": "Probability DSCR covenant breach (<1.0x)", "P10": np.nan, "P50": dscr_prob, "P90": np.nan})
+            if "Project NPV" in mc_results.columns:
+                npv_prob = float((pd.to_numeric(mc_results["Project NPV"], errors="coerce") < 0.0).mean())
+                prob_rows.append({"Metric": "Probability Project NPV < 0", "P10": np.nan, "P50": npv_prob, "P90": np.nan})
+
+            monte_carlo_summary = pd.concat([percentile_table, pd.DataFrame(prob_rows)], ignore_index=True)
+    except Exception:
+        monte_carlo_summary = pd.DataFrame()
+    monte_carlo_summary = _round_nearest_100(monte_carlo_summary)
+
+    input_assumptions_df = pd.DataFrame()
+    if isinstance(snapshot, InputLandingPage):
+        input_assumptions_df = snapshot.global_inputs.model_frame.copy()
+        if not input_assumptions_df.empty:
+            input_assumptions_df = input_assumptions_df.rename(columns={"Parameter": "Assumption"})
+
+    scenario_name = str(metrics.get("Scenario", model.scenario))
+    snapshot_sig = snapshot.signature() if isinstance(snapshot, InputLandingPage) else "unknown"
+    model_hash = hashlib.sha1(f"v{_current_model_version()}|{scenario_name}|{snapshot_sig}".encode("utf-8")).hexdigest()[:16]
+    appendix_meta_df = pd.DataFrame([
+        {"Field": "Data Timestamp (UTC)", "Value": datetime.utcnow().isoformat(timespec="seconds") + "Z"},
+        {"Field": "Scenario ID", "Value": f"{scenario_name}:{snapshot_sig[:10]}"},
+        {"Field": "Model Version Hash", "Value": model_hash},
+        {"Field": "Input Snapshot Signature", "Value": snapshot_sig},
+    ])
+
+    return {
+        "Key Metrics": metrics_df,
+        "Key Metrics Dashboard": metrics_df,
+        "Financial Performance": income_annual,
+        "Financial Position": balance_annual,
+        "Cash Flow Statement": cashflow_annual,
+        "Income Annual": income_annual,
+        "Cash Flow Annual": cashflow_annual,
+        "Balance Annual": balance_annual,
+        "Forecast": forecast,
+        "Sensitivity Analyses": sensitivity_df,
+        "Scenario / IFs Analysis": scenario_df,
+        "Monte Carlo Simulation": monte_carlo_summary,
+        "Assumption Quality Audit": assumption_audit_df,
+        "Input Assumptions": input_assumptions_df,
+        "Appendix Metadata": appendix_meta_df,
+    }
+
+
+def _prepare_export_table(df: pd.DataFrame, max_rows: int = 40) -> pd.DataFrame:
+    """Normalize dataframe for export readability (clear rows/columns)."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    view = df.copy()
+    if not isinstance(view.index, pd.RangeIndex) or view.index.name:
+        view = view.reset_index()
+    view.columns = [str(c) for c in view.columns]
+    return view.head(max_rows)
+
+
+def _fit_column_widths_excel(ws, df: pd.DataFrame, max_width: int = 28) -> None:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return
+    for idx, col in enumerate(df.columns):
+        sample = [str(col)] + [str(v) for v in df[col].head(30).tolist()]
+        width = min(max(len(x) for x in sample) + 2, max_width)
+        ws.set_column(idx, idx, width)
+
+
+def _generate_word_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
+    try:
+        from docx import Document
+        from docx.enum.section import WD_ORIENT
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        from docx.shared import Inches, Pt
+    except Exception:
+        return plan_text.encode("utf-8")
+
+    doc = Document()
+    section = doc.sections[-1]
+    section.orientation = WD_ORIENT.LANDSCAPE
+    section.page_width, section.page_height = section.page_height, section.page_width
+
+    title = doc.add_heading("Cassava Bioethanol Business Plan", level=0)
+    title.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+    for line in (plan_text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            doc.add_heading(stripped[3:], level=1)
+        elif stripped.startswith("### "):
+            doc.add_heading(stripped[4:], level=2)
+        elif stripped.startswith("# "):
+            continue
+        elif stripped:
+            p = doc.add_paragraph(stripped)
+            p.paragraph_format.space_after = Pt(4)
+        else:
+            doc.add_paragraph("")
+
+    section_notes = {
+        "Key Metrics": "Interpretation: this dashboard summarizes project returns, valuation, and covenant readiness.",
+        "Key Metrics Dashboard": "Interpretation: this dashboard summarizes project returns, valuation, and covenant readiness.",
+        "Financial Performance": "Interpretation: this table highlights revenue, profitability, and margin dynamics.",
+        "Financial Position": "Interpretation: this table shows solvency, leverage, and capital structure progression.",
+        "Cash Flow Statement": "Interpretation: this table captures operating, investing, and financing cash dynamics.",
+        "Sensitivity Analyses": "Interpretation: this section quantifies how outputs move when key assumptions are stressed.",
+        "Scenario / IFs Analysis": "Interpretation: this section compares strategic alternatives against the base case.",
+        "Monte Carlo Simulation": "Interpretation: this section summarizes distribution-based risk and confidence bands.",
+    }
+
+    def _add_table(title: str, df: pd.DataFrame) -> None:
+        view = _prepare_export_table(df, max_rows=50)
+        if view.empty:
+            return
+        doc.add_heading(title, level=2)
+        if title in section_notes:
+            doc.add_paragraph(section_notes[title])
+        table = doc.add_table(rows=1, cols=len(view.columns))
+        table.style = "Table Grid"
+
+        hdr_cells = table.rows[0].cells
+        for i, col in enumerate(view.columns):
+            run = hdr_cells[i].paragraphs[0].add_run(str(col))
+            run.bold = True
+
+        for _, row in view.iterrows():
+            cells = table.add_row().cells
+            for i, val in enumerate(row.tolist()):
+                cells[i].text = str(val)
+
+        doc.add_paragraph("")
+
+    for title, frame in frames.items():
+        _add_table(title, frame)
+
+    def _add_chart(title: str, df: pd.DataFrame) -> None:
+        view = _prepare_export_table(df, max_rows=40)
+        if view.empty or view.shape[1] < 2:
+            return
+        fig, ax = plt.subplots(figsize=(10.5, 3.8))
+        x = view.iloc[:, 0].astype(str)
+        for col in view.columns[1: min(6, len(view.columns))]:
+            ax.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col), linewidth=2)
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=45)
+        ax.grid(True, alpha=0.2)
+        ax.legend(loc="best", fontsize=8)
+        plt.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=170)
+        plt.close(fig)
+        buf.seek(0)
+        doc.add_picture(buf, width=Inches(9.8))
+        doc.add_paragraph("")
+
+    for title, frame in frames.items():
+        _add_chart(f"{title} Trend", frame)
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _generate_pdf_business_plan_bytes(plan_text: str, frames: Dict[str, pd.DataFrame]) -> bytes:
+    out = io.BytesIO()
+    section_notes = {
+        "Key Metrics": "Interpretation: dashboard for returns, value, and covenant quality.",
+        "Key Metrics Dashboard": "Interpretation: dashboard for returns, value, and covenant quality.",
+        "Financial Performance": "Interpretation: trend in revenue, EBITDA and net income quality.",
+        "Financial Position": "Interpretation: leverage and balance-sheet resilience over time.",
+        "Cash Flow Statement": "Interpretation: cash generation and debt serviceability profile.",
+        "Sensitivity Analyses": "Interpretation: impact of assumption shifts on key outputs.",
+        "Scenario / IFs Analysis": "Interpretation: strategic-case comparison versus base case.",
+        "Monte Carlo Simulation": "Interpretation: probabilistic distribution of outcomes.",
+    }
+    with PdfPages(out) as pdf:
+        fig, ax = plt.subplots(figsize=(11.69, 8.27))
+        ax.axis("off")
+        wrapped = textwrap.fill((plan_text or "").replace("\n", " "), width=130)
+        ax.text(0.01, 0.99, wrapped[:14000], va="top", ha="left", fontsize=8)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        for title, df in frames.items():
+            view = _prepare_export_table(df, max_rows=30)
+            if view.empty:
+                continue
+
+            fig_t, ax_t = plt.subplots(figsize=(11.69, 8.27))
+            ax_t.axis("off")
+            ax_t.set_title(title, fontsize=14, pad=14)
+            note = section_notes.get(title)
+            if note:
+                ax_t.text(0.01, 0.95, note, transform=ax_t.transAxes, fontsize=9, ha="left", va="top")
+            tbl = ax_t.table(
+                cellText=view.astype(str).values,
+                colLabels=[str(c) for c in view.columns],
+                loc="center",
+                cellLoc="center",
+            )
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(7.5)
+            tbl.scale(1.2, 1.25)
+            pdf.savefig(fig_t, bbox_inches="tight")
+            plt.close(fig_t)
+
+            if view.shape[1] >= 2:
+                fig_c, ax_c = plt.subplots(figsize=(11.69, 4.6))
+                x = view.iloc[:, 0].astype(str)
+                for col in view.columns[1: min(6, len(view.columns))]:
+                    ax_c.plot(x, pd.to_numeric(view[col], errors="coerce"), label=str(col), linewidth=2)
+                ax_c.set_title(f"{title} Trend")
+                ax_c.tick_params(axis="x", rotation=45)
+                ax_c.grid(True, alpha=0.25)
+                ax_c.legend(loc="best", fontsize=8)
+                plt.tight_layout()
+                pdf.savefig(fig_c, bbox_inches="tight")
+                plt.close(fig_c)
+    out.seek(0)
+    return out.getvalue()
+
+
+def _render_rag_assistant_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
+    st.subheader("RAG Assistant")
+    st.caption("Upload reference materials, index model outputs, and generate a comprehensive business-plan draft with forecasts.")
+
+    rag = _rag_state()
+    left, right = st.columns([1.05, 1.25])
+
+    with left:
+        st.markdown("### 1) Upload reference document")
+        uploads = st.file_uploader(
+            "Upload business plan references",
+            type=["txt", "md", "pdf", "docx", "csv", "xlsx"],
+            accept_multiple_files=True,
+            key="rag_uploads",
+        )
+
+        st.markdown("### 2) AI & Machine Learning Configuration")
+        provider = st.selectbox("AI options", RAG_PROVIDER_OPTIONS, key="rag_provider")
+        custom_provider = st.text_input("Custom AI provider", key="rag_provider_custom") if provider == "Custom" else ""
+        model_name = st.text_input("AI model space", value="gpt-4.1", key="rag_model")
+        snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+        if isinstance(snapshot, InputLandingPage):
+            projection_years = int(snapshot.projection.end_year) - int(snapshot.projection.start_year) + 1
+        else:
+            projection_years = int(model.input_page.projection.end_year) - int(model.input_page.projection.start_year) + 1
+        projection_years = max(1, projection_years)
+        forecast_years = st.number_input(
+            "Forecast years",
+            min_value=projection_years,
+            max_value=projection_years,
+            value=projection_years,
+            step=1,
+            key="rag_forecast_years",
+            help="Forecast years are locked to match the Projection Horizon.",
+        )
+        api_key = st.text_input("API Key", type="password", key="rag_api_key")
+        advanced_features = st.multiselect(
+            "Generative Features",
+            [
+                "Auto executive summary",
+                "Risk heatmap narrative",
+                "Covenant commentary",
+                "Capex/opex optimisation ideas",
+                "Scenario narrative builder",
+                "Investor Q&A prep",
+            ],
+            default=["Auto executive summary", "Investor Q&A prep"],
+            key="rag_features",
+        )
+
+        if st.button("Save configuration", key="rag_save_config"):
+            rag["config"] = {
+                "provider": custom_provider.strip() if provider == "Custom" else provider,
+                "model": model_name.strip(),
+                "forecast_years": int(forecast_years),
+                "api_key_present": bool(api_key),
+                "features": advanced_features,
+                "saved_at": datetime.utcnow().isoformat(timespec="seconds"),
+            }
+            st.success("Configuration saved.")
+
+    with right:
+        st.markdown("### 3) AI Insights")
+        action_cols = st.columns(3)
+        with action_cols[0]:
+            run_ai = st.button("Run the AI", key="rag_run_ai")
+        with action_cols[1]:
+            index_btn = st.button("Document Indexing", key="rag_index")
+        with action_cols[2]:
+            clear_btn = st.button("Clear document indexed", key="rag_clear")
+
+        if clear_btn:
+            rag["indexed_docs"] = []
+            rag["chunks"] = []
+            rag["insights"] = ""
+            rag["business_plan"] = ""
+            rag["forecast_table"] = pd.DataFrame()
+            st.success("Indexed corpus cleared.")
+
+        if index_btn:
+            chunks: List[str] = []
+            indexed_docs: List[str] = []
+            for f in uploads or []:
+                content = ""
+                try:
+                    if f.type in {"text/plain", "text/markdown", "text/csv"} or f.name.lower().endswith((".txt", ".md", ".csv")):
+                        content = f.getvalue().decode("utf-8", errors="ignore")
+                    else:
+                        content = f"Document file: {f.name} (binary file indexed by name only in this local mode)."
+                except Exception:
+                    content = f"Document file: {f.name} (unable to parse text in local mode)."
+                doc_chunks = _chunk_text(content)
+                chunks.extend(doc_chunks if doc_chunks else [content])
+                indexed_docs.append(f.name)
+
+            chunks.extend(_chunk_text(_build_model_knowledge_pack(results)))
+            rag["chunks"] = chunks
+            rag["indexed_docs"] = indexed_docs
+            st.success(f"Indexed {len(indexed_docs)} uploaded documents and synced model outputs ({len(chunks)} chunks).")
+
+        if rag.get("indexed_docs"):
+            st.write("Indexed documents:", ", ".join(rag["indexed_docs"]))
+
+        question = st.text_area("Ask a question", key="rag_question", height=90)
+        if run_ai:
+            retrieved = _simple_retrieve(rag.get("chunks", []), question or "business plan summary")
+            rag["insights"] = "\n\n".join(retrieved) if retrieved else "No indexed content yet. Run Document Indexing first."
+            st.success("AI insights generated.")
+
+        if rag.get("insights"):
+            st.markdown("#### Retrieved AI insights")
+            st.write(rag["insights"][:8000])
+
+    st.markdown("### 4) Prepare Business Plan")
+    if st.button("Prepare Business Plan", type="primary", key="rag_prepare_plan"):
+        snapshot = results.get("input_page_snapshot") if isinstance(results, dict) else None
+        if isinstance(snapshot, InputLandingPage):
+            years = int(snapshot.projection.end_year) - int(snapshot.projection.start_year) + 1
+        else:
+            years = int(model.input_page.projection.end_year) - int(model.input_page.projection.start_year) + 1
+        years = max(1, years)
+        forecast_df = _round_nearest_100(_build_forecast(results, years))
+        rag["forecast_table"] = forecast_df
+        narrative = rag.get("insights") or ""
+        export_frames = _rag_export_frames(model, results, forecast_df)
+        rag["export_frames"] = export_frames
+        rag["business_plan"] = _compose_business_plan(results, narrative, years, forecast_df, export_frames)
+        st.success("Business plan draft prepared with annual financial tables, professional write-ups, and chart coverage.")
+
+    forecast_df = rag.get("forecast_table", pd.DataFrame())
+
+    st.info("Prepare Business Plan outputs (forecast tables, annual financials, graphs, and plot datasets) are provided in the downloadable Word, PDF, and Excel files only.")
+
+    st.markdown("### 6) Business Plan Downloads")
+    plan_text = rag.get("business_plan", "")
+    if plan_text:
+        frames = rag.get("export_frames") if isinstance(rag.get("export_frames"), dict) else _rag_export_frames(model, results, forecast_df)
+        word_bytes = _generate_word_business_plan_bytes(plan_text, frames)
+        pdf_bytes = _generate_pdf_business_plan_bytes(plan_text, frames)
+
+        word_name = "Business_Plan.docx" if word_bytes[:2] == b"PK" else "Business_Plan.txt"
+        word_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if word_name.endswith(".docx") else "text/plain"
+        st.download_button("Download Business Plan (Word)", data=word_bytes, file_name=word_name, mime=word_mime)
+        excel_buf = io.BytesIO()
+        with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+            if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
+                forecast_df.to_excel(writer, sheet_name="Forecast", index=False)
+            metrics_df = pd.DataFrame(list(results.get("metrics", {}).items()), columns=["Key Metric", "Value"])
+            metrics_df["Value"] = pd.to_numeric(metrics_df["Value"], errors="ignore")
+            _round_nearest_100(metrics_df).to_excel(writer, sheet_name="Metrics", index=False)
+            fin = results.get("financials") if isinstance(results, dict) else None
+            if fin is not None:
+                income_annual = getattr(fin, "income_annual", pd.DataFrame())
+                cashflow_annual = getattr(fin, "cashflow_annual", pd.DataFrame())
+                balance_annual = getattr(fin, "balance_annual", pd.DataFrame())
+
+                if isinstance(income_annual, pd.DataFrame) and not income_annual.empty:
+                    income_view = _round_nearest_100(income_annual).reset_index()
+                    income_view.to_excel(writer, sheet_name="Income_Annual", index=False)
+                else:
+                    income_view = pd.DataFrame()
+
+                if isinstance(cashflow_annual, pd.DataFrame) and not cashflow_annual.empty:
+                    cash_view = _round_nearest_100(cashflow_annual).reset_index()
+                    cash_view.to_excel(writer, sheet_name="Cashflow_Annual", index=False)
+                else:
+                    cash_view = pd.DataFrame()
+
+                if isinstance(balance_annual, pd.DataFrame) and not balance_annual.empty:
+                    balance_view = _round_nearest_100(balance_annual).reset_index()
+                    balance_view.to_excel(writer, sheet_name="Balance_Annual", index=False)
+                else:
+                    balance_view = pd.DataFrame()
+
+                # Plot data sheets to keep the same graph series across Word/PDF/Excel artifacts.
+                income_cols = [c for c in ["Revenue", "EBITDA", "Net Income"] if c in getattr(income_annual, 'columns', [])]
+                cash_cols = [c for c in ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Free Cash Flow"] if c in getattr(cashflow_annual, 'columns', [])]
+                balance_cols = [c for c in ["Total Assets", "Total Liabilities & Equity", "Debt", "Equity"] if c in getattr(balance_annual, 'columns', [])]
+
+                income_plot = _round_nearest_100(income_annual[income_cols]).reset_index() if income_cols else pd.DataFrame()
+                cash_plot = _round_nearest_100(cashflow_annual[cash_cols]).reset_index() if cash_cols else pd.DataFrame()
+                balance_plot = _round_nearest_100(balance_annual[balance_cols]).reset_index() if balance_cols else pd.DataFrame()
+
+                if not income_plot.empty:
+                    income_plot.to_excel(writer, sheet_name="Plot_Income", index=False)
+                if not cash_plot.empty:
+                    cash_plot.to_excel(writer, sheet_name="Plot_Cashflow", index=False)
+                if not balance_plot.empty:
+                    balance_plot.to_excel(writer, sheet_name="Plot_Balance", index=False)
+                if isinstance(forecast_df, pd.DataFrame) and not forecast_df.empty:
+                    _round_nearest_100(forecast_df).to_excel(writer, sheet_name="Plot_Forecast", index=False)
+
+                workbook = writer.book
+
+                def _add_line_chart(sheet_name: str, title: str, max_series: int = 4) -> None:
+                    if sheet_name not in writer.sheets:
+                        return
+                    ws = writer.sheets[sheet_name]
+                    # infer dimensions from worksheet write range using dataframe shape fallback
+                    df_map = {
+                        "Plot_Income": income_plot,
+                        "Plot_Cashflow": cash_plot,
+                        "Plot_Balance": balance_plot,
+                        "Plot_Forecast": forecast_df if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame(),
+                    }
+                    df = df_map.get(sheet_name, pd.DataFrame())
+                    if df.empty or df.shape[1] < 2:
+                        return
+                    chart = workbook.add_chart({"type": "line"})
+                    rows = len(df)
+                    cols = min(df.shape[1] - 1, max_series)
+                    for idx in range(1, cols + 1):
+                        chart.add_series({
+                            "name":       [sheet_name, 0, idx],
+                            "categories": [sheet_name, 1, 0, rows, 0],
+                            "values":     [sheet_name, 1, idx, rows, idx],
+                        })
+                    chart.set_title({"name": title})
+                    chart.set_legend({"position": "bottom"})
+                    ws.insert_chart('H2', chart)
+
+                def _format_sheet(sheet_name: str, df: pd.DataFrame | None = None) -> None:
+                    ws = writer.sheets.get(sheet_name)
+                    if ws is None:
+                        return
+                    ws.set_landscape()
+                    ws.fit_to_pages(1, 0)
+                    ws.set_zoom(95)
+                    ws.freeze_panes(1, 1)
+                    ws.autofilter(0, 0, 0, max((len(df.columns) - 1), 0) if isinstance(df, pd.DataFrame) else 0)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        _fit_column_widths_excel(ws, df)
+
+                _format_sheet("Metrics", _round_nearest_100(metrics_df))
+                _format_sheet("Forecast", _round_nearest_100(forecast_df) if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame())
+                _format_sheet("Income_Annual", income_view)
+                _format_sheet("Cashflow_Annual", cash_view)
+                _format_sheet("Balance_Annual", balance_view)
+                _format_sheet("Plot_Income", income_plot)
+                _format_sheet("Plot_Cashflow", cash_plot)
+                _format_sheet("Plot_Balance", balance_plot)
+                _format_sheet("Plot_Forecast", _round_nearest_100(forecast_df) if isinstance(forecast_df, pd.DataFrame) else pd.DataFrame())
+
+                _add_line_chart("Plot_Income", "Income Statement Trends")
+                _add_line_chart("Plot_Cashflow", "Cash Flow Trends")
+                _add_line_chart("Plot_Balance", "Balance Sheet Trends")
+                _add_line_chart("Plot_Forecast", "Forecast Trends")
+
+                # Ensure all business-plan analysis sections are exported in Excel as dedicated sheets.
+                existing_sheet_names = set(writer.sheets.keys())
+                for frame_title, frame_df in frames.items():
+                    frame_view = _prepare_export_table(frame_df, max_rows=500)
+                    if frame_view.empty:
+                        continue
+                    candidate = "".join(ch for ch in str(frame_title) if ch.isalnum() or ch in (" ", "_", "-"))[:31] or "Analysis"
+                    sheet_name = candidate
+                    suffix = 1
+                    while sheet_name in existing_sheet_names:
+                        trimmed = candidate[: max(0, 31 - len(str(suffix)) - 1)]
+                        sheet_name = f"{trimmed}_{suffix}"
+                        suffix += 1
+                    frame_view.to_excel(writer, sheet_name=sheet_name, index=False)
+                    existing_sheet_names.add(sheet_name)
+                    ws = writer.sheets[sheet_name]
+                    ws.set_landscape()
+                    ws.fit_to_pages(1, 0)
+                    ws.freeze_panes(1, 1)
+                    _fit_column_widths_excel(ws, frame_view)
+        st.download_button("Download Business Plan Tables (Excel)", data=excel_buf.getvalue(), file_name="Business_Plan_Tables.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("Download Business Plan (PDF)", data=pdf_bytes, file_name="Business_Plan.pdf", mime="application/pdf")
+    else:
+        st.info("Generate the business plan first to enable downloads.")
+
+    st.markdown("### 7) Additional AI tools to enhance the model")
+    st.markdown(
+        "- **Anomaly detection** on monthly statements and schedules to flag unusual movements.\n"
+        "- **Automatic covenant monitor** (DSCR/LLCR early warning) with threshold alerts.\n"
+        "- **Narrative variance analysis** that explains month-on-month and scenario deltas.\n"
+        "- **Deal-room pack generator** that bundles assumptions, tables, and charts into investor-ready outputs."
+    )
 
 def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     st.subheader("Monte Carlo Simulation")
@@ -3085,7 +4426,32 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
                 hide_index=True,
             )
 
-    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed))
+    st.subheader("Parameter Correlation Matrix")
+    st.caption("Optional: apply a correlation matrix to 3–5 core Monte Carlo drivers (Normal distribution parameters only).")
+    corr_candidates = [
+        p
+        for p in st.session_state.get(MC_SELECTED_PARAMETER_STATE_KEY, [])
+        if p in edited_params.loc[edited_params["Distribution"].astype(str) == "Normal", "Parameter"].astype(str).tolist()
+    ][:5]
+    correlation_df = pd.DataFrame()
+    if len(corr_candidates) >= 3:
+        current_corr = st.session_state.get(MC_CORRELATION_STATE_KEY, pd.DataFrame())
+        if isinstance(current_corr, pd.DataFrame) and not current_corr.empty:
+            corr_base = current_corr.reindex(index=corr_candidates, columns=corr_candidates).fillna(0.0)
+        else:
+            corr_base = pd.DataFrame(np.eye(len(corr_candidates)), index=corr_candidates, columns=corr_candidates)
+        np.fill_diagonal(corr_base.values, 1.0)
+        corr_edited = st.data_editor(corr_base, use_container_width=True, key="mc_correlation_editor")
+        correlation_df = pd.DataFrame(corr_edited, index=corr_candidates, columns=corr_candidates).astype(float)
+        correlation_df = (correlation_df + correlation_df.T) / 2.0
+        np.fill_diagonal(correlation_df.values, 1.0)
+        correlation_df = correlation_df.clip(lower=-0.95, upper=0.95)
+        np.fill_diagonal(correlation_df.values, 1.0)
+    else:
+        st.info("Select at least 3 Normal-distribution parameters to enable correlation matrix input.")
+    st.session_state[MC_CORRELATION_STATE_KEY] = correlation_df
+
+    config_signature = _monte_carlo_signature(edited_params, int(iterations), int(seed), correlation_df)
 
     cache: Dict[str, Dict[str, object]] = st.session_state.setdefault(MC_CACHE_KEY, {})
     cached_entry = cache.get(current_scenario)
@@ -3112,6 +4478,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
                 parameter_configs=edited_params,
                 iterations=int(iterations),
                 random_seed=int(seed),
+                correlation_matrix=correlation_df,
             )
         cache[current_scenario] = {
             "version": current_version,
@@ -3221,6 +4588,7 @@ def main() -> None:
             "Sensitivity Analyses",
             "Scenario / IFs Analysis",
             "Monte Carlo Simulation",
+            "RAG Assistant",
         ]
     )
 
@@ -3229,6 +4597,7 @@ def main() -> None:
         st.info("Edit the assumptions and press 'Recalculate model' to refresh the financial outputs.")
         _update_projection(input_page)
         _key_assumptions_controls(input_page.global_inputs)
+        _global_input_outlier_warnings(input_page.global_inputs)
         _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)
@@ -3326,6 +4695,9 @@ def main() -> None:
 
     with tabs[7]:
         _render_monte_carlo_page(model, results)
+
+    with tabs[8]:
+        _render_rag_assistant_page(model, results)
 
 
 if __name__ == "__main__":
