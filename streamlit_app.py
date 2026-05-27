@@ -4440,13 +4440,15 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
             corr_base = current_corr.reindex(index=corr_candidates, columns=corr_candidates).fillna(0.0)
         else:
             corr_base = pd.DataFrame(np.eye(len(corr_candidates)), index=corr_candidates, columns=corr_candidates)
-        np.fill_diagonal(corr_base.values, 1.0)
+        corr_base = corr_base.astype(float).copy()
+        for parameter in corr_candidates:
+            corr_base.loc[parameter, parameter] = 1.0
         corr_edited = st.data_editor(corr_base, use_container_width=True, key="mc_correlation_editor")
         correlation_df = pd.DataFrame(corr_edited, index=corr_candidates, columns=corr_candidates).astype(float)
         correlation_df = (correlation_df + correlation_df.T) / 2.0
-        np.fill_diagonal(correlation_df.values, 1.0)
         correlation_df = correlation_df.clip(lower=-0.95, upper=0.95)
-        np.fill_diagonal(correlation_df.values, 1.0)
+        for parameter in corr_candidates:
+            correlation_df.loc[parameter, parameter] = 1.0
     else:
         st.info("Select at least 3 Normal-distribution parameters to enable correlation matrix input.")
     st.session_state[MC_CORRELATION_STATE_KEY] = correlation_df

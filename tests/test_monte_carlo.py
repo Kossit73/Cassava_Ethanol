@@ -8,6 +8,7 @@ from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.inputs import default_input_page
 from bioethanol_model.sensitivity import (
     MONTE_CARLO_PARAMETER_ADAPTERS,
+    _normalise_correlation_matrix,
     default_monte_carlo_parameters,
     monte_carlo_simulation,
 )
@@ -99,3 +100,20 @@ def test_monte_carlo_simulation_accepts_correlation_matrix() -> None:
 
     results = monte_carlo_simulation(model, config, iterations=4, random_seed=7, correlation_matrix=corr)
     assert len(results) == 4
+
+
+def test_correlation_matrix_normalisation_sets_diagonal_without_numpy_view_write() -> None:
+    corr = pd.DataFrame(
+        [[0.0, 2.0, -2.0], [2.0, 0.0, 0.25], [-2.0, 0.25, 0.0]],
+        index=["a", "b", "c"],
+        columns=["a", "b", "c"],
+    )
+
+    normalised = _normalise_correlation_matrix(corr)
+
+    assert list(normalised.index) == ["a", "b", "c"]
+    assert normalised.loc["a", "a"] == pytest.approx(1.0)
+    assert normalised.loc["b", "b"] == pytest.approx(1.0)
+    assert normalised.loc["c", "c"] == pytest.approx(1.0)
+    assert normalised.loc["a", "b"] == pytest.approx(0.95)
+    assert normalised.loc["a", "c"] == pytest.approx(-0.95)

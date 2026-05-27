@@ -590,9 +590,9 @@ def _normalise_correlation_matrix(
     corr = corr.loc[common, common]
     corr = corr.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     corr = (corr + corr.T) / 2.0
-    np.fill_diagonal(corr.values, 1.0)
     corr = corr.clip(lower=-0.95, upper=0.95)
-    np.fill_diagonal(corr.values, 1.0)
+    for parameter in common:
+        corr.loc[parameter, parameter] = 1.0
     return corr
 
 
