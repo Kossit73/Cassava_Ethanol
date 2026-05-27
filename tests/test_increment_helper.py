@@ -100,6 +100,28 @@ def test_apply_yearly_increment_handles_missing_columns():
     assert updated.loc[1, "Cost"] == pytest.approx(1200.0)
 
 
+def test_apply_yearly_increment_upcasts_integer_columns_for_fractional_values():
+    df = pd.DataFrame(
+        [
+            {"Month": "2025-01", "Cost Category": "Cassava Feedstock", "Amount": 100},
+            {"Month": "2026-01", "Cost Category": "Cassava Feedstock", "Amount": 100},
+        ]
+    )
+
+    updated = apply_yearly_increment(
+        df,
+        0,
+        date_column="Month",
+        frequency="M",
+        value_columns=["Amount"],
+        increments={"Amount": 0.075},
+        match_columns=["Cost Category"],
+    )
+
+    assert updated.loc[1, "Amount"] == pytest.approx(107.5)
+    assert pd.api.types.is_float_dtype(updated["Amount"])
+
+
 def test_apply_yearly_increment_extends_rows_to_horizon():
     df = pd.DataFrame(
         [

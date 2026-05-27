@@ -92,6 +92,19 @@ def _base_value(row: pd.Series, column: str) -> float | None:
     return float(numeric)
 
 
+def _set_increment_value(df: pd.DataFrame, idx: int, column: str, value: float) -> None:
+    if column in df.columns and not pd.api.types.is_float_dtype(df[column]):
+        numeric = pd.to_numeric(df[column], errors="coerce")
+        if numeric.notna().any():
+            df[column] = numeric.astype(float)
+
+    try:
+        df.at[idx, column] = value
+    except (TypeError, ValueError):
+        df[column] = df[column].astype(float)
+        df.at[idx, column] = value
+
+
 def _format_period_value(period: pd.Period, sample: object, frequency: str) -> object:
     """Return a representation of *period* aligned with the type of *sample*."""
 
@@ -255,7 +268,7 @@ def apply_yearly_increment(
             new_value = float(base_val) * ((1.0 + float(rate)) ** year_delta)
 
             if current_val is None or not np.isclose(current_val, new_value, rtol=1e-9, atol=1e-9):
-                result.at[idx, column] = new_value
+                _set_increment_value(result, idx, column, new_value)
 
     return result[df.columns]
 
