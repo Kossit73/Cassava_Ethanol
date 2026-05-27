@@ -44,3 +44,25 @@ def test_production_annual_rollup_avoids_pandas_year_alias():
     assert list(result.annual.index) == [2025, 2026]
     assert result.annual.loc[2025, "Cassava ton"] == pytest.approx(120_000.0)
     assert result.annual.loc[2026, "Cassava ton"] == pytest.approx(144_000.0)
+
+
+def test_build_scales_debt_to_reduced_capex_envelope():
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    initial_investment = page.initial_investment.data.copy()
+    initial_investment["Cost"] = [1_000_000.0, 0.0, 0.0, 0.0, 0.0]
+    page.initial_investment.set_data(initial_investment, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+    loan_summary = result["loan_schedule"].summary
+    adjusted_draw = float(pd.to_numeric(loan_summary["Draw"], errors="coerce").fillna(0.0).sum())
+
+    assert adjusted_draw == pytest.approx(1_000_000.0)
+    assert metrics["Debt Funding Original Draw"] == pytest.approx(24_000_000.0)
+    assert metrics["Debt Funding Adjusted Draw"] == pytest.approx(1_000_000.0)
+    assert metrics["Debt Funding Reduction"] == pytest.approx(23_000_000.0)
+    assert metrics["Initial Loan Funding"] <= metrics["Total Initial Investment"] + 1e-6

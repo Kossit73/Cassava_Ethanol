@@ -201,6 +201,49 @@ class CassavaBioethanolModel:
             "notes": ["Percent normalization: values in (1,100] are converted to decimal form by dividing by 100."],
         }
 
+    @staticmethod
+    def _loan_amount_column(loan_df: pd.DataFrame) -> str | None:
+        for column in ("Loan Amount", "Amount", "Draw Amount", "Drawdown", "Draw"):
+            if column in loan_df.columns:
+                return column
+        return None
+
+    def _align_debt_to_capex_envelope(self, page: inputs.InputLandingPage) -> Dict[str, float]:
+        """Keep scenario-specific debt draws within the available capex envelope."""
+
+        init_df = page.initial_investment.model_frame
+        capex = float(pd.to_numeric(init_df.get("Cost"), errors="coerce").fillna(0.0).sum()) if not init_df.empty else 0.0
+
+        loan_df = page.loan_schedule.model_frame
+        amount_column = self._loan_amount_column(loan_df)
+        if loan_df.empty or amount_column is None:
+            return {
+                "Debt Funding Original Draw": 0.0,
+                "Debt Funding Adjusted Draw": 0.0,
+                "Debt Funding Reduction": 0.0,
+            }
+
+        loan_amounts = pd.to_numeric(loan_df[amount_column], errors="coerce").fillna(0.0)
+        debt_draw = float(loan_amounts.sum())
+        if debt_draw <= capex + 1e-6:
+            return {
+                "Debt Funding Original Draw": debt_draw,
+                "Debt Funding Adjusted Draw": debt_draw,
+                "Debt Funding Reduction": 0.0,
+            }
+
+        adjusted = loan_df.copy()
+        scale = 0.0 if capex <= 0 else capex / debt_draw
+        adjusted[amount_column] = loan_amounts * scale
+        adjusted_draw = float(pd.to_numeric(adjusted[amount_column], errors="coerce").fillna(0.0).sum())
+        page.loan_schedule.set_data(adjusted, mark_user_input=page.loan_schedule.placeholder)
+
+        return {
+            "Debt Funding Original Draw": debt_draw,
+            "Debt Funding Adjusted Draw": adjusted_draw,
+            "Debt Funding Reduction": max(0.0, debt_draw - adjusted_draw),
+        }
+
     def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
         """Hard validation gate for investor-grade completeness checks."""
 
@@ -314,12 +357,12 @@ class CassavaBioethanolModel:
         init_df = page.initial_investment.model_frame
         capex = float(pd.to_numeric(init_df.get("Cost"), errors="coerce").fillna(0.0).sum()) if not init_df.empty else 0.0
         loan_df = page.loan_schedule.model_frame
-        debt_draw = float(
-            pd.to_numeric(
-                loan_df.get("Loan Amount", loan_df.get("Amount", loan_df.get("Draw Amount"))),
-                errors="coerce",
-            ).fillna(0.0).sum()
-        ) if not loan_df.empty else 0.0
+        amount_column = self._loan_amount_column(loan_df)
+        debt_draw = (
+            float(pd.to_numeric(loan_df[amount_column], errors="coerce").fillna(0.0).sum())
+            if not loan_df.empty and amount_column is not None
+            else 0.0
+        )
         if debt_draw - capex > 1e-6:
             raise ValueError("Total debt draw cannot exceed total initial investment envelope")
 
@@ -970,6 +1013,7 @@ class CassavaBioethanolModel:
         page = self._prepare_page_for_scenario(scenario_name)
         self._materialize_required_defaults(page)
         assumption_audit = self._normalize_global_units(page)
+        debt_envelope_adjustment = self._align_debt_to_capex_envelope(page)
         self._validate_required_inputs(page)
         self._apply_debt_strategy_toggles(page)
 
@@ -1104,6 +1148,7 @@ class CassavaBioethanolModel:
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
                 "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
+                **debt_envelope_adjustment,
                 **risk_commercial,
                 **debt_covenants,
                 **self._compute_accounting_invariants(financials, loan_schedule),
