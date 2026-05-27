@@ -23,6 +23,155 @@ from .schedules import ExpenseSummary
 
 
 SECTION_GAP = 2
+BRAND_NAVY = "#17324D"
+BRAND_TEAL = "#0F766E"
+BRAND_LIGHT = "#F5F7FA"
+BRAND_BORDER = "#D9E2EC"
+
+
+def _export_formats(writer: pd.ExcelWriter) -> Dict[str, object]:
+    cached = getattr(writer.book, "_cassava_export_formats", None)
+    if cached is not None:
+        return cached
+
+    workbook = writer.book
+    formats = {
+        "hero": workbook.add_format(
+            {
+                "bold": True,
+                "font_size": 22,
+                "font_color": "white",
+                "bg_color": BRAND_NAVY,
+                "align": "left",
+                "valign": "vcenter",
+            }
+        ),
+        "subtitle": workbook.add_format(
+            {
+                "font_size": 11,
+                "font_color": "#40566B",
+                "bg_color": BRAND_LIGHT,
+                "align": "left",
+                "valign": "vcenter",
+            }
+        ),
+        "section": workbook.add_format(
+            {
+                "bold": True,
+                "font_size": 13,
+                "font_color": "white",
+                "bg_color": BRAND_TEAL,
+                "align": "left",
+                "valign": "vcenter",
+            }
+        ),
+        "table_title": workbook.add_format(
+            {
+                "bold": True,
+                "font_size": 12,
+                "font_color": "white",
+                "bg_color": BRAND_NAVY,
+                "align": "left",
+                "valign": "vcenter",
+            }
+        ),
+        "header": workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "white",
+                "bg_color": BRAND_TEAL,
+                "border": 1,
+                "border_color": BRAND_BORDER,
+                "align": "center",
+                "valign": "vcenter",
+                "text_wrap": True,
+            }
+        ),
+        "card_label": workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "#40566B",
+                "bg_color": "#EAF4F2",
+                "border": 1,
+                "border_color": BRAND_BORDER,
+                "align": "center",
+                "valign": "vcenter",
+            }
+        ),
+        "card_value": workbook.add_format(
+            {
+                "bold": True,
+                "font_size": 16,
+                "font_color": BRAND_NAVY,
+                "bg_color": "white",
+                "border": 1,
+                "border_color": BRAND_BORDER,
+                "align": "center",
+                "valign": "vcenter",
+            }
+        ),
+        "metric_label": workbook.add_format({"bold": True, "font_color": BRAND_NAVY, "bg_color": BRAND_LIGHT}),
+        "money": workbook.add_format({"num_format": "$#,##0;[Red]($#,##0);-"}),
+        "number": workbook.add_format({"num_format": "#,##0.00"}),
+        "integer": workbook.add_format({"num_format": "#,##0"}),
+        "percent": workbook.add_format({"num_format": "0.0%"}),
+    }
+    setattr(workbook, "_cassava_export_formats", formats)
+    return formats
+
+
+def _format_metric_value(value: object, *, percent: bool = False, currency: bool = False) -> str:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "N/A" if value is None else str(value)
+
+    if not np.isfinite(numeric):
+        return "N/A"
+    if percent:
+        return f"{numeric:.1%}"
+    if currency:
+        return f"${numeric:,.0f}"
+    return f"{numeric:,.2f}"
+
+
+def _annualise(rate: object) -> float:
+    try:
+        numeric = float(rate)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(numeric):
+        return float("nan")
+    return (1 + numeric) ** 12 - 1
+
+
+def _table_column_widths(df: pd.DataFrame, *, index: bool) -> list[tuple[int, int]]:
+    widths: list[tuple[int, int]] = []
+    offset = 1 if index else 0
+    if index:
+        index_label = str(df.index.name or "Metric")
+        index_values = [str(value) for value in df.index[:50]]
+        widths.append((0, min(max([len(index_label), *[len(value) for value in index_values], 10]) + 2, 34)))
+
+    for idx, column in enumerate(df.columns, start=offset):
+        values = [str(value) for value in df[column].head(50).fillna("")]
+        width = min(max([len(str(column)), *[len(value) for value in values], 10]) + 2, 28)
+        widths.append((idx, width))
+    return widths
+
+
+def _column_format(writer: pd.ExcelWriter, column_name: object, series: pd.Series | None) -> object | None:
+    formats = _export_formats(writer)
+    label = str(column_name).lower()
+    if any(token in label for token in ("rate", "irr", "margin", "share", "yield", "%")):
+        return formats["percent"]
+    if any(token in label for token in ("revenue", "cost", "cash", "debt", "loan", "ebitda", "income", "npv", "amount", "balance", "investment", "funding", "equity")):
+        return formats["money"]
+    if series is not None and pd.api.types.is_integer_dtype(series):
+        return formats["integer"]
+    if series is not None and pd.api.types.is_numeric_dtype(series):
+        return formats["number"]
+    return None
 
 
 def _reset_period_index(df: pd.DataFrame, label: str) -> pd.DataFrame:
@@ -65,10 +214,20 @@ def _write_table(
     if sheet not in writer.sheets:
         worksheet = writer.book.add_worksheet(sheet)
         writer.sheets[sheet] = worksheet
+        worksheet.set_tab_color(BRAND_TEAL)
     else:
         worksheet = writer.sheets[sheet]
-    worksheet.write_string(startrow, startcol, title)
+
+    formats = _export_formats(writer)
     df_to_write = df.copy()
+    ncols = max(1, len(df_to_write.columns) + (1 if index else 0))
+    title_end_col = startcol + ncols - 1
+    if title_end_col > startcol:
+        worksheet.merge_range(startrow, startcol, startrow, title_end_col, title, formats["table_title"])
+    else:
+        worksheet.write_string(startrow, startcol, title, formats["table_title"])
+    worksheet.set_row(startrow, 24)
+
     df_to_write.to_excel(
         writer,
         sheet_name=sheet,
@@ -76,6 +235,31 @@ def _write_table(
         startcol=startcol,
         index=index,
     )
+
+    header_row = startrow + 1
+    header_labels = list(df_to_write.columns)
+    if index:
+        header_labels = [df_to_write.index.name or "Metric", *header_labels]
+    for col_offset, label in enumerate(header_labels):
+        worksheet.write(header_row, startcol + col_offset, label, formats["header"])
+    worksheet.set_row(header_row, 30)
+
+    for col_offset, width in _table_column_widths(df_to_write, index=index):
+        series = None
+        if index and col_offset == 0:
+            fmt = formats["metric_label"]
+        else:
+            data_col_idx = col_offset - (1 if index else 0)
+            if 0 <= data_col_idx < len(df_to_write.columns):
+                series = df_to_write.iloc[:, data_col_idx]
+                fmt = _column_format(writer, df_to_write.columns[data_col_idx], series)
+            else:
+                fmt = None
+        worksheet.set_column(startcol + col_offset, startcol + col_offset, width, fmt)
+
+    if startrow == 0 and startcol == 0:
+        worksheet.freeze_panes(startrow + 2, startcol + (1 if index else 0))
+
     return startrow + len(df_to_write.index) + SECTION_GAP + 2
 
 
@@ -97,7 +281,16 @@ def export_to_excel(
     scenario_configs = list(scenario_configs or [])
 
     with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+        writer.book.set_properties(
+            {
+                "title": "Cassava Bioethanol Financial Model",
+                "subject": "Investor-grade financial model workbook",
+                "author": "Numquants",
+                "comments": "Generated by the cassava ethanol model exporter.",
+            }
+        )
         scenario_page = results.get("input_page_snapshot", model.input_page)
+        _write_executive_summary(writer, model, results)
         _write_input_page(writer, scenario_page)
         _write_financial_statements_page(writer, results)
         _write_key_metrics(writer, model, results)
@@ -108,6 +301,72 @@ def export_to_excel(
         _write_scenario_page(writer, model, results, scenario_configs)
         _write_break_even_page(writer, model, results)
     return output_path
+
+
+def _write_executive_summary(writer: pd.ExcelWriter, model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
+    sheet = "Executive Summary"
+    worksheet = writer.book.add_worksheet(sheet)
+    writer.sheets[sheet] = worksheet
+    worksheet.set_tab_color(BRAND_NAVY)
+    worksheet.hide_gridlines(2)
+    worksheet.set_landscape()
+    worksheet.fit_to_pages(1, 1)
+
+    formats = _export_formats(writer)
+    metrics = results.get("metrics", {})
+    scenario = str(metrics.get("Scenario", model.scenario or "FARM_ONLY")).replace("_", " ").title()
+    planning_start = metrics.get("Planning Start Month", model.input_page.projection.planning_start)
+
+    worksheet.set_column("A:A", 4)
+    worksheet.set_column("B:B", 24)
+    worksheet.set_column("C:H", 18)
+    worksheet.set_row(0, 34)
+    worksheet.set_row(1, 34)
+    worksheet.merge_range("B1:H2", "Cassava Bioethanol Financial Model", formats["hero"])
+    worksheet.merge_range(
+        "B3:H3",
+        f"Executive dashboard | Scenario: {scenario} | Planning start: {planning_start}",
+        formats["subtitle"],
+    )
+
+    cards = [
+        ("Project NPV", _format_metric_value(metrics.get("Project NPV"), currency=True)),
+        ("Project IRR", _format_metric_value(_annualise(metrics.get("Project IRR")), percent=True)),
+        ("Equity IRR", _format_metric_value(_annualise(metrics.get("Equity IRR")), percent=True)),
+        ("Payback Years", _format_metric_value(metrics.get("Payback Period (years)"))),
+        ("Initial Investment", _format_metric_value(metrics.get("Total Initial Investment"), currency=True)),
+        ("Debt Funding", _format_metric_value(metrics.get("Initial Loan Funding"), currency=True)),
+    ]
+
+    for idx, (label, value) in enumerate(cards):
+        row = 5 + (idx // 3) * 3
+        col = 1 + (idx % 3) * 2
+        worksheet.merge_range(row, col, row, col + 1, label, formats["card_label"])
+        worksheet.merge_range(row + 1, col, row + 2, col + 1, value, formats["card_value"])
+
+    snapshot = pd.DataFrame(
+        [
+            {"Headline": "Scenario", "Value": scenario},
+            {"Headline": "Projection Window", "Value": f"{model.input_page.projection.start_year}-{model.input_page.projection.end_year}"},
+            {"Headline": "Investor Share", "Value": _format_metric_value(metrics.get("Investor Share"), percent=True)},
+            {"Headline": "Owner Share", "Value": _format_metric_value(metrics.get("Owner Share"), percent=True)},
+            {"Headline": "Discount Rate", "Value": _format_metric_value(metrics.get("Discount Rate"), percent=True)},
+            {"Headline": "Assumption Checks", "Value": "Passed" if float(metrics.get("Assumption Quality Checks Passed", 0.0)) >= 1.0 else "Review"},
+        ]
+    )
+    _write_table(writer, sheet, snapshot, "Model Snapshot", startrow=13, startcol=1, index=False)
+
+    navigation = pd.DataFrame(
+        [
+            {"Workbook Area": "Input Landing Page", "Purpose": "Editable assumptions and operating schedules"},
+            {"Workbook Area": "Financial Statements", "Purpose": "Integrated monthly and annual statements"},
+            {"Workbook Area": "Key Metrics", "Purpose": "Returns, bankability, and operating summaries"},
+            {"Workbook Area": "Sensitivity Analyses", "Purpose": "Monte Carlo, tornado, and driver stress testing"},
+            {"Workbook Area": "Scenario Analysis", "Purpose": "Scenario comparison and goal seek outputs"},
+            {"Workbook Area": "Break-even", "Purpose": "Volume, price, cost, and contribution economics"},
+        ]
+    )
+    _write_table(writer, sheet, navigation, "Workbook Navigation", startrow=13, startcol=4, index=False)
 
 
 def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
@@ -121,16 +380,17 @@ def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
     projection_df = page.projection.to_frame()
     next_row = _write_table(writer, sheet, projection_df, "Projection Horizon")
 
-    heading_format = writer.book.add_format({"bold": True, "bg_color": "#F2F2F2"})
+    heading_format = _export_formats(writer)["section"]
 
     for section, tables in page.grouped_tables().items():
         worksheet.write(next_row, 0, section, heading_format)
+        worksheet.set_row(next_row, 22)
         next_row += 1
         for table in tables:
             next_row = _write_table(writer, sheet, table.model_frame, table.name, startrow=next_row)
             if table is page.initial_investment:
-                worksheet.write(next_row, 0, "Total Initial Investment")
-                worksheet.write_number(next_row, 1, page.total_initial_investment)
+                worksheet.write(next_row, 0, "Total Initial Investment", _export_formats(writer)["metric_label"])
+                worksheet.write_number(next_row, 1, page.total_initial_investment, _export_formats(writer)["money"])
                 next_row += SECTION_GAP + 1
         next_row += 1
 
@@ -165,11 +425,12 @@ def _write_financial_statements_page(writer: pd.ExcelWriter, results: Dict[str, 
         ),
     ]
 
-    heading_format = writer.book.add_format({"bold": True, "bg_color": "#F2F2F2"})
+    heading_format = _export_formats(writer)["section"]
 
     current_row = 0
     for title, monthly, annual in statements:
         worksheet.write(current_row, 0, title, heading_format)
+        worksheet.set_row(current_row, 22)
         current_row += 1
         current_row = _write_table(
             writer,
