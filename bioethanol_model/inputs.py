@@ -108,7 +108,11 @@ class EditableTable:
                     return "NaN"
                 return str(value)
 
-            normalised = normalised.applymap(_stringify)
+            frame_mapper = getattr(normalised, "map", None)
+            if frame_mapper is not None:
+                normalised = frame_mapper(_stringify)
+            else:
+                normalised = normalised.applymap(_stringify)
             payload.append(normalised.to_csv(index=False))
         digest = hashlib.sha1("|".join(payload).encode("utf-8")).hexdigest()
         return digest
