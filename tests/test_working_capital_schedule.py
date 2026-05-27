@@ -17,8 +17,8 @@ def test_working_capital_annual_aligned_to_projection_horizon():
     months = _monthly_index("2026-01-31", 24)
 
     revenue_monthly = pd.DataFrame({"Total Revenue": 1000.0}, index=months)
-    revenue_annual = revenue_monthly.resample("Y").sum()
-    revenue_annual.index = revenue_annual.index.year
+    revenue_annual = revenue_monthly.groupby(revenue_monthly.index.year).sum()
+    revenue_annual.index.name = "Year"
     revenue = RevenueOutput(revenue_monthly, revenue_annual)
 
     direct_monthly = pd.DataFrame({"Cassava": 400.0}, index=months)
@@ -26,8 +26,8 @@ def test_working_capital_annual_aligned_to_projection_horizon():
     other_monthly = pd.DataFrame({"Other": 100.0}, index=months)
 
     def _annual(df: pd.DataFrame) -> pd.DataFrame:
-        annual = df.resample("Y").sum()
-        annual.index = annual.index.year
+        annual = df.groupby(df.index.year).sum()
+        annual.index.name = "Year"
         return annual
 
     cost_outputs = {

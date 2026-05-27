@@ -563,8 +563,8 @@ class CassavaBioethanolModel:
                 monthly_rev = monthly_rev.shift(schedule_delay_months, fill_value=0.0)
 
             revenue.monthly = monthly_rev
-            revenue.annual = monthly_rev.resample("YE").sum()
-            revenue.annual.index = revenue.annual.index.year
+            revenue.annual = monthly_rev.groupby(monthly_rev.index.year).sum()
+            revenue.annual.index.name = "Year"
 
             monthly_prod = getattr(production, "monthly", pd.DataFrame())
             if isinstance(monthly_prod, pd.DataFrame) and not monthly_prod.empty:
@@ -576,8 +576,8 @@ class CassavaBioethanolModel:
                 if schedule_delay_months > 0:
                     monthly_prod_adj = monthly_prod_adj.shift(schedule_delay_months, fill_value=0.0)
                 production.monthly = monthly_prod_adj
-                production.annual = monthly_prod_adj.resample("YE").sum()
-                production.annual.index = production.annual.index.year
+                production.annual = monthly_prod_adj.groupby(monthly_prod_adj.index.year).sum()
+                production.annual.index.name = "Year"
 
         direct = cost_outputs.get("Direct Costs")
         feedstock_saving = contracted_share * contracted_discount
@@ -585,8 +585,8 @@ class CassavaBioethanolModel:
         cost_multiplier = max(0.0, 1.0 - feedstock_saving + risk_cost_uplift)
         if direct is not None and hasattr(direct, "monthly"):
             direct.monthly = direct.monthly * cost_multiplier
-            direct.annual = direct.monthly.resample("YE").sum()
-            direct.annual.index = direct.annual.index.year
+            direct.annual = direct.monthly.groupby(direct.monthly.index.year).sum()
+            direct.annual.index.name = "Year"
 
         schedule_delay_months = int(round(duration_vectors["schedule"] * schedule_stress))
         if schedule_delay_months > 0 and loan_schedule is not None and hasattr(loan_schedule, "schedule"):

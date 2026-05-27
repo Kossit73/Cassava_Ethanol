@@ -2423,10 +2423,10 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
                 if "Cumulative Margin" in monthly_chart.columns:
                     aggregation["Cumulative Margin"] = "last"
                 annual_break_even = (
-                    monthly_chart.resample("Y").agg(aggregation).dropna(how="all") if aggregation else pd.DataFrame()
+                    monthly_chart.groupby(monthly_chart.index.year).agg(aggregation).dropna(how="all") if aggregation else pd.DataFrame()
                 )
                 if not annual_break_even.empty:
-                    annual_break_even.index = annual_break_even.index.to_period("Y").astype(str)
+                    annual_break_even.index = annual_break_even.index.astype(str)
                     st.markdown("#### Annual Break-even Trend")
                     _safe_line_chart(annual_break_even)
 
@@ -3261,7 +3261,7 @@ def _to_markdown_table(df: pd.DataFrame | None, rows: int = 20) -> str:
         return "_No data available._"
     view = _round_nearest_100(df).head(rows).copy()
     if isinstance(view.index, pd.DatetimeIndex):
-        view.index = view.index.to_period("Y").astype(str)
+        view.index = view.index.year.astype(str)
     try:
         return view.to_markdown()
     except ImportError:

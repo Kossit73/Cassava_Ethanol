@@ -528,7 +528,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
     total_investment = _get_metric("Total Initial Investment", 0.0)
     debt_monthly = results["loan_schedule"].schedule.groupby("Month")["Closing Balance"].sum().sort_index()
     debt_annual = (
-        debt_monthly.resample("Y").last().rename("Debt Closing Balance")
+        debt_monthly.groupby(debt_monthly.index.year).last().rename("Debt Closing Balance")
         if not debt_monthly.empty
         else pd.Series(dtype=float, name="Debt Closing Balance")
     )
@@ -536,7 +536,7 @@ def _write_key_metrics(writer: pd.ExcelWriter, model: CassavaBioethanolModel, re
         years = [projection.start_year]
         debt_values = [0.0]
     else:
-        debt_annual.index = debt_annual.index.year
+        debt_annual.index.name = "Year"
         years = debt_annual.index.tolist()
         debt_values = debt_annual.tolist()
     capex_values = [total_investment] + [0.0] * (len(years) - 1)
