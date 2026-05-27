@@ -1398,6 +1398,20 @@ def _sync_production_outputs(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _set_dataframe_cell(df: pd.DataFrame, row_idx: int, column_name: str, value: object) -> None:
+    dtype = df[column_name].dtype
+    if value is None and not pd.api.types.is_object_dtype(dtype):
+        df[column_name] = df[column_name].astype("object")
+    elif isinstance(value, str) and pd.api.types.is_numeric_dtype(dtype):
+        df[column_name] = df[column_name].astype("object")
+
+    try:
+        df.at[row_idx, column_name] = value
+    except (TypeError, ValueError):
+        df[column_name] = df[column_name].astype("object")
+        df.at[row_idx, column_name] = value
+
+
 def _row_editor_form(
     table: EditableTable,
     row_idx: int,
@@ -1423,6 +1437,9 @@ def _row_editor_form(
     derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
     derived_metrics: Tuple[float, float] | None = None
     updated = False
+
+    def _set_editor_value(column_name: str, value: object) -> None:
+        _set_dataframe_cell(df, row_idx, column_name, value)
 
     for column in table.columns:
         current_value = df.at[row_idx, column]
@@ -1473,7 +1490,7 @@ def _row_editor_form(
             )
 
             new_value = None if selection == "Not set" else selection
-            df.at[row_idx, column] = new_value
+            _set_editor_value(column, new_value)
             if current_str != new_value:
                 updated = True
             continue
@@ -1525,7 +1542,7 @@ def _row_editor_form(
                 if not allow_custom and new_value not in config.get("options", []):
                     new_value = config.get("options", [None])[0]
 
-            df.at[row_idx, column] = new_value
+            _set_editor_value(column, new_value)
             if (current_str or None) != (new_value or None):
                 updated = True
             continue
@@ -1552,7 +1569,7 @@ def _row_editor_form(
             )
             if pd.api.types.is_integer_dtype(df[column]):
                 new_value = int(round(new_value))
-            df.at[row_idx, column] = new_value
+            _set_editor_value(column, new_value)
             if not np.isclose(original_value, float(new_value)):
                 updated = True
         else:
@@ -1562,7 +1579,7 @@ def _row_editor_form(
                 value=text_value,
                 key=widget_key,
             )
-            df.at[row_idx, column] = new_value
+            _set_editor_value(column, new_value)
             if str(new_value) != str(text_value):
                 updated = True
 
@@ -1573,9 +1590,9 @@ def _row_editor_form(
             ethanol_val = float(cassava_val) * ETHANOL_LITRES_PER_TON
             feed_val = float(cassava_val) * ANIMAL_FEED_TON_PER_TON
             if "Ethanol litres" in df.columns:
-                df.at[row_idx, "Ethanol litres"] = ethanol_val
+                _set_editor_value("Ethanol litres", ethanol_val)
             if "Animal Feed ton" in df.columns:
-                df.at[row_idx, "Animal Feed ton"] = feed_val
+                _set_editor_value("Animal Feed ton", feed_val)
             derived_metrics = (ethanol_val, feed_val)
 
     if not df.loc[row_idx].equals(original_row):
@@ -3432,7 +3449,7 @@ def _financial_section_detailed_writeup(
     out["forecast"] = _narrative_table([
         {"#": 0, "Key metric name": "Forecast Revenue (Terminal Year)", "Value": _format_currency(forecast_last), "Narrative": "Forecast revenue in terminal year supports terminal outlook assumptions. [Source ID: TABLE::Forecast::Forecast Revenue]"},
         {"#": 1, "Key metric name": "Forecast EBITDA", "Value": _format_currency(_num(forecast_df, "Forecast EBITDA")), "Narrative": "Forecast EBITDA trend indicates modeled out-year margin structure. [Source ID: TABLE::Forecast::Forecast EBITDA]"},
-        {"#": 2, "Key metric name": "Assumed Growth", "Value": f"{_num(forecast_df, "Assumed Growth"):.4f}", "Narrative": "Assumed growth should be stress-tested for downside conservatism. [Source ID: TABLE::Forecast::Assumed Growth]"},
+        {"#": 2, "Key metric name": "Assumed Growth", "Value": f"{_num(forecast_df, 'Assumed Growth'):.4f}", "Narrative": "Assumed growth should be stress-tested for downside conservatism. [Source ID: TABLE::Forecast::Assumed Growth]"},
     ])
 
     out["plots"] = _narrative_table([
