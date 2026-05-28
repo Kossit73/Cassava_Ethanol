@@ -371,6 +371,24 @@ DEFAULT_MONTE_CARLO_ITERATIONS = 250
 DEFAULT_MONTE_CARLO_SEED = 42
 
 
+def _bounded_global_sample(parameter: str, value: float) -> float:
+    """Clip sampled global assumptions to model-valid ranges."""
+
+    bounds: Dict[str, tuple[float, float]] = {
+        "Corporate tax rate": (0.0, 0.60),
+        "Discount rate": (0.0, 0.50),
+        "Take-or-pay share": (0.0, 1.0),
+        "Contracted feedstock share": (0.0, 1.0),
+        "Open market feedstock share": (0.0, 1.0),
+        "Investor share capital": (0.0, 1.0),
+        "Owner share capital": (0.0, 1.0),
+    }
+    if parameter not in bounds:
+        return value
+    low, high = bounds[parameter]
+    return float(np.clip(value, low, high))
+
+
 def available_monte_carlo_distributions() -> List[str]:
     """Return the ordered list of supported Monte Carlo distributions."""
 
@@ -530,7 +548,12 @@ def monte_carlo_simulation(
                     sampled = spec.sample(rng, record, base_value=base_value)
                 except ValueError:
                     continue
+                sampled = _bounded_global_sample(param, sampled)
                 table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
+                if param == "Investor share capital" and "Owner share capital" in base_values:
+                    table.data.loc[table.data["Parameter"] == "Owner share capital", "Value"] = 1.0 - sampled
+                elif param == "Owner share capital" and "Investor share capital" in base_values:
+                    table.data.loc[table.data["Parameter"] == "Investor share capital", "Value"] = 1.0 - sampled
                 continue
 
             adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)

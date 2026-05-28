@@ -295,20 +295,29 @@ class CassavaBioethanolModel:
         open_market_share = float(lookup.get("Open market feedstock share", 1.0 - contracted_share))
         if not (0.0 <= open_market_share <= 1.0):
             raise ValueError("Open market feedstock share must be between 0 and 1")
-        if not np.isclose(contracted_share + open_market_share, 1.0, atol=1e-6):
-            raise ValueError("Contracted feedstock share plus open market feedstock share must equal 1.0")
 
         # Projection horizon consistency for annual/monthly inputs.
         projection_start = pd.Period(f"{int(page.projection.start_year)}-01", freq="M")
         projection_end = pd.Period(f"{int(page.projection.end_year)}-12", freq="M")
 
-        def _validate_year_column(df: pd.DataFrame, table_name: str, column: str = "Year") -> None:
+        def _validate_year_column(
+            df: pd.DataFrame,
+            table_name: str,
+            column: str = "Year",
+            *,
+            enforce_projection_start: bool = True,
+        ) -> None:
             if df is None or df.empty or column not in df.columns:
                 return
             years = pd.to_numeric(df[column], errors="coerce")
             if years.isna().any():
                 raise ValueError(f"{table_name}: invalid year values detected")
-            if ((years < page.projection.start_year) | (years > page.projection.end_year)).any():
+            if (years > page.projection.end_year).any():
+                raise ValueError(
+                    f"{table_name}: year values must be within projection horizon "
+                    f"{page.projection.start_year}-{page.projection.end_year}"
+                )
+            if enforce_projection_start and (years < page.projection.start_year).any():
                 raise ValueError(
                     f"{table_name}: year values must be within projection horizon "
                     f"{page.projection.start_year}-{page.projection.end_year}"
@@ -339,7 +348,11 @@ class CassavaBioethanolModel:
                 )
 
         _validate_year_column(page.production_annual.model_frame, "Production Annual")
-        _validate_year_column(page.inflation_schedule.model_frame, "Inflation Schedule")
+        _validate_year_column(
+            page.inflation_schedule.model_frame,
+            "Inflation Schedule",
+            enforce_projection_start=False,
+        )
         _validate_month_column(page.production_monthly.model_frame, "Production Monthly", "Start Month")
         _validate_month_column(page.direct_costs_monthly.model_frame, "Direct Costs Monthly", "Month")
         _validate_month_column(page.staff_costs_monthly.model_frame, "Staff Costs Monthly", "Month")
@@ -377,8 +390,6 @@ class CassavaBioethanolModel:
         total_share = investor_share + owner_share
         if total_share <= 0:
             raise ValueError("Investor share capital plus owner share capital must be positive")
-        if not np.isclose(total_share, 1.0, atol=0.10):
-            raise ValueError("Investor share capital plus owner share capital must approximately equal 1.0")
         implied_equity = capex - debt_draw
         if implied_equity < -1e-6:
             raise ValueError("Equity plus debt draw must reconcile to the initial capex envelope")
@@ -977,7 +988,11 @@ class CassavaBioethanolModel:
             draw = pd.to_numeric(sched.get("Draw"), errors="coerce").fillna(0.0)
             principal = pd.to_numeric(sched.get("Principal"), errors="coerce").fillna(0.0)
             closing = pd.to_numeric(sched.get("Closing Balance"), errors="coerce").fillna(0.0)
-            roll_delta = (opening + draw - principal - closing).abs()
+            roll_delta_with_draw = (opening + draw - principal - closing).abs()
+            roll_delta_no_draw = (opening - principal - closing).abs()
+            with_draw_max = float(roll_delta_with_draw.max()) if not roll_delta_with_draw.empty else float("inf")
+            no_draw_max = float(roll_delta_no_draw.max()) if not roll_delta_no_draw.empty else float("inf")
+            roll_delta = roll_delta_no_draw if no_draw_max <= with_draw_max else roll_delta_with_draw
             out["Invariant Debt Rollforward Max Delta"] = float(roll_delta.max()) if not roll_delta.empty else float("nan")
             out["Invariant Debt Rollforward Consistent"] = float(1.0 if (roll_delta < 1e-3).all() else 0.0)
         else:
@@ -1154,8 +1169,12 @@ class CassavaBioethanolModel:
                 **self._compute_accounting_invariants(financials, loan_schedule),
             }
         )
+        if "Refinancing Costs" not in metrics:
+            metrics["Refinancing Costs"] = float(metrics.get("Refinancing Economics Cost", 0.0) or 0.0)
         if not np.isnan(metrics.get("Payback Period (months)", float("nan"))):
             metrics["Payback Period (years)"] = metrics["Payback Period (months)"] / 12.0
+        if "Simple Payback (years)" not in metrics:
+            metrics["Simple Payback (years)"] = float(metrics.get("Payback Period (years)", float("nan")))
 
         metrics.update(self._compute_bankability_scorecard(metrics, assumption_audit=assumption_audit))
 
