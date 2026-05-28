@@ -1866,6 +1866,107 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         _update_table_editor_state(table)
 
 
+def _edit_workspace(page: InputLandingPage) -> None:
+    """Render a user-friendly unified editor with explicit apply/reset actions."""
+
+    st.subheader("Edit Workspace")
+    st.caption(
+        "Select a section and table, edit values, then click **Apply table changes**. "
+        "Linked assumptions and dependent tables are auto-synchronized."
+    )
+
+    grouped = page.grouped_tables()
+    section_names = list(grouped.keys())
+    selected_section = st.selectbox(
+        "Section",
+        options=section_names,
+        key="edit_workspace_section",
+    )
+
+    section_tables = grouped.get(selected_section, [])
+    if not section_tables:
+        st.info("No editable tables found in this section.")
+        return
+
+    table_lookup = {table.name: table for table in section_tables}
+    selected_table_name = st.selectbox(
+        "Table",
+        options=list(table_lookup.keys()),
+        key="edit_workspace_table",
+    )
+    table = table_lookup[selected_table_name]
+
+    if table.name == "Production Annual":
+        st.info(
+            "Production Annual is derived from Production Monthly and stays auto-synced. "
+            "Edit Production Monthly to change annual totals."
+        )
+        st.dataframe(table.data, use_container_width=True, hide_index=True)
+        return
+
+    safe_key = table.name.replace(" ", "_").lower()
+    editor_key = f"edit_workspace_editor_{safe_key}"
+
+    derived_columns = DERIVED_COLUMN_MAP.get(table.name, set())
+    column_config = {}
+    for col in derived_columns:
+        if col in table.columns:
+            column_config[col] = st.column_config.NumberColumn(
+                label=col,
+                disabled=True,
+                help="Calculated automatically from other inputs.",
+            )
+    for (table_name, column), config in CATEGORY_SELECT_OPTIONS.items():
+        if table_name == table.name and column in table.columns and not config.get("allow_custom", True):
+            column_config[column] = st.column_config.SelectboxColumn(
+                label=column,
+                options=list(config.get("options", [])),
+            )
+
+    edited = st.data_editor(
+        table.data,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=editor_key,
+        column_config=column_config or None,
+    )
+    if isinstance(edited, pd.DataFrame):
+        edited_df = edited[table.columns].copy()
+    else:  # pragma: no cover
+        edited_df = pd.DataFrame(edited, columns=table.columns)
+
+    apply_col, reset_col = st.columns(2)
+    apply_clicked = apply_col.button("Apply table changes", key=f"edit_workspace_apply_{safe_key}")
+    reset_clicked = reset_col.button("Reset unsaved edits", key=f"edit_workspace_reset_{safe_key}")
+
+    if reset_clicked:
+        _reset_table_widget(table)
+        _update_table_editor_state(table)
+        st.rerun()
+
+    if not apply_clicked:
+        return
+
+    if table.name == "Production Monthly":
+        edited_df = _sync_production_outputs(edited_df)
+
+    if edited_df.equals(table.data):
+        st.info("No changes detected for this table.")
+        return
+
+    table.set_data(edited_df, mark_user_input=True)
+    _update_table_editor_state(table)
+    if table.name == "Production Monthly":
+        st.session_state[PRODUCTION_EDIT_FLAG] = True
+
+    _apply_dependent_updates(page)
+    _sync_global_assumption_dependencies(page)
+    _sync_table_editors(page)
+    _mark_inputs_dirty()
+
+    st.success(f"Applied changes to {table.name} and synchronized dependent assumptions/tables.")
+
+
 def _apply_production_delta(
     page: InputLandingPage, table: EditableTable, row_idx: int, delta: float
 ) -> bool:
@@ -4713,7 +4814,9 @@ def main() -> None:
         _update_projection(input_page)
         _key_assumptions_controls(input_page)
         _global_input_outlier_warnings(input_page.global_inputs)
-        _modify_default_inputs(input_page)
+        _edit_workspace(input_page)
+        with st.expander("Advanced Row Editor (Legacy)", expanded=False):
+            _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)
         _apply_dependent_updates(input_page)
