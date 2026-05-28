@@ -728,6 +728,72 @@ class CassavaBioethanolModel:
 
         return schedule
 
+    def _sync_cassava_feedstock_costs(
+        self,
+        page: inputs.InputLandingPage,
+        production,
+        scenario: str,
+    ) -> Dict[str, float]:
+        """Derive monthly cassava feedstock costs from tonnage and price-per-ton."""
+
+        globals_df = page.global_inputs.model_frame
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict() if not globals_df.empty else {}
+
+        def _get(name: str, default: float = 0.0) -> float:
+            try:
+                return float(lookup.get(name, default))
+            except (TypeError, ValueError):
+                return default
+
+        farm_cost = max(0.0, _get("Cassava farm cost per ton", 0.0))
+        purchase_cost = max(0.0, _get("Cassava purchase cost per ton", 0.0))
+        farm_share = float(np.clip(_get("Hybrid farm share", 0.0), 0.0, 1.0))
+
+        scenario_name = str(scenario).upper()
+        if scenario_name == "BUY_ONLY":
+            effective_cost_per_ton = purchase_cost
+        elif scenario_name == "HYBRID":
+            effective_cost_per_ton = (farm_share * farm_cost) + ((1.0 - farm_share) * purchase_cost)
+        else:
+            effective_cost_per_ton = farm_cost
+
+        monthly_prod = getattr(production, "monthly", pd.DataFrame())
+        if not isinstance(monthly_prod, pd.DataFrame) or monthly_prod.empty or "Cassava ton" not in monthly_prod.columns:
+            return {"Cassava Feedstock Cost Per Ton (effective)": effective_cost_per_ton}
+
+        cassava_ton = pd.to_numeric(monthly_prod["Cassava ton"], errors="coerce").fillna(0.0)
+        if cassava_ton.empty:
+            return {"Cassava Feedstock Cost Per Ton (effective)": effective_cost_per_ton}
+
+        feedstock_amount = (cassava_ton * effective_cost_per_ton).astype(float)
+        feedstock_rows = pd.DataFrame(
+            {
+                "Month": pd.to_datetime(feedstock_amount.index, errors="coerce").strftime("%Y-%m"),
+                "Cost Category": "Cassava Feedstock",
+                "Amount": feedstock_amount.values,
+            }
+        )
+        feedstock_rows = feedstock_rows.dropna(subset=["Month"])
+
+        direct_df = page.direct_costs_monthly.model_frame
+        if direct_df is None or direct_df.empty:
+            non_feedstock = pd.DataFrame(columns=["Month", "Cost Category", "Amount"])
+        else:
+            normalized = direct_df.copy()
+            if not {"Month", "Cost Category", "Amount"}.issubset(normalized.columns):
+                normalized = pd.DataFrame(columns=["Month", "Cost Category", "Amount"])
+            else:
+                mask = normalized["Cost Category"].astype(str).str.strip().str.casefold() == "cassava feedstock"
+                non_feedstock = normalized.loc[~mask, ["Month", "Cost Category", "Amount"]]
+
+        if non_feedstock.empty:
+            updated_direct = feedstock_rows.copy()
+        else:
+            updated_direct = pd.concat([non_feedstock, feedstock_rows], ignore_index=True)
+        page.direct_costs_monthly.set_data(updated_direct, mark_user_input=True)
+
+        return {"Cassava Feedstock Cost Per Ton (effective)": effective_cost_per_ton}
+
     def _apply_dynamic_debt_mechanics(
         self,
         page: inputs.InputLandingPage,
@@ -1049,6 +1115,7 @@ class CassavaBioethanolModel:
             projection.end_year,
             planning_start=planning_start,
         )
+        feedstock_sync = self._sync_cassava_feedstock_costs(page, production, scenario_name)
 
         revenue = compute_revenue_schedule(
             production,
@@ -1168,6 +1235,7 @@ class CassavaBioethanolModel:
                 "Planning Start Month": page.projection.planning_start,
                 "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
                 **debt_envelope_adjustment,
+                **feedstock_sync,
                 **risk_commercial,
                 **debt_covenants,
                 **self._compute_accounting_invariants(financials, loan_schedule),

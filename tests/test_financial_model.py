@@ -66,3 +66,31 @@ def test_build_scales_debt_to_reduced_capex_envelope():
     assert metrics["Debt Funding Adjusted Draw"] == pytest.approx(1_000_000.0)
     assert metrics["Debt Funding Reduction"] == pytest.approx(23_000_000.0)
     assert metrics["Initial Loan Funding"] <= metrics["Total Initial Investment"] + 1e-6
+
+
+def test_cassava_feedstock_cost_is_derived_from_tonnage_and_price():
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    globals_df = page.global_inputs.data.copy()
+    globals_df.loc[globals_df["Parameter"] == "Contracted feedstock share", "Value"] = 0.0
+    globals_df.loc[globals_df["Parameter"] == "Contract feedstock discount", "Value"] = 0.0
+    globals_df.loc[globals_df["Parameter"] == "Cassava farm cost per ton", "Value"] = 45.0
+    globals_df.loc[globals_df["Parameter"] == "Cassava purchase cost per ton", "Value"] = 70.0
+    globals_df.loc[globals_df["Parameter"] == "Hybrid farm share", "Value"] = 0.5
+    page.global_inputs.set_data(globals_df, mark_user_input=True)
+
+    expected_by_scenario = {
+        "FARM_ONLY": 10_000.0 * 45.0,
+        "BUY_ONLY": 10_000.0 * 70.0,
+        "HYBRID": 10_000.0 * (0.5 * 45.0 + 0.5 * 70.0),
+    }
+    for scenario, expected in expected_by_scenario.items():
+        model.clear_cache()
+        result = model.build(scenario)
+        direct_monthly = result["costs"]["Direct Costs"].monthly
+        january_value = float(direct_monthly.loc[pd.Timestamp("2025-01-01"), "Cassava Feedstock"])
+        multiplier = float(result["metrics"].get("Commercial Cost Multiplier", 1.0))
+        assert january_value == pytest.approx(expected * multiplier)
