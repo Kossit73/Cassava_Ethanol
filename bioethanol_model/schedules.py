@@ -591,7 +591,10 @@ def compute_loan_schedule(
         repay_months = max(tenor_months - grace_months, 0)
 
         draw_month_value = loan.get("Start Month") or months[0]
-        draw_month = pd.Period(draw_month_value, freq="M").to_timestamp()
+        try:
+            draw_month = pd.Period(draw_month_value, freq="M").to_timestamp()
+        except Exception:
+            draw_month = months[0]
         drawn = False
         payments_made = 0
         balance = 0.0

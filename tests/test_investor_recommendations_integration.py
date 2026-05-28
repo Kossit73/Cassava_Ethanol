@@ -122,6 +122,21 @@ def test_validation_allows_loan_start_before_projection_start() -> None:
     assert "metrics" in result
 
 
+def test_validation_sanitizes_invalid_loan_start_month_values() -> None:
+    page = default_input_page()
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    loan = page.loan_schedule.data.copy()
+    loan.loc[:, "Start Month"] = "not-a-month"
+    page.loan_schedule.set_data(loan, mark_user_input=True)
+
+    model = CassavaBioethanolModel(copy.deepcopy(page))
+    result = model.build("FARM_ONLY")
+    metrics = result["metrics"]
+    assert metrics.get("Loan Start Month Fixes", 0.0) >= 1.0
+
+
 def test_validation_allows_tornado_like_share_variation() -> None:
     page = default_input_page()
     for table in page.tables().values():

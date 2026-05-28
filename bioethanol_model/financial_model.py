@@ -398,6 +398,24 @@ class CassavaBioethanolModel:
             "Debt Funding Reduction": max(0.0, debt_draw - adjusted_draw),
         }
 
+    def _sanitize_loan_schedule_start_month(self, page: inputs.InputLandingPage) -> Dict[str, float]:
+        """Normalize invalid loan start months to avoid hard-load crashes."""
+
+        loan_df = page.loan_schedule.model_frame
+        if loan_df is None or loan_df.empty or "Start Month" not in loan_df.columns:
+            return {"Loan Start Month Fixes": 0.0}
+
+        working = loan_df.copy()
+        parsed = pd.to_datetime(working["Start Month"].astype(str), errors="coerce")
+        invalid_mask = parsed.isna()
+        if not invalid_mask.any():
+            return {"Loan Start Month Fixes": 0.0}
+
+        fallback_month = f"{int(page.projection.start_year):04d}-01"
+        working.loc[invalid_mask, "Start Month"] = fallback_month
+        page.loan_schedule.set_data(working, mark_user_input=True)
+        return {"Loan Start Month Fixes": float(int(invalid_mask.sum()))}
+
     def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
         """Hard validation gate for investor-grade completeness checks."""
 
@@ -1251,6 +1269,7 @@ class CassavaBioethanolModel:
         global_automation_audit = self._auto_balance_global_inputs(page)
         tax_schedule_sync_audit = self._sync_tax_schedule_from_global_rate(page)
         production_annual_sync_audit = self._sync_production_annual_from_monthly(page)
+        loan_start_sanitize_audit = self._sanitize_loan_schedule_start_month(page)
         debt_envelope_adjustment = self._align_debt_to_capex_envelope(page)
         self._validate_required_inputs(page)
         self._apply_debt_strategy_toggles(page)
@@ -1394,6 +1413,7 @@ class CassavaBioethanolModel:
                 "Automation Adjustments Applied": float(global_automation_audit.get("applied", 0)),
                 "Automation Production Annual Rows": float(production_annual_sync_audit.get("rows", 0)),
                 "Automation Tax Schedule Rows Synced": float(tax_schedule_sync_audit.get("rows", 0)),
+                **loan_start_sanitize_audit,
                 **debt_envelope_adjustment,
                 **feedstock_sync,
                 **risk_commercial,
@@ -1437,6 +1457,7 @@ class CassavaBioethanolModel:
                 "global_assumptions": global_automation_audit,
                 "tax_schedule_sync": tax_schedule_sync_audit,
                 "production_annual_sync": production_annual_sync_audit,
+                "loan_start_month_sanitize": loan_start_sanitize_audit,
             },
         }
         self._scenario_cache[scenario_name] = (signature, copy.deepcopy(results))
