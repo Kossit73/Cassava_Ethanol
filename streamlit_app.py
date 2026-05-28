@@ -1267,9 +1267,104 @@ def _apply_dependent_updates(page: InputLandingPage) -> None:
     _sync_working_capital_tables(page)
 
 
-def _key_assumptions_controls(table: EditableTable) -> None:
+def _sync_global_assumption_dependencies(page: InputLandingPage) -> bool:
+    """Auto-propagate linked global assumptions and tax schedule rows."""
+
+    table = page.global_inputs
+    if table.data is None or table.data.empty:
+        return False
+    if not {"Parameter", "Value"}.issubset(table.data.columns):
+        return False
+
+    df = table.data.copy()
+    changed = False
+
+    def _read(parameter: str) -> float | None:
+        mask = df["Parameter"].astype(str).str.strip() == parameter
+        if not mask.any():
+            return None
+        numeric = pd.to_numeric(df.loc[mask, "Value"], errors="coerce")
+        if numeric.empty or pd.isna(numeric.iloc[0]):
+            return None
+        return float(numeric.iloc[0])
+
+    def _write(parameter: str, value: float) -> None:
+        nonlocal changed
+        mask = df["Parameter"].astype(str).str.strip() == parameter
+        if not mask.any():
+            return
+        current = pd.to_numeric(df.loc[mask, "Value"], errors="coerce")
+        if current.empty or pd.isna(current.iloc[0]) or not np.isclose(float(current.iloc[0]), float(value), atol=1e-9):
+            df.loc[mask, "Value"] = float(value)
+            changed = True
+
+    investor = _read("Investor share capital")
+    owner = _read("Owner share capital")
+    if investor is not None or owner is not None:
+        investor_val = max(0.0, investor if investor is not None else 0.0)
+        owner_val = max(0.0, owner if owner is not None else 0.0)
+        if investor is None and owner is not None:
+            investor_val = max(0.0, 1.0 - owner_val)
+        if owner is None and investor is not None:
+            owner_val = max(0.0, 1.0 - investor_val)
+        total = investor_val + owner_val
+        if total > 0:
+            investor_val /= total
+            owner_val /= total
+        _write("Investor share capital", investor_val)
+        _write("Owner share capital", owner_val)
+
+    contracted = _read("Contracted feedstock share")
+    if contracted is not None:
+        contracted_val = float(np.clip(contracted, 0.0, 1.0))
+        _write("Contracted feedstock share", contracted_val)
+        _write("Open market feedstock share", 1.0 - contracted_val)
+
+    hybrid = _read("Hybrid farm share")
+    if hybrid is not None:
+        _write("Hybrid farm share", float(np.clip(hybrid, 0.0, 1.0)))
+
+    tax = _read("Corporate tax rate")
+    if tax is not None:
+        _write("Corporate tax rate", float(np.clip(tax, 0.0, 0.60)))
+
+    discount = _read("Discount rate")
+    if discount is not None:
+        _write("Discount rate", float(np.clip(discount, 0.0, 0.50)))
+
+    if changed:
+        table.set_data(df, mark_user_input=True)
+        _update_table_editor_state(table)
+        _mark_inputs_dirty()
+
+    tax_table = page.tax_schedule
+    if tax_table.data is None or tax_table.data.empty:
+        return changed
+    if not {"Item", "Base Rate"}.issubset(tax_table.data.columns):
+        return changed
+
+    global_tax = _read("Corporate tax rate")
+    if global_tax is None:
+        return changed
+
+    tax_df = tax_table.data.copy()
+    tax_mask = tax_df["Item"].astype(str).str.contains("corporate income tax", case=False, na=False)
+    if tax_mask.any():
+        current = pd.to_numeric(tax_df.loc[tax_mask, "Base Rate"], errors="coerce")
+        if current.empty or pd.isna(current.iloc[0]) or not np.isclose(float(current.iloc[0]), float(global_tax), atol=1e-9):
+            tax_df.loc[tax_mask, "Base Rate"] = float(global_tax)
+            tax_table.set_data(tax_df, mark_user_input=True)
+            _update_table_editor_state(tax_table)
+            _mark_inputs_dirty()
+            changed = True
+
+    return changed
+
+
+def _key_assumptions_controls(page: InputLandingPage) -> None:
     """Expose frequently tweaked assumptions inside the main page."""
 
+    table = page.global_inputs
     st.subheader("Key Assumptions")
     st.caption("Unit hint: percentage/rate fields accept either decimal form (e.g., 0.12) or percent form (e.g., 12). The model auto-normalizes percent-form inputs.")
     original_df = table.data.copy()
@@ -1294,7 +1389,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
             current_default = (
                 float(df.at[idx, "Value"]) if pd.notna(df.at[idx, "Value"]) else min_value
             )
-            if value_key not in st.session_state:
+            if value_key not in st.session_state or not np.isclose(float(st.session_state[value_key]), float(current_default), atol=1e-12):
                 st.session_state[value_key] = current_default
 
             original_value = current_default
@@ -1315,6 +1410,7 @@ def _key_assumptions_controls(table: EditableTable) -> None:
     table.set_data(df, mark_user_input=updated)
     if not df.equals(original_df):
         _update_table_editor_state(table)
+    _sync_global_assumption_dependencies(page)
 
 
 def _global_input_outlier_warnings(table: EditableTable) -> None:
@@ -4615,13 +4711,14 @@ def main() -> None:
         st.subheader("Input Landing Page")
         st.info("Edit the assumptions and press 'Recalculate model' to refresh the financial outputs.")
         _update_projection(input_page)
-        _key_assumptions_controls(input_page.global_inputs)
+        _key_assumptions_controls(input_page)
         _global_input_outlier_warnings(input_page.global_inputs)
         _modify_default_inputs(input_page)
         _render_production_panel(input_page)
         _sync_table_editors(input_page)
         _apply_dependent_updates(input_page)
         _editable_tables(input_page)
+        _sync_global_assumption_dependencies(input_page)
 
     snapshot = st.session_state.get("input_snapshot")
     snapshot_projection = None

@@ -143,3 +143,24 @@ def test_production_annual_is_auto_synced_from_monthly():
     jan_row = synced.loc[synced["Year"] == 2025].iloc[0]
     assert float(jan_row["Cassava ton"]) == pytest.approx(120_000.0)
     assert result["metrics"]["Automation Production Annual Rows"] >= 1.0
+
+
+def test_corporate_tax_rate_propagates_to_tax_schedule_and_metrics():
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    globals_df = page.global_inputs.data.copy()
+    globals_df.loc[globals_df["Parameter"] == "Corporate tax rate", "Value"] = 0.33
+    page.global_inputs.set_data(globals_df, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    snapshot = result["input_page_snapshot"]
+    tax_df = snapshot.tax_schedule.model_frame
+    mask = tax_df["Item"].astype(str).str.contains("corporate income tax", case=False, na=False)
+    synced_tax = float(pd.to_numeric(tax_df.loc[mask, "Base Rate"], errors="coerce").iloc[0])
+
+    assert float(result["metrics"]["Corporate Tax Rate"]) == pytest.approx(0.33)
+    assert synced_tax == pytest.approx(0.33)
+    assert result["metrics"]["Automation Tax Schedule Rows Synced"] >= 1.0

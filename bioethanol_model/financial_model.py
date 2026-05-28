@@ -271,10 +271,52 @@ class CassavaBioethanolModel:
                 "Clamped hybrid farm share to [0,1]",
             )
 
+        corporate_tax = _read("Corporate tax rate")
+        if corporate_tax is not None:
+            _write("Corporate tax rate", float(np.clip(corporate_tax, 0.0, 0.60)), "Clamped corporate tax rate to [0,0.60]")
+
+        discount_rate = _read("Discount rate")
+        if discount_rate is not None:
+            _write("Discount rate", float(np.clip(discount_rate, 0.0, 0.50)), "Clamped discount rate to [0,0.50]")
+
         if not working.equals(df):
             page.global_inputs.set_data(working, mark_user_input=page.global_inputs.placeholder)
 
         return {"applied": len(details), "details": details}
+
+    def _sync_tax_schedule_from_global_rate(self, page: inputs.InputLandingPage) -> Dict[str, object]:
+        """Propagate global corporate tax assumption into the tax schedule table."""
+
+        globals_df = page.global_inputs.model_frame
+        tax_df = page.tax_schedule.model_frame
+        if (
+            globals_df is None
+            or globals_df.empty
+            or tax_df is None
+            or tax_df.empty
+            or not {"Parameter", "Value"}.issubset(globals_df.columns)
+            or not {"Item", "Base Rate"}.issubset(tax_df.columns)
+        ):
+            return {"applied": False, "rows": 0}
+
+        lookup = globals_df.set_index("Parameter")["Value"].to_dict()
+        try:
+            global_tax = float(lookup.get("Corporate tax rate"))
+        except (TypeError, ValueError):
+            return {"applied": False, "rows": 0}
+
+        working = tax_df.copy()
+        mask = working["Item"].astype(str).str.contains("corporate income tax", case=False, na=False)
+        if not mask.any():
+            return {"applied": False, "rows": 0}
+
+        current = pd.to_numeric(working.loc[mask, "Base Rate"], errors="coerce")
+        if current.empty or not np.isclose(float(current.iloc[0]), global_tax, atol=1e-9):
+            working.loc[mask, "Base Rate"] = global_tax
+            page.tax_schedule.set_data(working, mark_user_input=True)
+            return {"applied": True, "rows": int(mask.sum())}
+
+        return {"applied": False, "rows": int(mask.sum())}
 
     def _sync_production_annual_from_monthly(self, page: inputs.InputLandingPage) -> Dict[str, object]:
         """Derive production-annual input table from monthly inputs automatically."""
@@ -1207,6 +1249,7 @@ class CassavaBioethanolModel:
         self._materialize_required_defaults(page)
         assumption_audit = self._normalize_global_units(page)
         global_automation_audit = self._auto_balance_global_inputs(page)
+        tax_schedule_sync_audit = self._sync_tax_schedule_from_global_rate(page)
         production_annual_sync_audit = self._sync_production_annual_from_monthly(page)
         debt_envelope_adjustment = self._align_debt_to_capex_envelope(page)
         self._validate_required_inputs(page)
@@ -1350,6 +1393,7 @@ class CassavaBioethanolModel:
                 "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
                 "Automation Adjustments Applied": float(global_automation_audit.get("applied", 0)),
                 "Automation Production Annual Rows": float(production_annual_sync_audit.get("rows", 0)),
+                "Automation Tax Schedule Rows Synced": float(tax_schedule_sync_audit.get("rows", 0)),
                 **debt_envelope_adjustment,
                 **feedstock_sync,
                 **risk_commercial,
@@ -1391,6 +1435,7 @@ class CassavaBioethanolModel:
             "assumption_quality_audit": assumption_audit,
             "automation_audit": {
                 "global_assumptions": global_automation_audit,
+                "tax_schedule_sync": tax_schedule_sync_audit,
                 "production_annual_sync": production_annual_sync_audit,
             },
         }
