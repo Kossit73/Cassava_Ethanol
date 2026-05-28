@@ -36,49 +36,75 @@ class DepreciationOutput:
 def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: int, end_year: int) -> DepreciationOutput:
     months = year_month_range(start_year, end_year)
 
-    # When the landing-page CAPEX table is still populated with placeholder
-    # values ``initial_investment`` can be empty.  The downstream pivot would
-    # otherwise raise ``KeyError`` because the required ``Month`` column is
-    # missing.  Short-circuit with zero schedules so the rest of the model can
-    # continue to build using the user-provided tables only.
-    if initial_investment is None or initial_investment.empty:
+    def _empty_output() -> DepreciationOutput:
         empty_monthly = pd.DataFrame(index=months)
         empty_monthly.index.name = "Month"
         empty_monthly["Total Depreciation"] = 0.0
         empty_annual = _annual_sum(empty_monthly)
-        empty_summary = pd.DataFrame(columns=[
-            "Item",
-            "Cost",
-            "Life (years)",
-            "Depreciation Rate",
-            "Annual Depreciation",
-            "Monthly Depreciation",
-            f"Accumulated Depreciation (Year {end_year})",
-            "Net Book Value",
-        ])
+        empty_summary = pd.DataFrame(
+            columns=[
+                "Item",
+                "Cost",
+                "Life (years)",
+                "Depreciation Rate",
+                "Annual Depreciation",
+                "Monthly Depreciation",
+                f"Accumulated Depreciation (Year {end_year})",
+                "Net Book Value",
+            ]
+        )
         capex_series = pd.Series(0.0, index=months, name="Capex")
         return DepreciationOutput(empty_monthly, empty_annual, empty_summary, capex_series)
 
+    if initial_investment is None or initial_investment.empty:
+        return _empty_output()
+
     records = []
     capex_records = []
-    for _, row in initial_investment.iterrows():
-        life_years = row.get("Life (years)") or row.get("Life") or 10
-        rate = row.get("Depreciation Rate")
-        cost = float(row["Cost"])
-        # pd.isna() catches NaN from blank cells — np.nan != np.nan so the old
-        # `rate in (None, 0, np.nan)` check silently fell through for NaN,
-        # producing NaN depreciation and understating financial metrics.
-        if pd.isna(rate) or not rate:
-            annual_dep = cost / life_years if life_years else 0
+    summary_records = []
+
+    for idx, row in initial_investment.iterrows():
+        item = row.get("Item", f"Item {idx + 1}")
+
+        raw_life = row.get("Life (years)")
+        if pd.isna(raw_life):
+            raw_life = row.get("Life")
+        life_years = pd.to_numeric(raw_life, errors="coerce")
+        life_years = float(life_years) if pd.notna(life_years) and float(life_years) > 0 else 10.0
+
+        rate = pd.to_numeric(row.get("Depreciation Rate"), errors="coerce")
+        cost = pd.to_numeric(row.get("Cost"), errors="coerce")
+        cost = float(cost) if pd.notna(cost) else 0.0
+
+        if pd.isna(rate) or float(rate) == 0.0:
+            annual_dep = cost / life_years if life_years else 0.0
         else:
             annual_dep = cost * float(rate)
         monthly_dep = annual_dep / 12.0
+
         start_month_value = row.get("Start Month", f"{start_year}-01")
-        start_month = pd.Period(start_month_value, freq="M").to_timestamp()
-        capex_records.append({"Month": start_month, "Item": row["Item"], "Capex": cost})
+        try:
+            start_month = pd.Period(start_month_value, freq="M").to_timestamp()
+        except Exception:
+            start_month = pd.Period(f"{start_year}-01", freq="M").to_timestamp()
+
+        capex_records.append({"Month": start_month, "Item": item, "Capex": cost})
+        summary_records.append(
+            {
+                "Item": item,
+                "Cost": cost,
+                "Life (years)": life_years,
+                "Depreciation Rate": float(rate) if pd.notna(rate) else np.nan,
+                "Annual Depreciation": annual_dep,
+            }
+        )
+
         for month in months:
             dep = monthly_dep if month >= start_month else 0.0
-            records.append({"Month": month, "Item": row["Item"], "Depreciation": dep})
+            records.append({"Month": month, "Item": item, "Depreciation": dep})
+
+    if not records:
+        return _empty_output()
 
     monthly_df = (
         pd.DataFrame(records)
@@ -95,20 +121,13 @@ def compute_depreciation_schedule(initial_investment: pd.DataFrame, start_year: 
 
     annual_df = _annual_sum(monthly_df)
 
-    summary = initial_investment.copy()
-    summary["Annual Depreciation"] = summary.apply(
-        lambda r: (
-            r["Cost"] / r.get("Life (years)")
-            if pd.isna(r.get("Depreciation Rate")) or not r.get("Depreciation Rate")
-            else r["Cost"] * r.get("Depreciation Rate")
-        ),
-        axis=1,
-    )
+    summary = pd.DataFrame(summary_records)
     summary["Monthly Depreciation"] = summary["Annual Depreciation"] / 12.0
-    summary["Accumulated Depreciation (Year %d)" % end_year] = summary["Annual Depreciation"] * (end_year - start_year + 1)
+    summary["Accumulated Depreciation (Year %d)" % end_year] = (
+        summary["Annual Depreciation"] * (end_year - start_year + 1)
+    )
     summary["Net Book Value"] = summary["Cost"] - summary["Accumulated Depreciation (Year %d)" % end_year]
     return DepreciationOutput(monthly_df, annual_df, summary, capex_series)
-
 
 @dataclass
 class ProductionOutput:

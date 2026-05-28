@@ -1128,7 +1128,11 @@ class CassavaBioethanolModel:
             investor_share = investor_share / share_total
             owner_share = owner_share / share_total
         init_df = page.initial_investment.model_frame
-        total_investment = float(init_df["Cost"].sum()) if "Cost" in init_df.columns else 0.0
+        total_investment = (
+            float(pd.to_numeric(init_df.get("Cost"), errors="coerce").fillna(0.0).sum())
+            if "Cost" in init_df.columns
+            else 0.0
+        )
 
         terminal_growth_rate = _get_global("Terminal growth", 0.0)
         capital_gains_tax_rate = _get_global("Capital gains tax rate", 0.0)
