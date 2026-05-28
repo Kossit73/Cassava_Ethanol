@@ -94,3 +94,52 @@ def test_cassava_feedstock_cost_is_derived_from_tonnage_and_price():
         january_value = float(direct_monthly.loc[pd.Timestamp("2025-01-01"), "Cassava Feedstock"])
         multiplier = float(result["metrics"].get("Commercial Cost Multiplier", 1.0))
         assert january_value == pytest.approx(expected * multiplier)
+
+
+def test_global_assumptions_are_auto_balanced_and_synced():
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    globals_df = page.global_inputs.data.copy()
+    globals_df.loc[globals_df["Parameter"] == "Investor share capital", "Value"] = 0.495
+    globals_df.loc[globals_df["Parameter"] == "Owner share capital", "Value"] = 0.55
+    globals_df.loc[globals_df["Parameter"] == "Contracted feedstock share", "Value"] = 0.7
+    globals_df.loc[globals_df["Parameter"] == "Open market feedstock share", "Value"] = 0.9
+    page.global_inputs.set_data(globals_df, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    snapshot_globals = result["input_page_snapshot"].global_inputs.model_frame
+    lookup = snapshot_globals.set_index("Parameter")["Value"].to_dict()
+
+    investor = float(lookup["Investor share capital"])
+    owner = float(lookup["Owner share capital"])
+    contracted = float(lookup["Contracted feedstock share"])
+    open_market = float(lookup["Open market feedstock share"])
+
+    assert investor + owner == pytest.approx(1.0)
+    assert contracted == pytest.approx(0.7)
+    assert open_market == pytest.approx(0.3)
+    assert result["metrics"]["Automation Adjustments Applied"] >= 1.0
+
+
+def test_production_annual_is_auto_synced_from_monthly():
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    stale_annual = page.production_annual.data.copy()
+    stale_annual.loc[:, "Year"] = 2035
+    page.production_annual.set_data(stale_annual, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    synced = result["input_page_snapshot"].production_annual.model_frame
+
+    assert not synced.empty
+    assert synced["Year"].min() >= page.projection.start_year
+    assert synced["Year"].max() <= page.projection.end_year
+    jan_row = synced.loc[synced["Year"] == 2025].iloc[0]
+    assert float(jan_row["Cassava ton"]) == pytest.approx(120_000.0)
+    assert result["metrics"]["Automation Production Annual Rows"] >= 1.0

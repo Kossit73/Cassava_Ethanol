@@ -201,6 +201,118 @@ class CassavaBioethanolModel:
             "notes": ["Percent normalization: values in (1,100] are converted to decimal form by dividing by 100."],
         }
 
+    def _auto_balance_global_inputs(self, page: inputs.InputLandingPage) -> Dict[str, object]:
+        """Auto-balance linked global assumptions to reduce manual inconsistencies."""
+
+        df = page.global_inputs.model_frame
+        if df is None or df.empty or not {"Parameter", "Value"}.issubset(df.columns):
+            return {"applied": 0, "details": []}
+
+        working = df.copy()
+        details: list[str] = []
+        unit_map = working.set_index("Parameter")["Units"].to_dict() if "Units" in working.columns else {}
+
+        def _read(parameter: str) -> float | None:
+            mask = working["Parameter"].astype(str).str.strip() == parameter
+            if not mask.any():
+                return None
+            raw = pd.to_numeric(working.loc[mask, "Value"], errors="coerce")
+            if raw.empty:
+                return None
+            value = raw.iloc[0]
+            if pd.isna(value):
+                return None
+            return float(value)
+
+        def _write(parameter: str, value: float, reason: str) -> None:
+            nonlocal working
+            value = float(value)
+            mask = working["Parameter"].astype(str).str.strip() == parameter
+            if mask.any():
+                current = pd.to_numeric(working.loc[mask, "Value"], errors="coerce").iloc[0]
+                if pd.isna(current) or not np.isclose(float(current), value, atol=1e-9):
+                    working.loc[mask, "Value"] = value
+                    details.append(reason)
+            else:
+                row = {"Parameter": parameter, "Value": value}
+                if "Units" in working.columns:
+                    row["Units"] = unit_map.get(parameter, "")
+                working = pd.concat([working, pd.DataFrame([row])], ignore_index=True)
+                details.append(reason)
+            return None
+
+        investor_share = _read("Investor share capital")
+        owner_share = _read("Owner share capital")
+        if investor_share is not None or owner_share is not None:
+            investor = max(0.0, investor_share if investor_share is not None else 0.0)
+            owner = max(0.0, owner_share if owner_share is not None else 0.0)
+            if investor_share is None and owner_share is not None:
+                investor = max(0.0, 1.0 - owner)
+            if owner_share is None and investor_share is not None:
+                owner = max(0.0, 1.0 - investor)
+            total = investor + owner
+            if total > 0:
+                investor /= total
+                owner /= total
+            _write("Investor share capital", investor, "Normalized investor/owner share capital split")
+            _write("Owner share capital", owner, "Normalized investor/owner share capital split")
+
+        contracted_share = _read("Contracted feedstock share")
+        if contracted_share is not None:
+            contracted = float(np.clip(contracted_share, 0.0, 1.0))
+            _write("Contracted feedstock share", contracted, "Clamped contracted feedstock share to [0,1]")
+            _write("Open market feedstock share", 1.0 - contracted, "Synced open market share to 1-contracted share")
+
+        hybrid_share = _read("Hybrid farm share")
+        if hybrid_share is not None:
+            _write(
+                "Hybrid farm share",
+                float(np.clip(hybrid_share, 0.0, 1.0)),
+                "Clamped hybrid farm share to [0,1]",
+            )
+
+        if not working.equals(df):
+            page.global_inputs.set_data(working, mark_user_input=page.global_inputs.placeholder)
+
+        return {"applied": len(details), "details": details}
+
+    def _sync_production_annual_from_monthly(self, page: inputs.InputLandingPage) -> Dict[str, object]:
+        """Derive production-annual input table from monthly inputs automatically."""
+
+        monthly_df = page.production_monthly.model_frame
+        if monthly_df is None or monthly_df.empty:
+            return {"applied": False, "rows": 0}
+
+        projection = page.projection
+        production = compute_production_tables(
+            monthly_df,
+            projection.start_year,
+            projection.end_year,
+            planning_start=projection.planning_start_timestamp,
+        )
+        annual = getattr(production, "annual", pd.DataFrame())
+        if not isinstance(annual, pd.DataFrame) or annual.empty:
+            return {"applied": False, "rows": 0}
+
+        annual_reset = annual.reset_index()
+        if "index" in annual_reset.columns and "Year" not in annual_reset.columns:
+            annual_reset = annual_reset.rename(columns={"index": "Year"})
+        if "Year" not in annual_reset.columns:
+            annual_reset["Year"] = annual_reset.index
+
+        target_columns = page.production_annual.columns
+        synced = pd.DataFrame(columns=target_columns)
+        for column in target_columns:
+            if column in annual_reset.columns:
+                synced[column] = annual_reset[column]
+            else:
+                synced[column] = np.nan
+        if "Year" in synced.columns:
+            synced["Year"] = pd.to_numeric(synced["Year"], errors="coerce").fillna(0).astype(int)
+
+        page.production_annual.set_data(synced, mark_user_input=True)
+        return {"applied": True, "rows": int(len(synced))}
+
     @staticmethod
     def _loan_amount_column(loan_df: pd.DataFrame) -> str | None:
         for column in ("Loan Amount", "Amount", "Draw Amount", "Drawdown", "Draw"):
@@ -1094,6 +1206,8 @@ class CassavaBioethanolModel:
         page = self._prepare_page_for_scenario(scenario_name)
         self._materialize_required_defaults(page)
         assumption_audit = self._normalize_global_units(page)
+        global_automation_audit = self._auto_balance_global_inputs(page)
+        production_annual_sync_audit = self._sync_production_annual_from_monthly(page)
         debt_envelope_adjustment = self._align_debt_to_capex_envelope(page)
         self._validate_required_inputs(page)
         self._apply_debt_strategy_toggles(page)
@@ -1234,6 +1348,8 @@ class CassavaBioethanolModel:
                 "Scenario": scenario_name,
                 "Planning Start Month": page.projection.planning_start,
                 "Assumption Quality Checks Passed": float(1.0 if assumption_audit.get("passed", False) else 0.0),
+                "Automation Adjustments Applied": float(global_automation_audit.get("applied", 0)),
+                "Automation Production Annual Rows": float(production_annual_sync_audit.get("rows", 0)),
                 **debt_envelope_adjustment,
                 **feedstock_sync,
                 **risk_commercial,
@@ -1273,6 +1389,10 @@ class CassavaBioethanolModel:
             "input_page_snapshot": page,
             "staff_schedule": staff_schedule,
             "assumption_quality_audit": assumption_audit,
+            "automation_audit": {
+                "global_assumptions": global_automation_audit,
+                "production_annual_sync": production_annual_sync_audit,
+            },
         }
         self._scenario_cache[scenario_name] = (signature, copy.deepcopy(results))
         return results
