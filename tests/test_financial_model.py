@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 pd = pytest.importorskip("pandas")
@@ -145,7 +147,7 @@ def test_production_annual_is_auto_synced_from_monthly():
     assert result["metrics"]["Automation Production Annual Rows"] >= 1.0
 
 
-def test_corporate_tax_rate_propagates_to_tax_schedule_and_metrics():
+def test_global_tax_rate_is_used_when_tax_schedule_is_missing():
     model = CassavaBioethanolModel()
     page = model.input_page
     for table in page.tables().values():
@@ -154,13 +156,94 @@ def test_corporate_tax_rate_propagates_to_tax_schedule_and_metrics():
     globals_df = page.global_inputs.data.copy()
     globals_df.loc[globals_df["Parameter"] == "Corporate tax rate", "Value"] = 0.33
     page.global_inputs.set_data(globals_df, mark_user_input=True)
+    page.tax_schedule.set_data(pd.DataFrame(columns=page.tax_schedule.columns), mark_user_input=True)
 
     result = model.build("FARM_ONLY")
-    snapshot = result["input_page_snapshot"]
-    tax_df = snapshot.tax_schedule.model_frame
-    mask = tax_df["Item"].astype(str).str.contains("corporate income tax", case=False, na=False)
-    synced_tax = float(pd.to_numeric(tax_df.loc[mask, "Base Rate"], errors="coerce").iloc[0])
-
     assert float(result["metrics"]["Corporate Tax Rate"]) == pytest.approx(0.33)
-    assert synced_tax == pytest.approx(0.33)
-    assert result["metrics"]["Automation Tax Schedule Rows Synced"] >= 1.0
+    income_monthly = result["financials"].income_monthly
+    taxable = income_monthly.loc[income_monthly["EBT"] > 0, ["Tax", "EBT"]]
+    assert not taxable.empty
+    effective_rate = float((taxable["Tax"] / taxable["EBT"]).median())
+    assert effective_rate == pytest.approx(0.33, rel=1e-3)
+
+
+def test_dscr_inputs_are_not_percent_normalized() -> None:
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    globals_df = page.global_inputs.data.copy()
+    globals_df.loc[globals_df["Parameter"] == "Target DSCR", "Value"] = 1.25
+    globals_df.loc[globals_df["Parameter"] == "DSCR lock-up threshold", "Value"] = 1.15
+    globals_df.loc[globals_df["Parameter"] == "Cash sweep trigger DSCR", "Value"] = 1.35
+    page.global_inputs.set_data(globals_df, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    converted = set(result.get("assumption_quality_audit", {}).get("converted", []))
+
+    assert "Target DSCR" not in converted
+    assert "DSCR lock-up threshold" not in converted
+    assert "Cash sweep trigger DSCR" not in converted
+    assert float(result["metrics"]["Cash Sweep Trigger DSCR"]) == pytest.approx(1.35)
+
+
+def test_llcr_uses_non_zero_debt_month_when_draw_is_delayed() -> None:
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    loan_df = page.loan_schedule.data.copy()
+    loan_df.loc[:, "Start Month"] = "2026-01"
+    page.loan_schedule.set_data(loan_df, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    llcr_value = float(result["metrics"]["LLCR"])
+    assert math.isfinite(llcr_value)
+
+
+def test_bankability_liquidity_score_reads_min_liquidity_cover_metric() -> None:
+    model = CassavaBioethanolModel.default()
+    scorecard = model._compute_bankability_scorecard(
+        {
+            "Project NPV": 1.0,
+            "Project IRR": 0.2,
+            "DSCR (min)": 1.2,
+            "LLCR": 1.3,
+            "PLCR": 1.3,
+            "Minimum Monthly Cash Balance": -1.0,
+            "Months of Liquidity Cover (min)": 4.0,
+            "Take-or-pay share": 0.8,
+            "Contracted feedstock share": 0.6,
+            "Risk Score": 0.1,
+            "Invariant Balance Sheet Balanced": 1.0,
+            "Invariant Cash Flow Bridge Consistent": 1.0,
+            "Invariant Debt Rollforward Consistent": 1.0,
+        },
+        assumption_audit={"passed": True},
+    )
+    assert float(scorecard["Bankability Liquidity Resilience Score"]) > 0.0
+
+
+def test_tax_schedule_overrides_global_tax_rate_in_income_statement() -> None:
+    model = CassavaBioethanolModel()
+    page = model.input_page
+    for table in page.tables().values():
+        table.set_data(table.data, mark_user_input=True)
+
+    globals_df = page.global_inputs.data.copy()
+    globals_df.loc[globals_df["Parameter"] == "Corporate tax rate", "Value"] = 0.10
+    page.global_inputs.set_data(globals_df, mark_user_input=True)
+
+    tax_df = page.tax_schedule.data.copy()
+    mask = tax_df["Item"].astype(str).str.contains("corporate income tax", case=False, na=False)
+    tax_df.loc[mask, "Base Rate"] = 0.30
+    page.tax_schedule.set_data(tax_df, mark_user_input=True)
+
+    result = model.build("FARM_ONLY")
+    income_monthly = result["financials"].income_monthly
+    taxable = income_monthly.loc[income_monthly["EBT"] > 0, ["Tax", "EBT"]]
+    assert not taxable.empty
+    effective_rate = float((taxable["Tax"] / taxable["EBT"]).median())
+    assert effective_rate == pytest.approx(0.30, rel=1e-3)

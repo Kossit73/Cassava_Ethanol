@@ -438,18 +438,21 @@ def run_sensitivity(model: CassavaBioethanolModel, scenarios: Iterable[Sensitivi
         if scenario.parameter not in table.data["Parameter"].values:
             continue
         original = table.data.set_index("Parameter").loc[scenario.parameter, "Value"]
-        table.data.loc[table.data["Parameter"] == scenario.parameter, "Value"] = original + scenario.delta
-        result = model.build()
-        rows.append(
-            {
-                "Scenario": scenario.name,
-                "Parameter": scenario.parameter,
-                "Delta": scenario.delta,
-                "Project NPV": result["metrics"]["Project NPV"],
-                "Change vs Base": result["metrics"]["Project NPV"] - base_metric,
-            }
-        )
-        table.data.loc[table.data["Parameter"] == scenario.parameter, "Value"] = original
+        mask = table.data["Parameter"] == scenario.parameter
+        table.data.loc[mask, "Value"] = original + scenario.delta
+        try:
+            result = model.build()
+            rows.append(
+                {
+                    "Scenario": scenario.name,
+                    "Parameter": scenario.parameter,
+                    "Delta": scenario.delta,
+                    "Project NPV": result["metrics"]["Project NPV"],
+                    "Change vs Base": result["metrics"]["Project NPV"] - base_metric,
+                }
+            )
+        finally:
+            table.data.loc[mask, "Value"] = original
     return pd.DataFrame(rows)
 def monte_carlo_simulation(
     model: CassavaBioethanolModel,
@@ -515,82 +518,83 @@ def monte_carlo_simulation(
             except np.linalg.LinAlgError:
                 corr_chol = None
 
-    for _ in range(int(iterations)):
-        _reset_global_inputs(table.data, base_values)
-        correlated_samples: Dict[str, float] = {}
-        if corr_chol is not None and correlated_params:
-            z = rng.standard_normal(len(correlated_params))
-            shocks = corr_chol @ z
-            for idx, param in enumerate(correlated_params):
-                loc = normal_lookup[param]["loc"]
-                scale = normal_lookup[param]["scale"]
-                correlated_samples[param] = loc + scale * float(shocks[idx])
-        for record in config_records:
-            param = record["Parameter"]
-            spec = MONTE_CARLO_DISTRIBUTIONS.get(record["Distribution"])
-            if spec is None:
-                continue
-            if param in correlated_samples:
-                sampled = correlated_samples[param]
+    try:
+        for _ in range(int(iterations)):
+            _reset_global_inputs(table.data, base_values)
+            correlated_samples: Dict[str, float] = {}
+            if corr_chol is not None and correlated_params:
+                z = rng.standard_normal(len(correlated_params))
+                shocks = corr_chol @ z
+                for idx, param in enumerate(correlated_params):
+                    loc = normal_lookup[param]["loc"]
+                    scale = normal_lookup[param]["scale"]
+                    correlated_samples[param] = loc + scale * float(shocks[idx])
+            for record in config_records:
+                param = record["Parameter"]
+                spec = MONTE_CARLO_DISTRIBUTIONS.get(record["Distribution"])
+                if spec is None:
+                    continue
+                if param in correlated_samples:
+                    sampled = correlated_samples[param]
+                    if param in base_values:
+                        table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
+                    else:
+                        adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+                        state = adapter_states.get(param)
+                        if adapter is not None and state is not None:
+                            adapter.apply(model.input_page, sampled, state)
+                    continue
                 if param in base_values:
+                    base_value = _coerce_float(base_values[param])
+                    if base_value is None:
+                        continue
+                    try:
+                        sampled = spec.sample(rng, record, base_value=base_value)
+                    except ValueError:
+                        continue
+                    sampled = _bounded_global_sample(param, sampled)
                     table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
-                else:
-                    adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
-                    state = adapter_states.get(param)
-                    if adapter is not None and state is not None:
-                        adapter.apply(model.input_page, sampled, state)
-                continue
-            if param in base_values:
-                base_value = _coerce_float(base_values[param])
-                if base_value is None:
+                    if param == "Investor share capital" and "Owner share capital" in base_values:
+                        table.data.loc[table.data["Parameter"] == "Owner share capital", "Value"] = 1.0 - sampled
+                    elif param == "Owner share capital" and "Investor share capital" in base_values:
+                        table.data.loc[table.data["Parameter"] == "Investor share capital", "Value"] = 1.0 - sampled
+                    continue
+
+                adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+                state = adapter_states.get(param)
+                if adapter is None or state is None:
+                    continue
+                base_value = state.base_value
+                if not np.isfinite(base_value):
                     continue
                 try:
                     sampled = spec.sample(rng, record, base_value=base_value)
                 except ValueError:
                     continue
-                sampled = _bounded_global_sample(param, sampled)
-                table.data.loc[table.data["Parameter"] == param, "Value"] = sampled
-                if param == "Investor share capital" and "Owner share capital" in base_values:
-                    table.data.loc[table.data["Parameter"] == "Owner share capital", "Value"] = 1.0 - sampled
-                elif param == "Owner share capital" and "Investor share capital" in base_values:
-                    table.data.loc[table.data["Parameter"] == "Investor share capital", "Value"] = 1.0 - sampled
-                continue
+                adapter.apply(model.input_page, sampled, state)
 
-            adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
-            state = adapter_states.get(param)
-            if adapter is None or state is None:
-                continue
-            base_value = state.base_value
-            if not np.isfinite(base_value):
-                continue
-            try:
-                sampled = spec.sample(rng, record, base_value=base_value)
-            except ValueError:
-                continue
-            adapter.apply(model.input_page, sampled, state)
+            result = model.build()
+            metrics = result.get("metrics", {})
+            results.append(
+                {
+                    "Project NPV": metrics.get("Project NPV"),
+                    "Project IRR": metrics.get("Project IRR"),
+                    "Equity IRR": metrics.get("Equity IRR"),
+                    "DSCR (min)": metrics.get("DSCR (min)"),
+                    "Payback Period (years)": metrics.get("Payback Period (years)"),
+                }
+            )
 
-        result = model.build()
-        metrics = result.get("metrics", {})
-        results.append(
-            {
-                "Project NPV": metrics.get("Project NPV"),
-                "Project IRR": metrics.get("Project IRR"),
-                "Equity IRR": metrics.get("Equity IRR"),
-                "DSCR (min)": metrics.get("DSCR (min)"),
-                "Payback Period (years)": metrics.get("Payback Period (years)"),
-            }
-        )
-
+            for param, state in adapter_states.items():
+                adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
+                if adapter is not None:
+                    adapter.apply(model.input_page, state.base_value, state)
+    finally:
+        _reset_global_inputs(table.data, base_values)
         for param, state in adapter_states.items():
             adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
             if adapter is not None:
                 adapter.apply(model.input_page, state.base_value, state)
-
-    _reset_global_inputs(table.data, base_values)
-    for param, state in adapter_states.items():
-        adapter = MONTE_CARLO_PARAMETER_ADAPTERS.get(param)
-        if adapter is not None:
-            adapter.apply(model.input_page, state.base_value, state)
     return pd.DataFrame(results)
 
 

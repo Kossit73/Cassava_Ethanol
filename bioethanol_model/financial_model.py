@@ -167,6 +167,23 @@ class CassavaBioethanolModel:
         working = df.copy()
         converted: list[str] = []
         outliers: list[str] = []
+        explicit_percent_parameters = {
+            "corporate tax rate",
+            "investor share capital",
+            "owner share capital",
+            "terminal growth",
+            "capital gains tax rate",
+            "discount rate",
+            "hybrid farm share",
+            "take-or-pay share",
+            "contracted feedstock share",
+            "open market feedstock share",
+            "contract feedstock discount",
+            "refinancing interest rate",
+            "repricing fee rate",
+            "break cost rate",
+            "cash sweep share",
+        }
 
         for idx, row in working.iterrows():
             parameter = str(row.get("Parameter", "")).strip()
@@ -176,10 +193,7 @@ class CassavaBioethanolModel:
             except (TypeError, ValueError):
                 continue
 
-            is_percent = ("%" in units) or any(
-                token in parameter.lower()
-                for token in ("rate", "share", "growth", "discount", "tax", "trigger", "dscr")
-            )
+            is_percent = ("%" in units) or (parameter.lower() in explicit_percent_parameters)
             if not is_percent:
                 continue
 
@@ -311,7 +325,7 @@ class CassavaBioethanolModel:
             return {"applied": False, "rows": 0}
 
         current = pd.to_numeric(working.loc[mask, "Base Rate"], errors="coerce")
-        if current.empty or not np.isclose(float(current.iloc[0]), global_tax, atol=1e-9):
+        if current.empty or current.isna().all():
             working.loc[mask, "Base Rate"] = global_tax
             page.tax_schedule.set_data(working, mark_user_input=True)
             return {"applied": True, "rows": int(mask.sum())}
@@ -1146,7 +1160,7 @@ class CassavaBioethanolModel:
 
         # Liquidity resilience: minimum cash balance and liquidity cover months.
         min_cash = _num("Minimum Monthly Cash Balance", 0.0)
-        liq_cover = _num("Liquidity Cover (months)", 0.0)
+        liq_cover = _num("Months of Liquidity Cover (min)", _num("Liquidity Cover (months)", 0.0))
         liquidity_resilience = float(np.mean([
             100.0 if min_cash >= 0 else 0.0,
             _score_linear(liq_cover, 1.5, 6.0),
@@ -1307,6 +1321,7 @@ class CassavaBioethanolModel:
             page.inflation_schedule.model_frame,
             projection.start_year,
             projection.end_year,
+            planning_start=planning_start,
         )
 
         loan_schedule = compute_loan_schedule(
@@ -1343,6 +1358,7 @@ class CassavaBioethanolModel:
             loan_schedule,
             working_capital,
             tax_rate=tax_rate,
+            tax_schedule=page.tax_schedule.model_frame,
         )
 
         debt_covenants = self._apply_dynamic_debt_mechanics(page, loan_schedule, financials)
@@ -1354,6 +1370,7 @@ class CassavaBioethanolModel:
                 loan_schedule,
                 working_capital,
                 tax_rate=tax_rate,
+                tax_schedule=page.tax_schedule.model_frame,
             )
 
         expenses: ExpenseSummary = extract_expense_summary(financials, cost_outputs)

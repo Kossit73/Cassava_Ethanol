@@ -13,6 +13,68 @@ ETHANOL_LITRES_PER_TON = 200.0
 ANIMAL_FEED_TON_PER_TON = 0.275
 
 
+def _resolve_planning_start(
+    months: pd.DatetimeIndex,
+    planning_start: pd.Timestamp | str | pd.Period | None = None,
+) -> pd.Timestamp | None:
+    if len(months) == 0:
+        return None
+    if planning_start is None:
+        return pd.Timestamp(months[0])
+    if isinstance(planning_start, str):
+        return pd.Period(planning_start, freq="M").to_timestamp()
+    if isinstance(planning_start, pd.Period):
+        return planning_start.to_timestamp()
+    return pd.Timestamp(planning_start)
+
+
+def _cumulative_inflation_index(
+    months: pd.DatetimeIndex,
+    inflation_schedule: pd.DataFrame | None,
+    planning_start: pd.Timestamp | str | pd.Period | None = None,
+) -> pd.Series:
+    """Return a cumulative CPI index from the planning-start anchor month."""
+
+    index = pd.Series(1.0, index=months, dtype=float)
+    if len(months) == 0:
+        return index
+
+    start_ts = _resolve_planning_start(months, planning_start)
+    if start_ts is None:
+        return index
+
+    if inflation_schedule is None or inflation_schedule.empty:
+        return index
+    if not {"Year", "CPI"}.issubset(inflation_schedule.columns):
+        return index
+
+    inflation = inflation_schedule.copy()
+    inflation["Year"] = pd.to_numeric(inflation["Year"], errors="coerce")
+    inflation["CPI"] = pd.to_numeric(inflation["CPI"], errors="coerce")
+    inflation = inflation.dropna(subset=["Year", "CPI"])
+    if inflation.empty:
+        return index
+
+    cpi_by_year = {
+        int(year): float(cpi)
+        for year, cpi in inflation.drop_duplicates("Year", keep="last")[["Year", "CPI"]].itertuples(index=False)
+    }
+
+    factor = 1.0
+    for month in months.sort_values():
+        month_ts = pd.Timestamp(month)
+        if month_ts <= start_ts:
+            index.loc[month_ts] = 1.0
+            continue
+        previous_month = month_ts - pd.DateOffset(months=1)
+        annual_cpi = float(cpi_by_year.get(previous_month.year, 0.0))
+        monthly_cpi = (1.0 + annual_cpi) ** (1.0 / 12.0) - 1.0
+        factor *= 1.0 + monthly_cpi
+        index.loc[month_ts] = factor
+
+    return index.reindex(months, fill_value=1.0)
+
+
 def _annual_sum(df: pd.DataFrame) -> pd.DataFrame:
     annual = df.groupby(df.index.year).sum()
     annual.index.name = "Year"
@@ -308,17 +370,8 @@ def compute_revenue_schedule(
         escalation = row.get("Escalation", 0.0)
         prices[product] = (base_price, escalation)
 
-    inflation = inflation_schedule.set_index("Year")["CPI"].to_dict()
-
-    if planning_start is not None:
-        if isinstance(planning_start, str):
-            planning_start_ts = pd.Period(planning_start, freq="M").to_timestamp()
-        elif isinstance(planning_start, pd.Period):
-            planning_start_ts = planning_start.to_timestamp()
-        else:
-            planning_start_ts = pd.Timestamp(planning_start)
-    else:
-        planning_start_ts = monthly.index[0] if len(monthly.index) else None
+    planning_start_ts = _resolve_planning_start(monthly.index, planning_start)
+    inflation_index = _cumulative_inflation_index(monthly.index, inflation_schedule, planning_start_ts)
 
     monthly_revenue = pd.DataFrame(index=monthly.index)
     for product, (base_price, escalation) in prices.items():
@@ -344,10 +397,9 @@ def compute_revenue_schedule(
             else:
                 base_ts = monthly.index[0]
                 months_since_start = (ts.year - base_ts.year) * 12 + (ts.month - base_ts.month)
-            years_from_start = months_since_start / 12.0
-            price = base_price * ((1 + escalation) ** years_from_start)
-            cpi = inflation.get(ts.year, 0.0)
-            price *= (1 + cpi)
+            monthly_escalation = (1.0 + float(escalation)) ** (1.0 / 12.0) - 1.0
+            price = float(base_price) * ((1.0 + monthly_escalation) ** months_since_start)
+            price *= float(inflation_index.loc[ts]) if ts in inflation_index.index else 1.0
             price_series.append(price)
         monthly_revenue[f"{product} revenue"] = volumes.values * np.array(price_series)
     monthly_revenue["Total Revenue"] = monthly_revenue.sum(axis=1)
@@ -419,6 +471,7 @@ def compute_cost_tables(
     inflation_schedule: pd.DataFrame,
     start_year: int,
     end_year: int,
+    planning_start: pd.Timestamp | str | pd.Period | None = None,
 ) -> Dict[str, CostOutput]:
     months = year_month_range(start_year, end_year)
 
@@ -470,9 +523,15 @@ def compute_cost_tables(
         # to apply after their effective month.
         return pivot.ffill().fillna(0.0)
 
+    inflation_index = _cumulative_inflation_index(months, inflation_schedule, planning_start)
+
     direct = _prepare(direct_costs, category_col="Cost Category", value_column="Amount")
     staff = _prepare(staff_costs, category_col="Department", value_column="Cost")
     other = _prepare(other_opex, category_col="Category", value_column="Amount")
+
+    direct = direct.mul(inflation_index, axis=0) if not direct.empty else direct
+    staff = staff.mul(inflation_index, axis=0) if not staff.empty else staff
+    other = other.mul(inflation_index, axis=0) if not other.empty else other
 
     outputs = {}
     for name, table in {
@@ -609,6 +668,25 @@ def compute_loan_schedule(
                 annuity_payment = amount * factor
         elif repay_months > 0:
             annuity_payment = amount / repay_months
+
+        if draw_month < months[0]:
+            drawn = True
+            balance = amount
+            pre_horizon_months = pd.date_range(draw_month, months[0] - pd.DateOffset(months=1), freq="MS")
+            for pre_month in pre_horizon_months:
+                months_since_draw = (pre_month.year - draw_month.year) * 12 + (pre_month.month - draw_month.month)
+                if months_since_draw < grace_months:
+                    continue
+                if payments_made >= repay_months or balance <= 0:
+                    continue
+                interest_pre = balance * monthly_rate
+                if amortization.lower().startswith("ann"):
+                    principal_pre = max(0.0, annuity_payment - interest_pre)
+                else:
+                    principal_pre = annuity_payment
+                principal_pre = min(principal_pre, balance)
+                balance = max(0.0, balance - principal_pre)
+                payments_made += 1
 
         for month in months:
             draw = 0.0
@@ -881,6 +959,7 @@ def compute_financial_statements(
     loan_schedule: LoanScheduleOutput,
     working_capital: WorkingCapitalOutput,
     tax_rate: float,
+    tax_schedule: pd.DataFrame | None = None,
 ) -> FinancialStatements:
     revenue_monthly = revenue.monthly.copy()
     if not isinstance(revenue_monthly.index, pd.DatetimeIndex):
@@ -978,7 +1057,69 @@ def compute_financial_statements(
     income_monthly["EBIT"] = income_monthly["EBITDA"] - dep
     income_monthly["Interest"] = interest
     income_monthly["EBT"] = income_monthly["EBIT"] - interest
-    income_monthly["Tax"] = income_monthly["EBT"].clip(lower=0) * tax_rate
+
+    def _tax_rate_series() -> pd.Series:
+        default_rate = float(tax_rate)
+        rates = pd.Series(default_rate, index=monthly.index, dtype=float)
+        if tax_schedule is None or not isinstance(tax_schedule, pd.DataFrame) or tax_schedule.empty:
+            return rates
+        if not {"Item", "Base Rate"}.issubset(tax_schedule.columns):
+            return rates
+
+        schedule = tax_schedule.copy()
+        schedule["Item"] = schedule["Item"].astype(str)
+        schedule = schedule.loc[
+            schedule["Item"].str.contains("corporate income tax", case=False, na=False)
+        ].copy()
+        if schedule.empty:
+            return rates
+
+        schedule["Base Rate"] = pd.to_numeric(schedule["Base Rate"], errors="coerce")
+        schedule = schedule.dropna(subset=["Base Rate"])
+        if schedule.empty:
+            return rates
+
+        effective_col = next((c for c in ("Effective Month", "Start Month", "Month") if c in schedule.columns), None)
+        if effective_col is not None:
+            month_values = pd.to_datetime(schedule[effective_col].astype(str), errors="coerce")
+            schedule = schedule.loc[month_values.notna()].copy()
+            if not schedule.empty:
+                schedule["_effective"] = month_values.loc[schedule.index].dt.to_period("M").dt.to_timestamp()
+                schedule = schedule.sort_values("_effective")
+                current = default_rate
+                idx = 0
+                points = list(schedule[["_effective", "Base Rate"]].itertuples(index=False, name=None))
+                for month in monthly.index:
+                    while idx < len(points) and points[idx][0] <= month:
+                        raw = float(points[idx][1])
+                        current = raw / 100.0 if 1.0 < raw <= 100.0 else raw
+                        idx += 1
+                    rates.loc[month] = float(np.clip(current, 0.0, 0.60))
+                return rates
+
+        if "Year" in schedule.columns:
+            year_rates: Dict[int, float] = {}
+            for year, rate_value in schedule[["Year", "Base Rate"]].itertuples(index=False):
+                try:
+                    year_num = int(float(year))
+                    raw = float(rate_value)
+                except (TypeError, ValueError):
+                    continue
+                normalized = raw / 100.0 if 1.0 < raw <= 100.0 else raw
+                year_rates[year_num] = float(np.clip(normalized, 0.0, 0.60))
+            if year_rates:
+                for month in monthly.index:
+                    if month.year in year_rates:
+                        rates.loc[month] = year_rates[month.year]
+                return rates
+
+        raw = float(schedule["Base Rate"].iloc[0])
+        normalized = raw / 100.0 if 1.0 < raw <= 100.0 else raw
+        rates[:] = float(np.clip(normalized, 0.0, 0.60))
+        return rates
+
+    applied_tax_rate = _tax_rate_series()
+    income_monthly["Tax"] = income_monthly["EBT"].clip(lower=0) * applied_tax_rate
     income_monthly["Net Income"] = income_monthly["EBT"] - income_monthly["Tax"]
 
     income_annual = _annual_sum(income_monthly)
@@ -1404,7 +1545,13 @@ def compute_key_metrics(
     ) if len(cfads) else pd.Series(dtype=float)
 
     pv_cfads_total = float((cfads * discount_factors).sum()) if not discount_factors.empty else 0.0
-    outstanding_debt = float(debt_balance.iloc[0]) if not debt_balance.empty else 0.0
+    positive_debt = debt_balance[debt_balance > 0]
+    if not positive_debt.empty:
+        outstanding_debt = float(positive_debt.iloc[0])
+    elif not debt_balance.empty:
+        outstanding_debt = float(debt_balance.max())
+    else:
+        outstanding_debt = 0.0
     llcr = (pv_cfads_total / outstanding_debt) if outstanding_debt > 0 else float("nan")
 
     if not cfads.empty:

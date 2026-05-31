@@ -25,12 +25,14 @@ def test_yearly_increment_updates_cost_tables():
         horizon_end=f"{page.projection.end_year:04d}-12",
     )
     page.direct_costs_monthly.set_data(updated_direct, mark_user_input=True)
+    inflation_df = page.inflation_schedule.model_frame.copy()
+    inflation_df["CPI"] = 0.0
 
     cost_outputs = compute_cost_tables(
         page.direct_costs_monthly.model_frame,
         page.staff_costs_monthly.model_frame,
         page.other_opex_monthly.model_frame,
-        page.inflation_schedule.model_frame,
+        inflation_df,
         page.projection.start_year,
         page.projection.end_year,
     )
