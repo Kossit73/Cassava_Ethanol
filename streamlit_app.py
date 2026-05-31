@@ -1147,7 +1147,7 @@ def _apply_growth_cascade(
     row_idx: int,
     growth_percent: float,
 ) -> tuple[pd.DataFrame, Tuple[float, float] | None]:
-    """Apply *growth_percent* (entered as percentage) to cascade production."""
+    """Apply a monthly growth percentage to cascade production."""
 
     if df.empty or row_idx not in df.index:
         return df, None
@@ -1168,12 +1168,7 @@ def _apply_growth_cascade(
     if pd.isna(base_period):
         return df, None
 
-    rate_decimal = float(growth_percent)
-    if not np.isfinite(rate_decimal):
-        rate_decimal = 0.0
-    if abs(rate_decimal) > 1.0:
-        rate_decimal = rate_decimal / 100.0
-    rate_decimal = float(np.clip(rate_decimal, -0.99, 10.0))
+    annual_rate_decimal = _monthly_percent_input_to_annual_decimal(growth_percent)
 
     working = df.copy()
     cassava_col = "Cassava ton"
@@ -1185,7 +1180,7 @@ def _apply_growth_cascade(
 
     if growth_col:
         working[growth_col] = pd.to_numeric(working[growth_col], errors="coerce")
-        working.at[row_idx, growth_col] = rate_decimal
+        working.at[row_idx, growth_col] = annual_rate_decimal
         working.loc[later_mask, growth_col] = np.nan
 
     table.set_data(working, mark_user_input=True)
@@ -1492,6 +1487,230 @@ def _sync_production_outputs(df: pd.DataFrame) -> pd.DataFrame:
     if "Animal Feed ton" in df.columns:
         df.loc[:, "Animal Feed ton"] = cassava_series * ANIMAL_FEED_TON_PER_TON
     return df
+
+
+def _normalise_percent_input(value: float) -> float:
+    """Accept decimal or percent-form input and return decimal form."""
+
+    rate = float(value)
+    if not np.isfinite(rate):
+        return 0.0
+    if abs(rate) > 1.0:
+        rate = rate / 100.0
+    return float(np.clip(rate, -0.99, 10.0))
+
+
+def _monthly_percent_input_to_annual_decimal(value: float) -> float:
+    """Convert a monthly percentage input to annual-decimal storage."""
+
+    monthly_decimal = _normalise_percent_input(value)
+    return float(np.clip(monthly_decimal * 12.0, -0.99, 10.0))
+
+
+def _annual_decimal_to_monthly_percent(value: float | None) -> float:
+    """Convert annual-decimal storage to monthly percentage for display."""
+
+    if value is None or pd.isna(value):
+        return 0.0
+    try:
+        annual_decimal = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not np.isfinite(annual_decimal):
+        return 0.0
+    monthly_decimal = annual_decimal / 12.0
+    return float(monthly_decimal * 100.0)
+
+
+def _build_production_horizon_seed(
+    columns: Iterable[str],
+    *,
+    start_year: int,
+    end_year: int,
+    planning_start: str | None,
+    first_month_cassava_ton: float,
+    monthly_increment_percent: float,
+) -> tuple[pd.DataFrame, pd.Period]:
+    """Build a seed table with one cassava anchor row for horizon propagation."""
+
+    column_order = list(columns)
+    if "Cassava ton" not in column_order:
+        raise KeyError("Production Monthly table must include a 'Cassava ton' column.")
+
+    month_col = "Start Month" if "Start Month" in column_order else "Month" if "Month" in column_order else None
+    if month_col is None:
+        month_col = next((col for col in column_order if "month" in col.lower()), None)
+    if month_col is None:
+        raise KeyError("Production Monthly table must include a month column.")
+
+    horizon = pd.period_range(f"{int(start_year):04d}-01", f"{int(end_year):04d}-12", freq="M")
+    if horizon.empty:
+        horizon = pd.period_range(f"{int(start_year):04d}-01", f"{int(start_year):04d}-12", freq="M")
+
+    anchor_period = horizon[0]
+    if planning_start:
+        try:
+            requested = pd.Period(str(planning_start), freq="M")
+            if requested in horizon:
+                anchor_period = requested
+        except Exception:  # pragma: no cover - defensive parsing guard
+            pass
+
+    seed_df = pd.DataFrame({month_col: horizon.astype(str)})
+    for col in column_order:
+        if col not in seed_df.columns:
+            seed_df[col] = np.nan
+
+    cassava_value = pd.to_numeric(pd.Series([first_month_cassava_ton]), errors="coerce").iloc[0]
+    if pd.isna(cassava_value):
+        cassava_value = 0.0
+    cassava_value = max(0.0, float(cassava_value))
+
+    anchor_idx = int(seed_df.index[seed_df[month_col] == anchor_period.strftime("%Y-%m")][0])
+    seed_df.loc[:, "Cassava ton"] = np.nan
+    seed_df.at[anchor_idx, "Cassava ton"] = cassava_value
+
+    if "Ethanol litres" in seed_df.columns:
+        seed_df.loc[:, "Ethanol litres"] = np.nan
+    if "Animal Feed ton" in seed_df.columns:
+        seed_df.loc[:, "Animal Feed ton"] = np.nan
+
+    growth_col = next((col for col in column_order if "growth" in col.lower()), None)
+    if growth_col:
+        seed_df.loc[:, growth_col] = np.nan
+        seed_df.at[anchor_idx, growth_col] = _monthly_percent_input_to_annual_decimal(monthly_increment_percent)
+
+    return seed_df[column_order].copy(), anchor_period
+
+
+def _apply_first_month_production_plan(
+    page: InputLandingPage,
+    table: EditableTable,
+    *,
+    first_month_cassava_ton: float,
+    monthly_increment_percent: float,
+    anchor_month: str | None = None,
+) -> bool:
+    """Seed production with one month and propagate through the projection horizon."""
+
+    if table.name != "Production Monthly" or "Cassava ton" not in table.columns:
+        return False
+
+    try:
+        seed_df, anchor_period = _build_production_horizon_seed(
+            table.columns,
+            start_year=int(page.projection.start_year),
+            end_year=int(page.projection.end_year),
+            planning_start=anchor_month or page.projection.planning_start,
+            first_month_cassava_ton=first_month_cassava_ton,
+            monthly_increment_percent=monthly_increment_percent,
+        )
+    except KeyError:
+        return False
+
+    table.set_data(seed_df, mark_user_input=True)
+    _update_table_editor_state(table)
+    _reset_table_widget(table)
+
+    st.session_state[PRODUCTION_EDIT_FLAG] = True
+    st.session_state["production_manual_periods"] = {anchor_period.strftime("%Y-%m")}
+    st.session_state.pop("production_compound_cache", None)
+    _mark_inputs_dirty()
+
+    _auto_compound_production(page)
+    return True
+
+
+def _render_first_month_propagation_controls(
+    page: InputLandingPage,
+    table: EditableTable,
+    *,
+    widget_prefix: str,
+) -> bool:
+    """Render quick controls to seed production from one month only."""
+
+    if table.name != "Production Monthly" or "Cassava ton" not in table.columns:
+        return False
+
+    horizon = pd.period_range(
+        f"{int(page.projection.start_year):04d}-01",
+        f"{int(page.projection.end_year):04d}-12",
+        freq="M",
+    )
+    if horizon.empty:
+        return False
+
+    anchor_period = horizon[0]
+    try:
+        parsed_anchor = pd.Period(str(page.projection.planning_start), freq="M")
+        if parsed_anchor in horizon:
+            anchor_period = parsed_anchor
+    except Exception:  # pragma: no cover - defensive parsing guard
+        pass
+
+    df = table.data.copy()
+    month_col = _get_month_column(df)
+    growth_col = next((col for col in table.columns if "growth" in col.lower()), None)
+
+    default_cassava = 0.0
+    default_growth_pct = 0.0
+    if month_col and not df.empty:
+        month_periods = pd.to_datetime(df[month_col].astype(str), errors="coerce").dt.to_period("M")
+        anchor_rows = df.index[month_periods == anchor_period]
+        if len(anchor_rows) > 0:
+            anchor_idx = int(anchor_rows[0])
+            cassava_val = pd.to_numeric(pd.Series([df.at[anchor_idx, "Cassava ton"]]), errors="coerce").iloc[0]
+            if pd.notna(cassava_val):
+                default_cassava = max(0.0, float(cassava_val))
+            if growth_col:
+                growth_val = pd.to_numeric(pd.Series([df.at[anchor_idx, growth_col]]), errors="coerce").iloc[0]
+                default_growth_pct = _annual_decimal_to_monthly_percent(growth_val)
+        elif growth_col and growth_col in df.columns:
+            growth_values = pd.to_numeric(df[growth_col], errors="coerce").dropna()
+            if not growth_values.empty:
+                default_growth_pct = _annual_decimal_to_monthly_percent(float(growth_values.iloc[0]))
+
+    st.markdown("**Quick populate from first month**")
+    st.caption(
+        f"Enter only the cassava ton for **{anchor_period.strftime('%Y-%m')}** and a monthly increment %. "
+        f"The model will propagate output through **{horizon[-1].strftime('%Y-%m')}**."
+    )
+
+    input_cols = st.columns([1.4, 1.2, 1.0])
+    first_month_cassava = input_cols[0].number_input(
+        "First month cassava ton",
+        min_value=0.0,
+        value=float(default_cassava),
+        step=100.0,
+        format="%.2f",
+        key=f"{widget_prefix}_first_month_cassava",
+    )
+    monthly_increment = input_cols[1].number_input(
+        "Monthly increment %",
+        value=float(default_growth_pct),
+        step=0.1,
+        format="%.2f",
+        key=f"{widget_prefix}_monthly_increment",
+    )
+    apply_clicked = input_cols[2].button(
+        "Propagate horizon",
+        key=f"{widget_prefix}_apply_first_month",
+        help="Seed the first month and propagate cassava tonnage through the current projection horizon.",
+    )
+
+    if not apply_clicked:
+        return False
+
+    applied = _apply_first_month_production_plan(
+        page,
+        table,
+        first_month_cassava_ton=first_month_cassava,
+        monthly_increment_percent=monthly_increment,
+        anchor_month=anchor_period.strftime("%Y-%m"),
+    )
+    if applied:
+        st.success("Production Monthly seeded from first month and propagated across the projection horizon.")
+    return applied
 
 
 def _set_dataframe_cell(df: pd.DataFrame, row_idx: int, column_name: str, value: object) -> None:
@@ -1806,6 +2025,17 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
     cascade_metrics: Tuple[float, float] | None = None
 
     if table.name == "Production Monthly":
+        st.markdown("---")
+        quick_seed_applied = _render_first_month_propagation_controls(
+            page,
+            table,
+            widget_prefix=f"default_production_seed_{row_idx}",
+        )
+        if quick_seed_applied:
+            cascade_applied = True
+            df_updated = table.data.copy()
+            derived_metrics = _production_metrics_from_row(df_updated, row_idx)
+
         _display_production_metrics(derived_metrics)
 
         growth_col = next((c for c in df_updated.columns if "growth" in c.lower()), None)
@@ -1813,7 +2043,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         if growth_col and row_idx in df_updated.index:
             current_growth = pd.to_numeric(pd.Series([df_updated.at[row_idx, growth_col]]), errors="coerce").iloc[0]
             if pd.notna(current_growth):
-                default_growth_pct = float(current_growth) * 100.0
+                default_growth_pct = _annual_decimal_to_monthly_percent(float(current_growth))
 
         st.markdown("---")
         st.markdown("**Cascade growth across projection horizon**")
@@ -1923,6 +2153,16 @@ def _edit_workspace(page: InputLandingPage) -> None:
                 options=list(config.get("options", [])),
             )
 
+    if table.name == "Production Monthly":
+        quick_applied = _render_first_month_propagation_controls(
+            page,
+            table,
+            widget_prefix=f"workspace_production_seed_{safe_key}",
+        )
+        if quick_applied:
+            st.session_state.pop(editor_key, None)
+            _sync_table_editors(page)
+
     edited = st.data_editor(
         table.data,
         num_rows="dynamic",
@@ -2013,12 +2253,21 @@ def _render_production_panel(page: InputLandingPage) -> None:
         """
     )
 
+    st.caption(
+        "Quick workflow: set first-month cassava ton and monthly increment %, then click "
+        "**Propagate horizon**."
+    )
+
     monthly_table = page.production_monthly
     annual_table = page.production_annual
 
-    monthly_df = monthly_table.data.copy()
+    change_applied = _render_first_month_propagation_controls(
+        page,
+        monthly_table,
+        widget_prefix="production_panel_seed",
+    )
 
-    change_applied = False
+    monthly_df = monthly_table.data.copy()
     if not monthly_df.empty:
         month_col = _get_month_column(monthly_df) or monthly_table.columns[0]
 
@@ -2051,7 +2300,7 @@ def _render_production_panel(page: InputLandingPage) -> None:
                 pd.Series([monthly_df.at[row_idx, growth_col]]), errors="coerce"
             ).iloc[0]
             if pd.notna(current_growth):
-                default_growth_pct = float(current_growth) * 100.0
+                default_growth_pct = _annual_decimal_to_monthly_percent(float(current_growth))
 
         controls = st.columns([1, 1, 2, 2])
         minus_pressed = controls[0].button("−", key=f"production_minus_{row_idx}")
@@ -2099,14 +2348,14 @@ def _render_production_panel(page: InputLandingPage) -> None:
 
     else:
         st.info(
-            "The production schedule is empty. Use the bulk change controls to insert the first production month."
+            "The production schedule is empty. Use Quick populate from first month (above) or add a dated change below."
         )
         st.markdown("**Change effective month**")
         st.caption(
             "Select the month where the new production plan should begin, click **Add change**, and edit the newly inserted row. "
             "The model will cascade cassava tonnage (and the derived ethanol and animal feed outputs) to all later months automatically."
         )
-        change_applied = _render_change_controls(page, monthly_table)
+        change_applied = change_applied or _render_change_controls(page, monthly_table)
 
     if change_applied and monthly_table.name == "Production Monthly":
         st.session_state[PRODUCTION_EDIT_FLAG] = True

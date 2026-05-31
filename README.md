@@ -61,7 +61,7 @@ even when multiple tabs request the same scenario.
 The **Production Monthly** table on the Input Landing Page is the source of truth for the cassava processing plan. To adjust production and have the changes flow through to the **Production Annual** roll-up:
 
 1. Open the Streamlit app and navigate to the *Input Landing Page* tab.
-2. Use either the "Modify Default Inputs & Figures" panel or the "Production Monthly" table expander to edit the **Cassava ton** values (and optional monthly growth % and start month).
+2. Use **Quick populate from first month** (available in the Production panel, Edit Workspace, and Modify Defaults) to enter first-month **Cassava ton** plus **Monthly increment %**, then click **Propagate horizon**.
 3. The model immediately derives the matching ethanol litres and animal-feed tonnage using the backend conversion factors (200 L and 0.275 t per cassava ton respectively).
 4. As soon as the monthly figures are updated, the production engine recomputes the compounded series across the projection horizon and refreshes the **Production Annual** table, which aggregates the updated monthly data by fiscal year.
 
