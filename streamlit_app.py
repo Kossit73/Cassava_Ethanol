@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import hashlib
 import io
 import json
@@ -197,6 +198,205 @@ YEARLY_INCREMENT_CONFIG = {
         "description": "Escalate the selected facility amount year over year.",
     },
 }
+
+
+def _inject_app_theme() -> None:
+    """Apply the redesigned cassava-ethanol visual shell."""
+
+    st.markdown(
+        """
+        <style>
+        :root {
+            --cassava-ink: #11291e;
+            --cassava-green: #214634;
+            --cassava-green-soft: #2f6248;
+            --cassava-gold: #b98a33;
+            --cassava-cream: #f7f2e8;
+            --cassava-line: #dccaa4;
+            --cassava-muted: #5a6d62;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background:
+                radial-gradient(circle at top left, rgba(185, 138, 51, 0.14), transparent 26%),
+                radial-gradient(circle at top right, rgba(47, 98, 72, 0.10), transparent 22%),
+                linear-gradient(180deg, #fbf8f1 0%, #f4efe4 42%, #eef4ee 100%);
+        }
+
+        .block-container {
+            max-width: 1380px;
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+        }
+
+        .cassava-hero {
+            margin-bottom: 1.15rem;
+            padding: 1.65rem 1.8rem 1.45rem 1.8rem;
+            border-radius: 30px;
+            border: 1px solid rgba(220, 202, 164, 0.48);
+            background:
+                linear-gradient(135deg, rgba(17, 41, 30, 0.98), rgba(33, 70, 52, 0.95)),
+                radial-gradient(circle at top right, rgba(185, 138, 51, 0.18), transparent 30%);
+            box-shadow: 0 22px 44px rgba(17, 41, 30, 0.12);
+            color: #ffffff;
+        }
+
+        .cassava-chip {
+            display: inline-block;
+            padding: 0.36rem 0.82rem;
+            border-radius: 999px;
+            background: rgba(185, 138, 51, 0.18);
+            border: 1px solid rgba(185, 138, 51, 0.40);
+            color: #f7e7be;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .cassava-hero h1 {
+            margin: 0.85rem 0 0.75rem 0;
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: clamp(2.2rem, 3vw, 3.5rem);
+            letter-spacing: -0.035em;
+            line-height: 1.02;
+        }
+
+        .cassava-hero p {
+            margin: 0;
+            max-width: 60rem;
+            color: rgba(255, 255, 255, 0.88);
+            font-size: 1rem;
+            line-height: 1.58;
+        }
+
+        .cassava-meta {
+            margin-top: 1rem;
+            color: rgba(255, 255, 255, 0.82);
+            font-size: 0.92rem;
+            line-height: 1.5;
+        }
+
+        .cassava-panel {
+            background: rgba(255, 255, 255, 0.74);
+            border: 1px solid rgba(220, 202, 164, 0.78);
+            border-radius: 24px;
+            padding: 1rem 1.15rem;
+            box-shadow: 0 12px 28px rgba(17, 41, 30, 0.05);
+            color: var(--cassava-ink);
+        }
+
+        .cassava-panel strong {
+            color: var(--cassava-ink);
+        }
+
+        .cassava-section-head {
+            margin: 0 0 0.25rem 0;
+            color: var(--cassava-ink);
+            font-family: Georgia, "Times New Roman", serif;
+            font-size: 1.35rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .cassava-section-copy {
+            margin: 0 0 0.95rem 0;
+            color: var(--cassava-muted);
+            line-height: 1.55;
+            font-size: 0.95rem;
+        }
+
+        div[data-testid="stMetric"] {
+            background: rgba(255, 250, 241, 0.94);
+            border: 1px solid rgba(220, 202, 164, 0.82);
+            border-radius: 18px;
+            padding: 0.9rem 1rem;
+            box-shadow: 0 8px 20px rgba(17, 41, 30, 0.05);
+        }
+
+        div[data-testid="stMetricLabel"] {
+            color: #587060;
+            font-weight: 700;
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: var(--cassava-ink);
+            font-family: Georgia, "Times New Roman", serif;
+        }
+
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.42rem;
+            margin-bottom: 0.85rem;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.76);
+            border: 1px solid rgba(220, 202, 164, 0.8);
+            color: #355444;
+            padding-left: 1rem;
+            padding-right: 1rem;
+            min-height: 3rem;
+        }
+
+        .stTabs [data-baseweb="tab"]:hover {
+            border-color: rgba(185, 138, 51, 0.65);
+            color: var(--cassava-ink);
+        }
+
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #214634, #2f6248) !important;
+            color: #ffffff !important;
+            border-color: #214634 !important;
+            box-shadow: 0 10px 24px rgba(33, 70, 52, 0.16);
+        }
+
+        div[data-testid="stDataFrame"],
+        div[data-testid="stExpander"] {
+            border-radius: 18px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_model_hero(selected_scenario: str) -> None:
+    """Render the redesigned top-of-page cassava hero."""
+
+    st.markdown(
+        f"""
+        <section class="cassava-hero">
+            <span class="cassava-chip">Cassava Ethanol Strategy Studio</span>
+            <h1>Cassava Bioethanol Financial Model</h1>
+            <p>
+                A redesigned operating cockpit built for lenders, investors, and project sponsors:
+                centralised inputs, cleaner analytical flow, disciplined scenario review, and an
+                export-ready workbook for investment committee use.
+            </p>
+            <div class="cassava-meta">
+                Active scenario: <strong>{html.escape(selected_scenario)}</strong> |
+                Feedstock, production, financing, and downside-risk views are organised into a
+                tighter executive workflow.
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_section_intro(title: str, description: str) -> None:
+    """Render a small section header aligned to the redesigned shell."""
+
+    st.markdown(
+        f"""
+        <div style="margin-bottom:0.8rem;">
+            <div class="cassava-section-head">{html.escape(title)}</div>
+            <div class="cassava-section-copy">{html.escape(description)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _increment_horizon_value(config: Dict[str, object], projection: ProjectionHorizon) -> object | None:
@@ -5039,8 +5239,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
         st.info("Monte Carlo results do not contain numeric metrics to plot.")
 
 def main() -> None:
-    st.title("Cassava_Bioethanol Financial Model")
-    st.caption("Adjust the assumptions, run the project finance model, and inspect the outputs across dedicated dashboards.")
+    _inject_app_theme()
 
     input_page = _load_session_inputs()
     _sync_projection_from_session(input_page)
@@ -5048,10 +5247,8 @@ def main() -> None:
     if "selected_scenario" not in st.session_state:
         st.session_state.selected_scenario = scenario_options[0]
 
-    action_cols = st.columns([1, 1, 1])
-    with action_cols[0]:
-        recalc = st.button("Recalculate model", type="primary")
-    with action_cols[1]:
+    scenario_cols = st.columns([1.15, 1.0])
+    with scenario_cols[0]:
         scenario_index = scenario_options.index(st.session_state.selected_scenario)
         selected_choice = st.selectbox(
             "Scenario",
@@ -5059,7 +5256,8 @@ def main() -> None:
             index=scenario_index,
             key="scenario_select",
         )
-    download_container = action_cols[2].container()
+    with scenario_cols[1]:
+        recalc = st.button("Recalculate model", type="primary", use_container_width=True)
 
     if selected_choice != st.session_state.selected_scenario:
         st.session_state.selected_scenario = selected_choice
@@ -5074,24 +5272,39 @@ def main() -> None:
 
     selected_scenario = st.session_state.selected_scenario
 
-    st.caption("Use the navigation tabs to move between the input landing page and the analytical dashboards.")
+    _render_model_hero(selected_scenario)
+    st.markdown(
+        """
+        <div class="cassava-panel" style="margin-bottom:1rem;">
+            <strong>Workflow</strong><br/>
+            Start on the Input Landing Page, refine the feedstock, production, and financing case,
+            then move through revenues, statements, advanced analytics, and the workbook export.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    tabs = st.tabs(
+    (
+        input_tab,
+        production_tab,
+        financials_tab,
+        analytics_tab,
+        ai_ml_tab,
+    ) = st.tabs(
         [
             "Input Landing Page",
-            "Key Metrics Dashboard",
-            "Financial Performance",
-            "Financial Position",
-            "Cash Flow Statement",
-            "Sensitivity Analyses",
-            "Scenario / IFs Analysis",
-            "Monte Carlo Simulation",
+            "Production & revenues",
+            "Financial statements",
+            "Advanced analytics",
             "RAG Assistant",
         ]
     )
 
-    with tabs[0]:
-        st.subheader("Input Landing Page")
+    with input_tab:
+        _render_section_intro(
+            "Input Landing Page",
+            "Edit the operating assumptions, production schedules, and financing inputs before refreshing the model outputs.",
+        )
         st.info("Edit the assumptions and press 'Recalculate model' to refresh the financial outputs.")
         _update_projection(input_page)
         _key_assumptions_controls(input_page)
@@ -5156,7 +5369,12 @@ def main() -> None:
 
     model.scenario = selected_scenario
 
-    with download_container:
+    with production_tab:
+        _render_section_intro(
+            "Production & revenues",
+            "Review topline value creation, export the workbook, and track how operational assumptions flow into revenues and returns.",
+        )
+        st.markdown("### Workbook export")
         if not excel_bytes:
             if st.button("Prepare Excel Model", key=f"prepare_excel_{selected_scenario.lower()}"):
                 with st.spinner("Preparing Excel workbook..."):
@@ -5179,29 +5397,51 @@ def main() -> None:
                 excel_bytes = None
         if not excel_bytes:
             st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
-
-    with tabs[1]:
         _render_key_metrics(model, results)
 
-    with tabs[2]:
-        _render_financial_performance(results)
+    with financials_tab:
+        _render_section_intro(
+            "Financial statements",
+            "Move through performance, balance-sheet position, and cash generation inside one statement review workspace.",
+        )
+        performance_tab, position_tab, cashflow_tab = st.tabs(
+            [
+                "Financial Performance",
+                "Financial Position",
+                "Cash Flow Statement",
+            ]
+        )
+        with performance_tab:
+            _render_financial_performance(results)
+        with position_tab:
+            _render_financial_position(results)
+        with cashflow_tab:
+            _render_cash_flow_page(results)
 
-    with tabs[3]:
-        _render_financial_position(results)
+    with analytics_tab:
+        _render_section_intro(
+            "Advanced analytics",
+            "Stress-test the project across sensitivities, scenario overrides, and Monte Carlo distributions before finalising the investment case.",
+        )
+        sensitivity_tab, scenario_tab, monte_carlo_tab = st.tabs(
+            [
+                "Sensitivity Analyses",
+                "Scenario / IFs Analysis",
+                "Monte Carlo Simulation",
+            ]
+        )
+        with sensitivity_tab:
+            _render_sensitivity_page(model, results)
+        with scenario_tab:
+            _render_scenario_page(model, results)
+        with monte_carlo_tab:
+            _render_monte_carlo_page(model, results)
 
-    with tabs[4]:
-        _render_cash_flow_page(results)
-
-    with tabs[5]:
-        _render_sensitivity_page(model, results)
-
-    with tabs[6]:
-        _render_scenario_page(model, results)
-
-    with tabs[7]:
-        _render_monte_carlo_page(model, results)
-
-    with tabs[8]:
+    with ai_ml_tab:
+        _render_section_intro(
+            "AI & machine learning settings",
+            "Use the research assistant and indexed model outputs to draft business-plan narratives and answer model questions with richer context.",
+        )
         _render_rag_assistant_page(model, results)
 
 
