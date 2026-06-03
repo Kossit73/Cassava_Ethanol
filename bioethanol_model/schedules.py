@@ -474,6 +474,65 @@ def compute_cost_tables(
     planning_start: pd.Timestamp | str | pd.Period | None = None,
 ) -> Dict[str, CostOutput]:
     months = year_month_range(start_year, end_year)
+    horizon_end = pd.Period(f"{end_year:04d}-12", freq="M")
+
+    def _expand_annual_increment_rows(
+        df: pd.DataFrame,
+        *,
+        category_col: str,
+        value_column: str,
+        increment_column: str = "Annual Increment %",
+    ) -> pd.DataFrame:
+        if df is None or df.empty or increment_column not in df.columns:
+            return df
+
+        month_col = next((c for c in df.columns if "month" in c.lower()), None)
+        if not month_col or category_col not in df.columns or value_column not in df.columns:
+            return df
+
+        working = df.copy()
+        month_values = pd.to_datetime(working[month_col].astype(str), errors="coerce")
+        working = working.loc[month_values.notna()].copy()
+        if working.empty:
+            return df
+
+        working["_period"] = month_values.loc[working.index].dt.to_period("M")
+        working["_rate"] = pd.to_numeric(working[increment_column], errors="coerce").fillna(0.0) / 100.0
+        working[value_column] = pd.to_numeric(working[value_column], errors="coerce").fillna(0.0)
+
+        expanded_rows: list[pd.Series] = []
+        for _, group in working.groupby(category_col, dropna=False, sort=False):
+            ordered = group.sort_values("_period")
+            records = list(ordered.iterrows())
+            for position, (_, row) in enumerate(records):
+                expanded_rows.append(row.copy())
+                rate = float(row["_rate"])
+                if rate == 0.0:
+                    continue
+
+                next_period = records[position + 1][1]["_period"] if position + 1 < len(records) else horizon_end + 1
+                anchor_period = row["_period"]
+                for year in range(anchor_period.year + 1, horizon_end.year + 1):
+                    target_period = pd.Period(year=year, month=anchor_period.month, freq="M")
+                    if target_period > horizon_end or target_period >= next_period:
+                        break
+
+                    generated = row.copy()
+                    generated[month_col] = target_period.strftime("%Y-%m")
+                    generated["_period"] = target_period
+                    generated[value_column] = float(row[value_column]) * ((1.0 + rate) ** (year - anchor_period.year))
+                    expanded_rows.append(generated)
+
+        if not expanded_rows:
+            return df
+
+        expanded = pd.DataFrame(expanded_rows)
+        expanded = (
+            expanded.sort_values(["_period", category_col], kind="stable")
+            .drop(columns=["_period", "_rate"], errors="ignore")
+            .reset_index(drop=True)
+        )
+        return expanded[df.columns]
 
     def _prepare(
         df: pd.DataFrame,
@@ -526,8 +585,24 @@ def compute_cost_tables(
     inflation_index = _cumulative_inflation_index(months, inflation_schedule, planning_start)
 
     direct = _prepare(direct_costs, category_col="Cost Category", value_column="Amount")
-    staff = _prepare(staff_costs, category_col="Department", value_column="Cost")
-    other = _prepare(other_opex, category_col="Category", value_column="Amount")
+    staff = _prepare(
+        _expand_annual_increment_rows(
+            staff_costs,
+            category_col="Department",
+            value_column="Cost",
+        ),
+        category_col="Department",
+        value_column="Cost",
+    )
+    other = _prepare(
+        _expand_annual_increment_rows(
+            other_opex,
+            category_col="Category",
+            value_column="Amount",
+        ),
+        category_col="Category",
+        value_column="Amount",
+    )
 
     direct = direct.mul(inflation_index, axis=0) if not direct.empty else direct
     staff = staff.mul(inflation_index, axis=0) if not staff.empty else staff

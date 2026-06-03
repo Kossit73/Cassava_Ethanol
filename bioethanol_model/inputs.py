@@ -438,11 +438,23 @@ def default_input_page() -> InputLandingPage:
 
     staff_costs_monthly = EditableTable(
         "Staff Costs Monthly",
-        ["Month", "Department", "Headcount", "Cost"],
+        ["Month", "Department", "Headcount", "Cost", "Annual Increment %"],
         pd.DataFrame(
             [
-                {"Month": "2025-01", "Department": "Operations", "Headcount": 45, "Cost": 120_000},
-                {"Month": "2025-01", "Department": "Farming", "Headcount": 120, "Cost": 65_000},
+                {
+                    "Month": "2025-01",
+                    "Department": "Operations",
+                    "Headcount": 45,
+                    "Cost": 120_000,
+                    "Annual Increment %": 0.0,
+                },
+                {
+                    "Month": "2025-01",
+                    "Department": "Farming",
+                    "Headcount": 120,
+                    "Cost": 65_000,
+                    "Annual Increment %": 0.0,
+                },
             ]
         ),
         placeholder=True,
@@ -450,15 +462,25 @@ def default_input_page() -> InputLandingPage:
 
     other_opex_monthly = EditableTable(
         "Other Opex Monthly",
-        ["Month", "Category", "Amount"],
+        ["Month", "Category", "Amount", "Annual Increment %"],
         pd.DataFrame(
             [
-                {"Month": "2025-01", "Category": "Insurance", "Amount": 42_000},
-                {"Month": "2025-01", "Category": "Service Contracts", "Amount": 30_000},
-                {"Month": "2025-01", "Category": "General Administration", "Amount": 82_000},
-                {"Month": "2025-01", "Category": "Sales & Marketing", "Amount": 25_000},
-                {"Month": "2025-01", "Category": "Research & Development", "Amount": 15_000},
-                {"Month": "2025-01", "Category": "Energy Cost", "Amount": 165_000},
+                {"Month": "2025-01", "Category": "Insurance", "Amount": 42_000, "Annual Increment %": 0.0},
+                {"Month": "2025-01", "Category": "Service Contracts", "Amount": 30_000, "Annual Increment %": 0.0},
+                {
+                    "Month": "2025-01",
+                    "Category": "General Administration",
+                    "Amount": 82_000,
+                    "Annual Increment %": 0.0,
+                },
+                {"Month": "2025-01", "Category": "Sales & Marketing", "Amount": 25_000, "Annual Increment %": 0.0},
+                {
+                    "Month": "2025-01",
+                    "Category": "Research & Development",
+                    "Amount": 15_000,
+                    "Annual Increment %": 0.0,
+                },
+                {"Month": "2025-01", "Category": "Energy Cost", "Amount": 165_000, "Annual Increment %": 0.0},
             ]
         ),
         placeholder=True,

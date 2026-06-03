@@ -42,8 +42,8 @@ def test_cost_cpi_compounds_from_planning_start():
     direct = pd.DataFrame(
         [{"Month": "2025-01", "Cost Category": "Cassava Feedstock", "Amount": 100.0}]
     )
-    staff = pd.DataFrame(columns=["Month", "Department", "Cost"])
-    other = pd.DataFrame(columns=["Month", "Category", "Amount"])
+    staff = pd.DataFrame(columns=["Month", "Department", "Cost", "Annual Increment %"])
+    other = pd.DataFrame(columns=["Month", "Category", "Amount", "Annual Increment %"])
     inflation = pd.DataFrame(
         [
             {"Year": 2025, "CPI": 0.12},

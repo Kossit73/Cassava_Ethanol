@@ -42,8 +42,8 @@ def test_direct_costs_forward_fill_across_years():
 
     costs = compute_cost_tables(
         direct_costs,
-        pd.DataFrame(columns=["Month", "Department", "Cost"]),
-        pd.DataFrame(columns=["Month", "Category", "Amount"]),
+        pd.DataFrame(columns=["Month", "Department", "Cost", "Annual Increment %"]),
+        pd.DataFrame(columns=["Month", "Category", "Amount", "Annual Increment %"]),
         _inflation_schedule(),
         start_year=2024,
         end_year=2026,
@@ -82,7 +82,7 @@ def test_staff_costs_forward_fill_and_rollup():
     costs = compute_cost_tables(
         pd.DataFrame(columns=["Month", "Cost Category", "Amount"]),
         staff_costs,
-        pd.DataFrame(columns=["Month", "Category", "Amount"]),
+        pd.DataFrame(columns=["Month", "Category", "Amount", "Annual Increment %"]),
         _inflation_schedule(),
         start_year=2024,
         end_year=2026,
@@ -115,7 +115,7 @@ def test_other_opex_forward_fill_and_rollup():
 
     costs = compute_cost_tables(
         pd.DataFrame(columns=["Month", "Cost Category", "Amount"]),
-        pd.DataFrame(columns=["Month", "Department", "Cost"]),
+        pd.DataFrame(columns=["Month", "Department", "Cost", "Annual Increment %"]),
         other_opex,
         _inflation_schedule(),
         start_year=2024,
@@ -135,3 +135,51 @@ def test_other_opex_forward_fill_and_rollup():
     assert annual.loc[2025, "Insurance"] == pytest.approx(42000.0 * 12)
     assert annual.loc[2026, "Insurance"] == pytest.approx(42000.0 + 45000.0 * 11)
     assert annual.loc[2026, "Service Contracts"] == pytest.approx(30000.0 * 8 + 36000.0 * 4)
+
+
+def test_staff_costs_apply_annual_increment_automatically():
+    staff_costs = pd.DataFrame(
+        [
+            {"Month": "2025-01", "Department": "Operations", "Cost": 1000.0, "Annual Increment %": 10.0},
+            {"Month": "2026-04", "Department": "Operations", "Cost": 1500.0, "Annual Increment %": 5.0},
+        ]
+    )
+
+    costs = compute_cost_tables(
+        pd.DataFrame(columns=["Month", "Cost Category", "Amount"]),
+        staff_costs,
+        pd.DataFrame(columns=["Month", "Category", "Amount", "Annual Increment %"]),
+        _inflation_schedule(),
+        start_year=2025,
+        end_year=2027,
+    )
+
+    monthly = costs["Staff Costs"].monthly
+    assert monthly.loc[pd.Timestamp("2026-01-01"), "Operations"] == pytest.approx(1100.0)
+    assert monthly.loc[pd.Timestamp("2026-03-01"), "Operations"] == pytest.approx(1100.0)
+    assert monthly.loc[pd.Timestamp("2026-04-01"), "Operations"] == pytest.approx(1500.0)
+    assert monthly.loc[pd.Timestamp("2027-04-01"), "Operations"] == pytest.approx(1575.0)
+
+
+def test_other_opex_apply_annual_increment_automatically():
+    other_opex = pd.DataFrame(
+        [
+            {"Month": "2025-01", "Category": "Insurance", "Amount": 42000.0, "Annual Increment %": 8.0},
+            {"Month": "2025-01", "Category": "Energy Cost", "Amount": 165000.0, "Annual Increment %": 0.0},
+        ]
+    )
+
+    costs = compute_cost_tables(
+        pd.DataFrame(columns=["Month", "Cost Category", "Amount"]),
+        pd.DataFrame(columns=["Month", "Department", "Cost", "Annual Increment %"]),
+        other_opex,
+        _inflation_schedule(),
+        start_year=2025,
+        end_year=2027,
+    )
+
+    monthly = costs["Other Opex"].monthly
+    assert monthly.loc[pd.Timestamp("2025-12-01"), "Insurance"] == pytest.approx(42000.0)
+    assert monthly.loc[pd.Timestamp("2026-01-01"), "Insurance"] == pytest.approx(45360.0)
+    assert monthly.loc[pd.Timestamp("2027-01-01"), "Insurance"] == pytest.approx(48988.8)
+    assert monthly.loc[pd.Timestamp("2027-01-01"), "Energy Cost"] == pytest.approx(165000.0)

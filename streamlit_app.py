@@ -99,6 +99,7 @@ CATEGORY_SELECT_OPTIONS = {
         "Category",
     ): {
         "options": [
+            "Insurance",
             "Service Contracts",
             "General Administration",
             "Research & Development",
@@ -1979,8 +1980,17 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         widget_prefix="default_edit",
     )
 
+    auto_increment_tables = {"Staff Costs Monthly", "Other Opex Monthly"}
+    if table.name in auto_increment_tables and "Annual Increment %" in df_updated.columns:
+        st.markdown("---")
+        st.caption(
+            "`Annual Increment %` is applied automatically during recalculation from each row's "
+            "effective month. Add a later row for the same department or category when the escalation "
+            "rate changes."
+        )
+
     increment_config = YEARLY_INCREMENT_CONFIG.get(table.name)
-    if increment_config:
+    if increment_config and table.name not in auto_increment_tables:
         available_columns = [col for col in increment_config["value_columns"] if col in df_updated.columns]
         if available_columns:
             st.markdown("---")
