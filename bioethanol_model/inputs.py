@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import hashlib
 import pandas as pd
@@ -90,6 +90,22 @@ class EditableTable:
             "placeholder": self.placeholder,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "EditableTable":
+        data = payload.get("data")
+        if isinstance(data, pd.DataFrame):
+            frame = data.copy()
+        elif data is None:
+            frame = pd.DataFrame()
+        else:
+            frame = pd.DataFrame(data)
+        return cls(
+            name=str(payload.get("name", "")),
+            columns=[str(column) for column in payload.get("columns", [])],
+            data=frame,
+            placeholder=bool(payload.get("placeholder", False)),
+        )
+
     def signature(self) -> str:
         """Return a stable hash representing the table contents."""
 
@@ -168,6 +184,14 @@ class ProjectionHorizon:
     def signature(self) -> str:
         payload = f"{self.start_year}|{self.end_year}|{self.planning_start}"
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ProjectionHorizon":
+        return cls(
+            start_year=int(payload.get("start_year", payload.get("Start Year", 2024))),
+            end_year=int(payload.get("end_year", payload.get("End Year", 2034))),
+            planning_start=payload.get("planning_start", payload.get("Planning Start")),
+        )
 
 
 @dataclass
@@ -291,6 +315,45 @@ class InputLandingPage:
         for name, table in sorted(self.tables().items()):
             payload.append(f"{name}:{table.signature()}")
         return hashlib.sha1("|".join(payload).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "InputLandingPage":
+        default = default_input_page()
+
+        def _table(field_name: str) -> EditableTable:
+            table_payload = payload.get(field_name)
+            if isinstance(table_payload, EditableTable):
+                return table_payload
+            if isinstance(table_payload, Mapping):
+                return EditableTable.from_dict(table_payload)
+            return getattr(default, field_name)
+
+        projection_payload = payload.get("projection")
+        if isinstance(projection_payload, ProjectionHorizon):
+            projection = projection_payload
+        elif isinstance(projection_payload, Mapping):
+            projection = ProjectionHorizon.from_dict(projection_payload)
+        else:
+            projection = default.projection
+
+        return cls(
+            projection=projection,
+            global_inputs=_table("global_inputs"),
+            initial_investment=_table("initial_investment"),
+            revenue_inputs=_table("revenue_inputs"),
+            production_annual=_table("production_annual"),
+            production_monthly=_table("production_monthly"),
+            direct_costs_monthly=_table("direct_costs_monthly"),
+            staff_positions=_table("staff_positions"),
+            staff_costs_monthly=_table("staff_costs_monthly"),
+            other_opex_monthly=_table("other_opex_monthly"),
+            accounts_receivable=_table("accounts_receivable"),
+            inventory_payable=_table("inventory_payable"),
+            loan_schedule=_table("loan_schedule"),
+            tax_schedule=_table("tax_schedule"),
+            inflation_schedule=_table("inflation_schedule"),
+            risk_schedule=_table("risk_schedule"),
+        )
 
 
 @dataclass

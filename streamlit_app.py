@@ -355,9 +355,25 @@ def _scenario_definition_signature(definitions: Iterable[Dict[str, object]]) -> 
 
 def _load_session_inputs() -> InputLandingPage:
     """Return the mutable input landing page stored in session state."""
-    if "input_page" not in st.session_state:
-        st.session_state.input_page = default_input_page()
-    return st.session_state.input_page
+    page = st.session_state.get("input_page")
+    if isinstance(page, InputLandingPage):
+        return page
+    if isinstance(page, dict):
+        page = InputLandingPage.from_dict(page)
+    else:
+        page = default_input_page()
+    st.session_state.input_page = page
+    return page
+
+
+def _coerce_input_snapshot(snapshot: object | None) -> InputLandingPage | None:
+    """Return a usable landing-page snapshot from session state or model payloads."""
+
+    if isinstance(snapshot, InputLandingPage):
+        return snapshot
+    if isinstance(snapshot, dict):
+        return InputLandingPage.from_dict(snapshot)
+    return None
 
 
 def _mark_inputs_dirty() -> None:
@@ -674,6 +690,13 @@ def _ensure_scenario_payload(
         with st.spinner(f"Running {scenario.replace('_', ' ').title()} scenario..."):
             model = CassavaBioethanolModel(copy.deepcopy(snapshot))
             results = model.build(scenario)
+        payloads[scenario] = (model, results)
+        st.session_state.scenario_payloads = payloads
+    model, results = payloads[scenario]
+    snapshot_payload = _coerce_input_snapshot(results.get("input_page_snapshot"))
+    if snapshot_payload is not None and snapshot_payload is not results.get("input_page_snapshot"):
+        results = dict(results)
+        results["input_page_snapshot"] = snapshot_payload
         payloads[scenario] = (model, results)
         st.session_state.scenario_payloads = payloads
     return payloads[scenario]
@@ -5082,7 +5105,9 @@ def main() -> None:
         _editable_tables(input_page)
         _sync_global_assumption_dependencies(input_page)
 
-    snapshot = st.session_state.get("input_snapshot")
+    snapshot = _coerce_input_snapshot(st.session_state.get("input_snapshot"))
+    if snapshot is not None:
+        st.session_state.input_snapshot = snapshot
     snapshot_projection = None
     if snapshot is not None:
         snapshot_projection = (
@@ -5116,9 +5141,11 @@ def main() -> None:
         st.session_state[SCENARIO_CACHE_KEY] = {}
         st.session_state.inputs_dirty = False
 
-    snapshot = st.session_state.get("input_snapshot")
+    snapshot = _coerce_input_snapshot(st.session_state.get("input_snapshot"))
     if snapshot is None:
         snapshot = copy.deepcopy(input_page)
+        st.session_state.input_snapshot = snapshot
+    else:
         st.session_state.input_snapshot = snapshot
 
     model, results = _ensure_scenario_payload(selected_scenario, snapshot)
