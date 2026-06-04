@@ -224,7 +224,6 @@ def _inject_app_theme() -> None:
         }
 
         .block-container {
-            max-width: 1380px;
             padding-top: 1.5rem;
             padding-bottom: 3rem;
         }
@@ -5247,16 +5246,23 @@ def main() -> None:
     if "selected_scenario" not in st.session_state:
         st.session_state.selected_scenario = scenario_options[0]
 
-    scenario_cols = st.columns([1.15, 1.0])
+    scenario_cols = st.columns([1.15, 1.0], vertical_alignment="bottom")
     with scenario_cols[0]:
+        st.markdown(
+            "<div style='font-size:0.95rem;font-weight:600;margin:0 0 0.35rem;'>"
+            "Scenario</div>",
+            unsafe_allow_html=True,
+        )
         scenario_index = scenario_options.index(st.session_state.selected_scenario)
         selected_choice = st.selectbox(
             "Scenario",
             scenario_options,
             index=scenario_index,
             key="scenario_select",
+            label_visibility="collapsed",
         )
     with scenario_cols[1]:
+        st.markdown("<div style='height:2.05rem;'></div>", unsafe_allow_html=True)
         recalc = st.button("Recalculate model", type="primary", use_container_width=True)
 
     if selected_choice != st.session_state.selected_scenario:
