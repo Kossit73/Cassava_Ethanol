@@ -5451,5 +5451,77 @@ def main() -> None:
         _render_rag_assistant_page(model, results)
 
 
+# ---------------------------------------------------------------------------
+# Scenario state hooks — called by the parent NumQuants shell.
+# ---------------------------------------------------------------------------
+
+_EXTRA_STATE_KEYS = [
+    "selected_scenario",
+    MC_PARAMETER_STATE_KEY,   # "mc_parameter_config"
+    MC_ITERATION_STATE_KEY,   # "mc_iteration_setting"
+    MC_SEED_STATE_KEY,        # "mc_random_seed"
+    SCENARIO_DEFINITIONS_KEY, # "scenario_definitions"
+]
+
+
+def _page_to_dict(page: "InputLandingPage") -> dict:
+    """Serialize an InputLandingPage to a plain dict that from_dict() can reconstruct."""
+    return {
+        "projection": {
+            "start_year": page.projection.start_year,
+            "end_year": page.projection.end_year,
+            "planning_start": page.projection.planning_start,
+        },
+        "global_inputs": page.global_inputs.to_dict(),
+        "initial_investment": page.initial_investment.to_dict(),
+        "revenue_inputs": page.revenue_inputs.to_dict(),
+        "production_annual": page.production_annual.to_dict(),
+        "production_monthly": page.production_monthly.to_dict(),
+        "direct_costs_monthly": page.direct_costs_monthly.to_dict(),
+        "staff_positions": page.staff_positions.to_dict(),
+        "staff_costs_monthly": page.staff_costs_monthly.to_dict(),
+        "other_opex_monthly": page.other_opex_monthly.to_dict(),
+        "accounts_receivable": page.accounts_receivable.to_dict(),
+        "inventory_payable": page.inventory_payable.to_dict(),
+        "loan_schedule": page.loan_schedule.to_dict(),
+        "tax_schedule": page.tax_schedule.to_dict(),
+        "inflation_schedule": page.inflation_schedule.to_dict(),
+        "risk_schedule": page.risk_schedule.to_dict(),
+    }
+
+
+def get_state() -> dict:
+    """Snapshot all user-editable inputs.
+
+    Stores the InputLandingPage as a plain dict so that the existing
+    _load_session_inputs() path (which already handles dict → InputLandingPage
+    via InputLandingPage.from_dict()) reconstructs it transparently on restore.
+    """
+    import streamlit as _st
+    state: dict = {}
+
+    page = _st.session_state.get("input_page")
+    if page is not None:
+        state["input_page"] = _page_to_dict(page)
+
+    for key in _EXTRA_STATE_KEYS:
+        val = _st.session_state.get(key)
+        if val is not None:
+            state[key] = val
+
+    return state
+
+
+def set_state(state: dict) -> None:
+    """Restore a previously saved state snapshot.
+
+    Writes input_page as a plain dict; _load_session_inputs() converts it to
+    an InputLandingPage automatically on next render.
+    """
+    import streamlit as _st
+    for k, v in state.items():
+        _st.session_state[k] = v
+
+
 if __name__ == "__main__":
     main()
