@@ -69,6 +69,9 @@ from bioethanol_model.sensitivity import (
 st.set_page_config(page_title="Cassava Bioethanol Model", layout="wide")
 
 MODEL_VERSION_KEY = "model_version"
+LAST_RUN_SIGNATURE_KEY = "input_snapshot_signature"
+CORE_MODEL_CACHE_KEY = "scenario_payloads"
+EXPORT_CACHE_KEY = "excel_bytes_map"
 MC_CACHE_KEY = "mc_cache_store"
 SENSITIVITY_CACHE_KEY = "sensitivity_cache"
 SCENARIO_CACHE_KEY = "scenario_cache"
@@ -621,6 +624,27 @@ def _scenario_definition_signature(definitions: Iterable[Dict[str, object]]) -> 
     return json.dumps(normalised, sort_keys=True)
 
 
+def _normalise_signature_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): _normalise_signature_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list):
+        return [_normalise_signature_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalise_signature_value(item) for item in value]
+    if isinstance(value, (np.floating, np.integer)):
+        return _normalise_signature_value(value.item())
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            return None
+        return float(value)
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    return str(value)
+
+
 def _load_session_inputs() -> InputLandingPage:
     """Return the mutable input landing page stored in session state."""
     page = st.session_state.get("input_page")
@@ -648,6 +672,44 @@ def _mark_inputs_dirty() -> None:
     """Flag the session so financial outputs are refreshed on the next run."""
 
     st.session_state.inputs_dirty = True
+
+
+def _core_model_cache() -> Dict[str, Dict[str, object]]:
+    cache = st.session_state.setdefault(CORE_MODEL_CACHE_KEY, {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[CORE_MODEL_CACHE_KEY] = cache
+    return cache
+
+
+def _export_cache() -> Dict[str, object]:
+    cache = st.session_state.setdefault(EXPORT_CACHE_KEY, {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[EXPORT_CACHE_KEY] = cache
+    return cache
+
+
+def _get_cached_export_bytes(scenario: str, run_signature: str | None) -> bytes | None:
+    entry = _export_cache().get(scenario)
+    if isinstance(entry, dict):
+        if entry.get("run_signature") == run_signature:
+            payload = entry.get("bytes")
+            if isinstance(payload, (bytes, bytearray)):
+                return bytes(payload)
+        return None
+    if isinstance(entry, (bytes, bytearray)) and st.session_state.get(LAST_RUN_SIGNATURE_KEY) == run_signature:
+        return bytes(entry)
+    return None
+
+
+def _store_cached_export_bytes(scenario: str, run_signature: str | None, payload: bytes) -> None:
+    cache = _export_cache()
+    cache[scenario] = {
+        "run_signature": run_signature,
+        "bytes": payload,
+    }
+    st.session_state[EXPORT_CACHE_KEY] = cache
 
 
 def _table_widget_key(table: EditableTable) -> str:
@@ -947,27 +1009,41 @@ def _generate_excel_bytes(
 
 
 def _ensure_scenario_payload(
-    scenario: str, snapshot: InputLandingPage
+    scenario: str,
+    snapshot: InputLandingPage,
+    *,
+    run_signature: str | None,
 ) -> Tuple[CassavaBioethanolModel, Dict[str, object]]:
     """Return (model, results) for a scenario, computing it lazily if needed."""
 
-    payloads: Dict[str, Tuple[CassavaBioethanolModel, Dict[str, object]]] = (
-        st.session_state.setdefault("scenario_payloads", {})
-    )
-    if scenario not in payloads:
+    payloads = _core_model_cache()
+    cached_entry = payloads.get(scenario)
+    if not isinstance(cached_entry, dict) or cached_entry.get("run_signature") != run_signature:
         with st.spinner(f"Running {scenario.replace('_', ' ').title()} scenario..."):
             model = CassavaBioethanolModel(copy.deepcopy(snapshot))
             results = model.build(scenario)
-        payloads[scenario] = (model, results)
-        st.session_state.scenario_payloads = payloads
-    model, results = payloads[scenario]
+        payloads[scenario] = {
+            "run_signature": run_signature,
+            "model": model,
+            "results": results,
+        }
+        st.session_state[CORE_MODEL_CACHE_KEY] = payloads
+        cached_entry = payloads[scenario]
+
+    model = cached_entry["model"]
+    results = cached_entry["results"]
     snapshot_payload = _coerce_input_snapshot(results.get("input_page_snapshot"))
     if snapshot_payload is not None and snapshot_payload is not results.get("input_page_snapshot"):
         results = dict(results)
         results["input_page_snapshot"] = snapshot_payload
-        payloads[scenario] = (model, results)
-        st.session_state.scenario_payloads = payloads
-    return payloads[scenario]
+        cached_entry = {
+            "run_signature": run_signature,
+            "model": model,
+            "results": results,
+        }
+        payloads[scenario] = cached_entry
+        st.session_state[CORE_MODEL_CACHE_KEY] = payloads
+    return cached_entry["model"], cached_entry["results"]
 
 
 def _update_projection(page: InputLandingPage) -> None:
@@ -3369,6 +3445,7 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
     st.dataframe(config_df.rename(columns={"name": "Scenario", "parameter": "Parameter", "delta": "Delta"}), use_container_width=True, hide_index=True)
 
     base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
+    current_run_signature = st.session_state.get(LAST_RUN_SIGNATURE_KEY)
 
     def _scenario_model() -> CassavaBioethanolModel:
         clone = CassavaBioethanolModel(copy.deepcopy(base_page))
@@ -3383,7 +3460,13 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
         key=f"run_sensitivity_{model.scenario.lower()}",
     )
 
-    if run_requested or not cached_entry or cached_entry.get("version") != _current_model_version():
+    if (
+        run_requested
+        or not cached_entry
+        or cached_entry.get("version") != _current_model_version()
+        or cached_entry.get("run_signature") != current_run_signature
+        or "tornado" not in cached_entry
+    ):
         if DEFAULT_SENSITIVITY_SCENARIOS:
             with st.spinner("Running sensitivity cases..."):
                 sensitivity_results = run_sensitivity(analysis_model, DEFAULT_SENSITIVITY_SCENARIOS)
@@ -3391,9 +3474,12 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
             sensitivity_results = pd.DataFrame(
                 columns=["Scenario", "Parameter", "Delta", "Project NPV", "Change vs Base"]
             )
+        tornado_df = tornado_chart_inputs(_scenario_model(), TORNADO_DRIVERS, scale=0.1)
         cache[model.scenario] = {
             "version": _current_model_version(),
+            "run_signature": current_run_signature,
             "results": sensitivity_results,
+            "tornado": tornado_df,
         }
         st.session_state[SENSITIVITY_CACHE_KEY] = cache
         cached_entry = cache[model.scenario]
@@ -3411,13 +3497,13 @@ def _render_sensitivity_page(model: CassavaBioethanolModel, results: Dict[str, o
         st.dataframe(sensitivity_results, use_container_width=True)
 
     st.subheader("Tornado Drivers")
-    tornado_model = _scenario_model()
-    tornado_df = tornado_chart_inputs(tornado_model, TORNADO_DRIVERS, scale=0.1)
+    tornado_df = cached_entry.get("tornado", pd.DataFrame()) if cached_entry else pd.DataFrame()
     st.dataframe(tornado_df, use_container_width=True)
 
 def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     base_page = copy.deepcopy(results.get("input_page_snapshot", model.input_page))
     parameter_catalog = scenario_parameter_catalog(base_page)
+    current_run_signature = st.session_state.get(LAST_RUN_SIGNATURE_KEY)
 
     st.subheader("Scenario Parameter Library")
     if parameter_catalog.empty:
@@ -3611,6 +3697,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
         comparison_button
         or cached_entry is None
         or cached_entry.get("version") != _current_model_version()
+        or cached_entry.get("run_signature") != current_run_signature
         or cached_entry.get("signature") != signature
     )
 
@@ -3624,6 +3711,7 @@ def _render_scenario_page(model: CassavaBioethanolModel, results: Dict[str, obje
                 comparison_df = pd.DataFrame(columns=["Scenario"])
         scenario_cache[model.scenario] = {
             "version": _current_model_version(),
+            "run_signature": current_run_signature,
             "signature": signature,
             "comparison": comparison_df,
             "base_metrics": base_metrics,
@@ -4971,6 +5059,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     _ensure_monte_carlo_state()
     st.subheader("Monte Carlo Simulation Configuration")
     current_version = _current_model_version()
+    current_run_signature = st.session_state.get(LAST_RUN_SIGNATURE_KEY)
     current_scenario = model.scenario
     parameter_source = results.get("input_page_snapshot") if isinstance(results, dict) else None
     if not isinstance(parameter_source, InputLandingPage):
@@ -5223,10 +5312,9 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
     cached_entry = cache.get(current_scenario)
     if cached_entry and (
         cached_entry.get("version") != current_version
+        or cached_entry.get("run_signature") != current_run_signature
         or cached_entry.get("signature") != config_signature
     ):
-        cache.pop(current_scenario, None)
-        st.session_state[MC_CACHE_KEY] = cache
         cached_entry = None
 
     run_requested = st.button(
@@ -5248,6 +5336,7 @@ def _render_monte_carlo_page(model: CassavaBioethanolModel, results: Dict[str, o
             )
         cache[current_scenario] = {
             "version": current_version,
+            "run_signature": current_run_signature,
             "signature": config_signature,
             "results": mc_results,
         }
@@ -5336,14 +5425,6 @@ def main() -> None:
 
     if selected_choice != st.session_state.selected_scenario:
         st.session_state.selected_scenario = selected_choice
-        st.session_state.scenario_payloads = {}
-        st.session_state.excel_bytes_map = {}
-        st.session_state[MC_CACHE_KEY] = {}
-        st.session_state.pop("mc_cache", None)
-        st.session_state.pop("mc_cache_version", None)
-        st.session_state.pop("mc_cache_scenario", None)
-        st.session_state[SENSITIVITY_CACHE_KEY] = {}
-        st.session_state[SCENARIO_CACHE_KEY] = {}
 
     selected_scenario = st.session_state.selected_scenario
 
@@ -5396,51 +5477,45 @@ def main() -> None:
     snapshot = _coerce_input_snapshot(st.session_state.get("input_snapshot"))
     if snapshot is not None:
         st.session_state.input_snapshot = snapshot
-    snapshot_projection = None
-    if snapshot is not None:
-        snapshot_projection = (
-            int(snapshot.projection.start_year),
-            int(snapshot.projection.end_year),
-            str(snapshot.projection.planning_start),
-        )
-    current_projection = (
-        int(input_page.projection.start_year),
-        int(input_page.projection.end_year),
-        str(input_page.projection.planning_start),
-    )
-    projection_changed = snapshot_projection is not None and snapshot_projection != current_projection
-    inputs_dirty = st.session_state.get("inputs_dirty", False)
 
-    if (
-        recalc
-        or projection_changed
-        or inputs_dirty
-        or "scenario_payloads" not in st.session_state
-    ):
-        st.session_state.scenario_payloads = {}
-        st.session_state.excel_bytes_map = {}
-        st.session_state.input_snapshot = copy.deepcopy(input_page)
-        _bump_model_version()
-        st.session_state[MC_CACHE_KEY] = {}
-        st.session_state.pop("mc_cache", None)
-        st.session_state.pop("mc_cache_version", None)
-        st.session_state.pop("mc_cache_scenario", None)
-        st.session_state[SENSITIVITY_CACHE_KEY] = {}
-        st.session_state[SCENARIO_CACHE_KEY] = {}
-        st.session_state.inputs_dirty = False
+    draft_signature = _input_page_signature(input_page)
+    snapshot_signature = st.session_state.get(LAST_RUN_SIGNATURE_KEY) or _input_page_signature(snapshot)
 
-    snapshot = _coerce_input_snapshot(st.session_state.get("input_snapshot"))
     if snapshot is None:
         snapshot = copy.deepcopy(input_page)
         st.session_state.input_snapshot = snapshot
+        snapshot_signature = draft_signature or _input_page_signature(snapshot)
+        st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
+        if _current_model_version() == 0:
+            _bump_model_version()
+        inputs_dirty = False
     else:
-        st.session_state.input_snapshot = snapshot
+        inputs_dirty = bool(st.session_state.get("inputs_dirty", False))
+        if draft_signature is not None and snapshot_signature is not None:
+            inputs_dirty = draft_signature != snapshot_signature
+        if recalc:
+            snapshot = copy.deepcopy(input_page)
+            st.session_state.input_snapshot = snapshot
+            next_signature = draft_signature or _input_page_signature(snapshot)
+            if next_signature != snapshot_signature or _current_model_version() == 0:
+                _bump_model_version()
+            snapshot_signature = next_signature
+            st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
+            inputs_dirty = False
+        else:
+            st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
 
-    model, results = _ensure_scenario_payload(selected_scenario, snapshot)
+    st.session_state.inputs_dirty = inputs_dirty
+
+    model, results = _ensure_scenario_payload(
+        selected_scenario,
+        snapshot,
+        run_signature=snapshot_signature,
+    )
     st.session_state.model_results = (model, results)
 
-    excel_map: Dict[str, bytes] = st.session_state.setdefault("excel_bytes_map", {})
-    excel_bytes = excel_map.get(selected_scenario)
+    excel_map = _export_cache()
+    excel_bytes = _get_cached_export_bytes(selected_scenario, snapshot_signature)
 
     model.scenario = selected_scenario
 
@@ -5454,8 +5529,8 @@ def main() -> None:
             if st.button("Prepare Excel Model", key=f"prepare_excel_{selected_scenario.lower()}"):
                 with st.spinner("Preparing Excel workbook..."):
                     excel_bytes = _generate_excel_bytes(model, results, selected_scenario)
-                excel_map[selected_scenario] = excel_bytes
-                st.session_state.excel_bytes_map = excel_map
+                _store_cached_export_bytes(selected_scenario, snapshot_signature, excel_bytes)
+                excel_map = _export_cache()
         if excel_bytes:
             st.download_button(
                 "Download Excel Model",
@@ -5468,7 +5543,7 @@ def main() -> None:
                 key=f"clear_excel_{selected_scenario.lower()}",
             ):
                 excel_map.pop(selected_scenario, None)
-                st.session_state.excel_bytes_map = excel_map
+                st.session_state[EXPORT_CACHE_KEY] = excel_map
                 excel_bytes = None
         if not excel_bytes:
             st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
@@ -5559,6 +5634,31 @@ def _page_to_dict(page: "InputLandingPage") -> dict:
     }
 
 
+def _input_page_signature(page: InputLandingPage | dict | None) -> str | None:
+    snapshot = _coerce_input_snapshot(page)
+    if snapshot is None:
+        return None
+    payload = _normalise_signature_value(_page_to_dict(snapshot))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()
+
+
+def _clear_cassava_runtime_state(*, reset_model_version: bool = False) -> None:
+    for key in [
+        CORE_MODEL_CACHE_KEY,
+        EXPORT_CACHE_KEY,
+        MC_CACHE_KEY,
+        SENSITIVITY_CACHE_KEY,
+        SCENARIO_CACHE_KEY,
+        "model_results",
+        "input_snapshot",
+        LAST_RUN_SIGNATURE_KEY,
+    ]:
+        st.session_state.pop(key, None)
+    if reset_model_version:
+        st.session_state[MODEL_VERSION_KEY] = 0
+
+
 def get_state() -> dict:
     """Snapshot all user-editable inputs.
 
@@ -5566,15 +5666,14 @@ def get_state() -> dict:
     _load_session_inputs() path (which already handles dict → InputLandingPage
     via InputLandingPage.from_dict()) reconstructs it transparently on restore.
     """
-    import streamlit as _st
     state: dict = {}
 
-    page = _st.session_state.get("input_page")
+    page = st.session_state.get("input_page")
     if page is not None:
         state["input_page"] = _page_to_dict(page)
 
     for key in _EXTRA_STATE_KEYS:
-        val = _st.session_state.get(key)
+        val = st.session_state.get(key)
         if val is not None:
             state[key] = val
 
@@ -5587,9 +5686,10 @@ def set_state(state: dict) -> None:
     Writes input_page as a plain dict; _load_session_inputs() converts it to
     an InputLandingPage automatically on next render.
     """
-    import streamlit as _st
+    _clear_cassava_runtime_state(reset_model_version=True)
     for k, v in state.items():
-        _st.session_state[k] = v
+        st.session_state[k] = v
+    st.session_state["inputs_dirty"] = False
 
 
 if __name__ == "__main__":
