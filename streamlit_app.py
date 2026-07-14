@@ -5404,7 +5404,7 @@ def main() -> None:
     if "selected_scenario" not in st.session_state:
         st.session_state.selected_scenario = scenario_options[0]
 
-    scenario_cols = st.columns([1.15, 1.0], vertical_alignment="bottom")
+    scenario_cols = st.columns([1.15, 1.0])
     with scenario_cols[0]:
         st.markdown(
             "<div style='font-size:0.95rem;font-weight:600;margin:0 0 0.35rem;'>"
@@ -5421,7 +5421,12 @@ def main() -> None:
         )
     with scenario_cols[1]:
         st.markdown("<div style='height:2.05rem;'></div>", unsafe_allow_html=True)
-        recalc = st.button("Recalculate model", type="primary", use_container_width=True)
+        has_completed_run = _coerce_input_snapshot(st.session_state.get("input_snapshot")) is not None
+        recalc = st.button(
+            "Recalculate model" if has_completed_run else "Run Model",
+            type="primary",
+            use_container_width=True,
+        )
 
     if selected_choice != st.session_state.selected_scenario:
         st.session_state.selected_scenario = selected_choice
@@ -5440,23 +5445,22 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    (
-        input_tab,
-        production_tab,
-        financials_tab,
-        analytics_tab,
-        ai_ml_tab,
-    ) = st.tabs(
-        [
-            "Input Landing Page",
-            "Production & revenues",
-            "Financial statements",
-            "Advanced analytics",
-            "RAG Assistant",
-        ]
+    page_labels = [
+        "Input Landing Page",
+        "Production & revenues",
+        "Financial statements",
+        "Advanced analytics",
+        "RAG Assistant",
+    ]
+    active_page = st.radio(
+        "Workspace section",
+        page_labels,
+        horizontal=True,
+        key="cassava_active_workspace_section",
+        label_visibility="collapsed",
     )
 
-    with input_tab:
+    if active_page == "Input Landing Page":
         _render_section_intro(
             "Input Landing Page",
             "Edit the operating assumptions, production schedules, and financing inputs before refreshing the model outputs.",
@@ -5481,45 +5485,48 @@ def main() -> None:
     draft_signature = _input_page_signature(input_page)
     snapshot_signature = st.session_state.get(LAST_RUN_SIGNATURE_KEY) or _input_page_signature(snapshot)
 
-    if snapshot is None:
-        snapshot = copy.deepcopy(input_page)
-        st.session_state.input_snapshot = snapshot
-        snapshot_signature = draft_signature or _input_page_signature(snapshot)
-        st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
-        if _current_model_version() == 0:
-            _bump_model_version()
-        inputs_dirty = False
-    else:
+    inputs_dirty = snapshot is None
+    if snapshot is not None:
         inputs_dirty = bool(st.session_state.get("inputs_dirty", False))
         if draft_signature is not None and snapshot_signature is not None:
             inputs_dirty = draft_signature != snapshot_signature
-        if recalc:
-            snapshot = copy.deepcopy(input_page)
-            st.session_state.input_snapshot = snapshot
-            next_signature = draft_signature or _input_page_signature(snapshot)
-            if next_signature != snapshot_signature or _current_model_version() == 0:
-                _bump_model_version()
-            snapshot_signature = next_signature
-            st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
-            inputs_dirty = False
-        else:
-            st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
+
+    if recalc:
+        snapshot = copy.deepcopy(input_page)
+        st.session_state.input_snapshot = snapshot
+        next_signature = draft_signature or _input_page_signature(snapshot)
+        if next_signature != snapshot_signature or _current_model_version() == 0:
+            _bump_model_version()
+        snapshot_signature = next_signature
+        st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
+        inputs_dirty = False
+    elif snapshot_signature is not None:
+        st.session_state[LAST_RUN_SIGNATURE_KEY] = snapshot_signature
 
     st.session_state.inputs_dirty = inputs_dirty
 
-    model, results = _ensure_scenario_payload(
-        selected_scenario,
-        snapshot,
-        run_signature=snapshot_signature,
-    )
-    st.session_state.model_results = (model, results)
+    model = None
+    results = None
+    if snapshot is not None:
+        model, results = _ensure_scenario_payload(
+            selected_scenario,
+            snapshot,
+            run_signature=snapshot_signature,
+        )
+        st.session_state.model_results = (model, results)
+        model.scenario = selected_scenario
 
     excel_map = _export_cache()
-    excel_bytes = _get_cached_export_bytes(selected_scenario, snapshot_signature)
+    excel_bytes = (
+        _get_cached_export_bytes(selected_scenario, snapshot_signature)
+        if snapshot_signature is not None
+        else None
+    )
 
-    model.scenario = selected_scenario
-
-    with production_tab:
+    if active_page == "Production & revenues":
+        if model is None or results is None:
+            st.info("Press Run Model to generate production, revenue, and export outputs.")
+            return
         _render_section_intro(
             "Production & revenues",
             "Review topline value creation, export the workbook, and track how operational assumptions flow into revenues and returns.",
@@ -5549,45 +5556,54 @@ def main() -> None:
             st.info("Click 'Prepare Excel Model' to generate the workbook for download.")
         _render_key_metrics(model, results)
 
-    with financials_tab:
+    if active_page == "Financial statements":
+        if results is None:
+            st.info("Press Run Model to generate the financial statements.")
+            return
         _render_section_intro(
             "Financial statements",
             "Move through performance, balance-sheet position, and cash generation inside one statement review workspace.",
         )
-        performance_tab, position_tab, cashflow_tab = st.tabs(
-            [
-                "Financial Performance",
-                "Financial Position",
-                "Cash Flow Statement",
-            ]
+        financial_page = st.radio(
+            "Statement",
+            ["Financial Performance", "Financial Position", "Cash Flow Statement"],
+            horizontal=True,
+            key="cassava_active_financial_statement",
+            label_visibility="collapsed",
         )
-        with performance_tab:
+        if financial_page == "Financial Performance":
             _render_financial_performance(results)
-        with position_tab:
+        elif financial_page == "Financial Position":
             _render_financial_position(results)
-        with cashflow_tab:
+        else:
             _render_cash_flow_page(results)
 
-    with analytics_tab:
+    if active_page == "Advanced analytics":
+        if model is None or results is None:
+            st.info("Press Run Model before running analytics.")
+            return
         _render_section_intro(
             "Advanced analytics",
             "Stress-test the project across sensitivities, scenario overrides, and Monte Carlo distributions before finalising the investment case.",
         )
-        sensitivity_tab, scenario_tab, monte_carlo_tab = st.tabs(
-            [
-                "Sensitivity Analyses",
-                "Scenario / IFs Analysis",
-                "Monte Carlo Simulation",
-            ]
+        analytics_page = st.radio(
+            "Analytics",
+            ["Sensitivity Analyses", "Scenario / IFs Analysis", "Monte Carlo Simulation"],
+            horizontal=True,
+            key="cassava_active_analytics_section",
+            label_visibility="collapsed",
         )
-        with sensitivity_tab:
+        if analytics_page == "Sensitivity Analyses":
             _render_sensitivity_page(model, results)
-        with scenario_tab:
+        elif analytics_page == "Scenario / IFs Analysis":
             _render_scenario_page(model, results)
-        with monte_carlo_tab:
+        else:
             _render_monte_carlo_page(model, results)
 
-    with ai_ml_tab:
+    if active_page == "RAG Assistant":
+        if model is None or results is None:
+            st.info("Press Run Model before using the research assistant.")
+            return
         _render_section_intro(
             "AI & machine learning settings",
             "Use the research assistant and indexed model outputs to draft business-plan narratives and answer model questions with richer context.",
