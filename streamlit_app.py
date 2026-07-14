@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import html
 import hashlib
@@ -10,6 +11,7 @@ import json
 import re
 import tempfile
 from datetime import datetime
+from functools import lru_cache
 import textwrap
 from collections import OrderedDict
 from pathlib import Path
@@ -71,6 +73,7 @@ MC_CACHE_KEY = "mc_cache_store"
 SENSITIVITY_CACHE_KEY = "sensitivity_cache"
 SCENARIO_CACHE_KEY = "scenario_cache"
 CHART_KEY_COUNTER = "chart_key_counter"
+_HERO_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "cassava_bioethanol.png"
 
 # Columns that are derived from other inputs and should not be editable via the
 # "Modify Default Inputs & Figures" pane or the general data editor. The map is
@@ -229,28 +232,62 @@ def _inject_app_theme() -> None:
         }
 
         .cassava-hero {
+            --cassava-hero-overlay: linear-gradient(
+                90deg,
+                rgba(250, 253, 249, 0.97) 0%,
+                rgba(250, 253, 249, 0.93) 44%,
+                rgba(250, 253, 249, 0.70) 70%,
+                rgba(17, 41, 30, 0.20) 100%
+            );
+            position: relative;
+            overflow: hidden;
             margin-bottom: 1.15rem;
+            min-height: 17.5rem;
             padding: 1.65rem 1.8rem 1.45rem 1.8rem;
             border-radius: 30px;
-            border: 1px solid rgba(220, 202, 164, 0.48);
-            background:
-                linear-gradient(135deg, rgba(17, 41, 30, 0.98), rgba(33, 70, 52, 0.95)),
-                radial-gradient(circle at top right, rgba(185, 138, 51, 0.18), transparent 30%);
+            border: 1px solid rgba(33, 70, 52, 0.20);
+            background: linear-gradient(135deg, #f8fbf7, #edf4ed);
             box-shadow: 0 22px 44px rgba(17, 41, 30, 0.12);
-            color: #ffffff;
+            color: #0f172a;
+        }
+
+        .cassava-hero-image {
+            position: absolute;
+            inset: 0;
+            z-index: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center 54%;
+            pointer-events: none;
+        }
+
+        .cassava-hero::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            background: var(--cassava-hero-overlay);
+            pointer-events: none;
+        }
+
+        .cassava-hero-content {
+            position: relative;
+            z-index: 2;
         }
 
         .cassava-chip {
             display: inline-block;
             padding: 0.36rem 0.82rem;
             border-radius: 999px;
-            background: rgba(185, 138, 51, 0.18);
-            border: 1px solid rgba(185, 138, 51, 0.40);
-            color: #f7e7be;
+            background: rgba(248, 252, 248, 0.82);
+            border: 1px solid rgba(33, 70, 52, 0.22);
+            color: #174a36;
             font-size: 0.78rem;
             font-weight: 700;
             letter-spacing: 0.08em;
             text-transform: uppercase;
+            backdrop-filter: blur(8px);
         }
 
         .cassava-hero h1 {
@@ -259,19 +296,21 @@ def _inject_app_theme() -> None:
             font-size: clamp(2.2rem, 3vw, 3.5rem);
             letter-spacing: -0.035em;
             line-height: 1.02;
+            color: #0f172a;
+            text-shadow: 0 1px 12px rgba(255, 255, 255, 0.72);
         }
 
         .cassava-hero p {
             margin: 0;
             max-width: 60rem;
-            color: rgba(255, 255, 255, 0.88);
+            color: #334155;
             font-size: 1rem;
             line-height: 1.58;
         }
 
         .cassava-meta {
             margin-top: 1rem;
-            color: rgba(255, 255, 255, 0.82);
+            color: #475569;
             font-size: 0.92rem;
             line-height: 1.5;
         }
@@ -354,29 +393,59 @@ def _inject_app_theme() -> None:
         div[data-testid="stExpander"] {
             border-radius: 18px;
         }
+
+        @media (max-width: 760px) {
+            .cassava-hero {
+                --cassava-hero-overlay: linear-gradient(
+                    180deg,
+                    rgba(250, 253, 249, 0.97) 0%,
+                    rgba(250, 253, 249, 0.90) 68%,
+                    rgba(250, 253, 249, 0.74) 100%
+                );
+                min-height: 20rem;
+                padding: 1.35rem 1.25rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
+@lru_cache(maxsize=1)
+def _hero_image_data_uri() -> str:
+    """Return the bundled cassava bioethanol image as an embeddable URI."""
+
+    encoded = base64.b64encode(_HERO_IMAGE_PATH.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def _render_model_hero(selected_scenario: str) -> None:
     """Render the redesigned top-of-page cassava hero."""
 
+    image_data_uri = _hero_image_data_uri()
     st.markdown(
         f"""
         <section class="cassava-hero">
-            <span class="cassava-chip">Cassava Ethanol Strategy Studio</span>
-            <h1>Cassava Bioethanol Financial Model</h1>
-            <p>
-                A redesigned operating cockpit built for lenders, investors, and project sponsors:
-                centralised inputs, cleaner analytical flow, disciplined scenario review, and an
-                export-ready workbook for investment committee use.
-            </p>
-            <div class="cassava-meta">
-                Active scenario: <strong>{html.escape(selected_scenario)}</strong> |
-                Feedstock, production, financing, and downside-risk views are organised into a
-                tighter executive workflow.
+            <img
+                class="cassava-hero-image"
+                src="{image_data_uri}"
+                alt=""
+                aria-hidden="true"
+            />
+            <div class="cassava-hero-content">
+                <span class="cassava-chip">Cassava Ethanol Strategy Studio</span>
+                <h1>Cassava Bioethanol Financial Model</h1>
+                <p>
+                    A redesigned operating cockpit built for lenders, investors, and project sponsors:
+                    centralised inputs, cleaner analytical flow, disciplined scenario review, and an
+                    export-ready workbook for investment committee use.
+                </p>
+                <div class="cassava-meta">
+                    Active scenario: <strong>{html.escape(selected_scenario)}</strong> |
+                    Feedstock, production, financing, and downside-risk views are organised into a
+                    tighter executive workflow.
+                </div>
             </div>
         </section>
         """,
