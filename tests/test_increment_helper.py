@@ -20,6 +20,7 @@ increment_module = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(increment_module)
 
 apply_yearly_increment = increment_module.apply_yearly_increment
+apply_production_annual_increment = increment_module.apply_production_annual_increment
 
 
 def test_apply_yearly_increment_monthly_series():
@@ -149,3 +150,94 @@ def test_apply_yearly_increment_extends_rows_to_horizon():
     assert cassava_rows.loc[0, "Amount"] == pytest.approx(100.0)
     assert cassava_rows.loc[1, "Amount"] == pytest.approx(110.0)
     assert cassava_rows.loc[2, "Amount"] == pytest.approx(121.0)
+
+
+def test_production_annual_increment_compounds_and_extends_months():
+    df = pd.DataFrame(
+        [
+            {
+                "Start Month": "2025-01",
+                "Cassava ton": 100.0,
+                "Ethanol litres": 0.0,
+                "Animal Feed ton": 0.0,
+                "Growth %": 0.0,
+            }
+        ]
+    )
+
+    updated = apply_production_annual_increment(
+        df,
+        0,
+        date_column="Start Month",
+        value_column="Cassava ton",
+        annual_rate=0.10,
+        horizon_end="2027-01",
+    )
+
+    values = updated.set_index("Start Month")["Cassava ton"]
+    assert len(updated) == 25
+    assert values.loc["2025-01"] == pytest.approx(100.0)
+    assert values.loc["2025-12"] == pytest.approx(100.0)
+    assert values.loc["2026-01"] == pytest.approx(110.0)
+    assert values.loc["2027-01"] == pytest.approx(121.0)
+
+
+def test_production_annual_increment_preserves_override_as_new_anchor():
+    df = pd.DataFrame(
+        [
+            {"Start Month": "2025-01", "Cassava ton": 100.0},
+            {"Start Month": "2026-04", "Cassava ton": 150.0},
+        ]
+    )
+
+    updated = apply_production_annual_increment(
+        df,
+        0,
+        date_column="Start Month",
+        value_column="Cassava ton",
+        annual_rate=0.10,
+        horizon_end="2027-04",
+        override_periods={"2026-04"},
+    )
+
+    values = updated.set_index("Start Month")["Cassava ton"]
+    assert values.loc["2026-01"] == pytest.approx(110.0)
+    assert values.loc["2026-04"] == pytest.approx(150.0)
+    assert values.loc["2027-03"] == pytest.approx(150.0)
+    assert values.loc["2027-04"] == pytest.approx(165.0)
+
+
+def test_production_annual_increment_rejects_decline_at_or_below_minus_100_percent():
+    df = pd.DataFrame([{"Start Month": "2025-01", "Cassava ton": 100.0}])
+
+    with pytest.raises(ValueError, match="greater than -100%"):
+        apply_production_annual_increment(
+            df,
+            0,
+            date_column="Start Month",
+            value_column="Cassava ton",
+            annual_rate=-1.0,
+            horizon_end="2026-01",
+        )
+
+
+def test_production_annual_increment_keeps_rows_after_requested_horizon():
+    df = pd.DataFrame(
+        [
+            {"Start Month": "2025-01", "Cassava ton": 100.0},
+            {"Start Month": "2027-12", "Cassava ton": 999.0},
+        ]
+    )
+
+    updated = apply_production_annual_increment(
+        df,
+        0,
+        date_column="Start Month",
+        value_column="Cassava ton",
+        annual_rate=0.10,
+        horizon_end="2026-01",
+    )
+
+    values = updated.set_index("Start Month")["Cassava ton"]
+    assert values.loc["2026-01"] == pytest.approx(110.0)
+    assert values.loc["2027-12"] == pytest.approx(999.0)

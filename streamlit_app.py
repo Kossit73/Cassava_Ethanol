@@ -26,7 +26,10 @@ import streamlit as st
 
 from bioethanol_model import CassavaBioethanolModel
 from bioethanol_model.exporter import export_to_excel
-from bioethanol_model.increment import apply_yearly_increment
+from bioethanol_model.increment import (
+    apply_production_annual_increment,
+    apply_yearly_increment,
+)
 from bioethanol_model.inputs import (
     EditableTable,
     InputLandingPage,
@@ -710,18 +713,142 @@ def _store_cached_export_bytes(scenario: str, run_signature: str | None, payload
         "bytes": payload,
     }
     st.session_state[EXPORT_CACHE_KEY] = cache
+def _safe_table_key(table: EditableTable) -> str:
+    return table.name.replace(" ", "_").lower()
+
+
+def _table_editor_revision_key(table: EditableTable) -> str:
+    return f"table_editor_revision_{_safe_table_key(table)}"
+
+
+def _table_editor_revision(table: EditableTable) -> int:
+    return int(st.session_state.get(_table_editor_revision_key(table), 0))
 
 
 def _table_widget_key(table: EditableTable) -> str:
     """Return the Streamlit widget key for the data editor bound to *table*."""
 
-    return f"table_editor_{table.name.replace(' ', '_').lower()}"
+    return f"table_editor_{_safe_table_key(table)}_r{_table_editor_revision(table)}"
+
+
+def _bump_table_editor_revision(table: EditableTable) -> int:
+    """Remount table and row widgets after a programmatic data change."""
+
+    key = _table_editor_revision_key(table)
+    revision = _table_editor_revision(table) + 1
+    st.session_state[key] = revision
+    return revision
 
 
 def _table_editor_state_key(table: EditableTable) -> str:
     """Return the session-state cache key used to mirror the table data."""
 
-    return f"table_cache_{table.name.replace(' ', '_').lower()}"
+    return f"table_cache_{_safe_table_key(table)}"
+
+
+def _workspace_state_key(table: EditableTable, suffix: str) -> str:
+    return f"workspace_{suffix}_{_safe_table_key(table)}"
+
+
+def _normalise_period_strings(values: object) -> set[str]:
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        raw_values = [values]
+    else:
+        try:
+            raw_values = list(values)
+        except TypeError:
+            raw_values = [values]
+
+    periods: set[str] = set()
+    for value in raw_values:
+        try:
+            periods.add(pd.Period(str(value), freq="M").strftime("%Y-%m"))
+        except Exception:
+            continue
+    return periods
+
+
+def _initialise_production_draft_metadata(table: EditableTable, *, force: bool = False) -> None:
+    if table.name != "Production Monthly":
+        return
+
+    overrides_key = _workspace_state_key(table, "manual_overrides")
+    generated_key = _workspace_state_key(table, "generated_periods")
+    if force or overrides_key not in st.session_state:
+        saved_overrides = st.session_state.get("production_user_override_periods")
+        if saved_overrides is None:
+            saved_overrides = st.session_state.get("production_manual_periods", set())
+        st.session_state[overrides_key] = _normalise_period_strings(saved_overrides)
+    if force or generated_key not in st.session_state:
+        st.session_state[generated_key] = _normalise_period_strings(
+            st.session_state.get("production_generated_increment_periods", set())
+        )
+
+
+def _workspace_draft(table: EditableTable) -> pd.DataFrame:
+    """Return the per-table draft, refreshing clean drafts from saved inputs."""
+
+    draft_key = _workspace_state_key(table, "draft")
+    source_key = _workspace_state_key(table, "source_signature")
+    dirty_key = _workspace_state_key(table, "dirty")
+    rows_key = _workspace_state_key(table, "dirty_rows")
+    source_signature = table.signature()
+    draft = st.session_state.get(draft_key)
+    dirty = bool(st.session_state.get(dirty_key, False))
+
+    if not isinstance(draft, pd.DataFrame) or (
+        st.session_state.get(source_key) != source_signature and not dirty
+    ):
+        draft = table.data.copy()
+        st.session_state[draft_key] = draft
+        st.session_state[source_key] = source_signature
+        st.session_state[dirty_key] = False
+        st.session_state[rows_key] = set()
+        _initialise_production_draft_metadata(table, force=True)
+    else:
+        _initialise_production_draft_metadata(table)
+
+    return draft.copy()
+
+
+def _store_workspace_draft(
+    table: EditableTable,
+    data: pd.DataFrame,
+    *,
+    dirty_rows: set[int] | None = None,
+) -> pd.DataFrame:
+    draft = data.copy()
+    for column in table.columns:
+        if column not in draft.columns:
+            draft[column] = None
+    draft = draft[table.columns].reset_index(drop=True)
+    st.session_state[_workspace_state_key(table, "draft")] = draft
+    st.session_state[_workspace_state_key(table, "dirty")] = True
+    if dirty_rows is not None:
+        st.session_state[_workspace_state_key(table, "dirty_rows")] = set(dirty_rows)
+    _bump_table_editor_revision(table)
+    return draft.copy()
+
+
+def _reset_workspace_draft(table: EditableTable) -> pd.DataFrame:
+    draft = table.data.copy().reset_index(drop=True)
+    st.session_state[_workspace_state_key(table, "draft")] = draft
+    st.session_state[_workspace_state_key(table, "source_signature")] = table.signature()
+    st.session_state[_workspace_state_key(table, "dirty")] = False
+    st.session_state[_workspace_state_key(table, "dirty_rows")] = set()
+    _initialise_production_draft_metadata(table, force=True)
+    _bump_table_editor_revision(table)
+    return draft.copy()
+
+
+def _workspace_dirty_rows(table: EditableTable) -> set[int]:
+    values = st.session_state.get(_workspace_state_key(table, "dirty_rows"), set())
+    try:
+        return {int(value) for value in values}
+    except TypeError:
+        return set()
 
 
 def _sync_table_editors(page: InputLandingPage) -> None:
@@ -751,6 +878,7 @@ def _reset_table_widget(table: EditableTable) -> None:
     widget_key = _table_widget_key(table)
     if widget_key in st.session_state:
         del st.session_state[widget_key]
+    _bump_table_editor_revision(table)
 
 
 def _ensure_monte_carlo_state() -> None:
@@ -2095,6 +2223,180 @@ def _set_dataframe_cell(df: pd.DataFrame, row_idx: int, column_name: str, value:
         df.at[row_idx, column_name] = value
 
 
+def _format_workspace_row(table: EditableTable, df: pd.DataFrame, row_idx: int) -> str:
+    """Return a business-readable label for the row selector."""
+
+    if row_idx not in df.index:
+        return f"Row {row_idx + 1}"
+
+    row = df.loc[row_idx]
+    config = YEARLY_INCREMENT_CONFIG.get(table.name, {})
+    label_columns: List[str] = []
+    date_column = config.get("date_column")
+    if isinstance(date_column, str) and date_column in df.columns:
+        label_columns.append(date_column)
+    for column in config.get("match_columns", []):
+        if column in df.columns and column not in label_columns:
+            label_columns.append(column)
+    if not label_columns and table.columns:
+        label_columns.append(table.columns[0])
+
+    parts: List[str] = []
+    for column in label_columns:
+        value = row.get(column)
+        if value is not None and not pd.isna(value) and str(value).strip():
+            parts.append(str(value))
+
+    value_columns = [
+        column for column in config.get("value_columns", []) if column in df.columns
+    ]
+    if value_columns:
+        value = pd.to_numeric(pd.Series([row.get(value_columns[0])]), errors="coerce").iloc[0]
+        if pd.notna(value):
+            parts.append(f"{value_columns[0]}: {float(value):,.2f}")
+
+    label = " | ".join(parts) if parts else f"Row {row_idx + 1}"
+    return f"{row_idx + 1}. {label}"
+
+
+def _validate_workspace_draft(
+    table: EditableTable,
+    df: pd.DataFrame,
+    projection: ProjectionHorizon,
+    *,
+    row_index: int | None = None,
+) -> List[str]:
+    """Validate row identity, dates, and increment-sensitive values."""
+
+    if row_index is not None and row_index not in df.index:
+        return ["The selected row no longer exists."]
+    if df.empty:
+        return []
+
+    errors: List[str] = []
+    indices = [row_index] if row_index is not None else list(df.index)
+    config = YEARLY_INCREMENT_CONFIG.get(table.name, {})
+    date_column = config.get("date_column")
+    frequency = str(config.get("frequency", "M"))
+    match_columns = [column for column in config.get("match_columns", []) if column in df.columns]
+
+    start_period = pd.Period(
+        int(projection.start_year), freq="Y"
+    ) if frequency.upper().startswith("Y") else pd.Period(
+        f"{int(projection.start_year):04d}-01", freq="M"
+    )
+    end_period = pd.Period(
+        int(projection.end_year), freq="Y"
+    ) if frequency.upper().startswith("Y") else pd.Period(
+        f"{int(projection.end_year):04d}-12", freq="M"
+    )
+
+    if isinstance(date_column, str) and date_column in df.columns:
+        for idx in indices:
+            value = df.at[idx, date_column]
+            try:
+                period = pd.Period(value, freq=frequency)
+            except Exception:
+                errors.append(f"Row {idx + 1}: {date_column} must be a valid {frequency} period.")
+                continue
+            if period < start_period or period > end_period:
+                errors.append(
+                    f"Row {idx + 1}: {date_column} must fall between "
+                    f"{start_period} and {end_period}."
+                )
+
+        identity_columns = [date_column] + match_columns
+        if all(column in df.columns for column in identity_columns):
+            identity = df[identity_columns].copy()
+            for column in identity_columns:
+                identity[column] = identity[column].fillna("<missing>").astype(str).str.strip()
+            duplicate_mask = identity.duplicated(identity_columns, keep=False)
+            duplicate_indices = set(df.index[duplicate_mask])
+            if row_index is None and duplicate_indices:
+                errors.append(
+                    "Duplicate effective-period rows were found for the same category or identifier."
+                )
+            elif row_index is not None and row_index in duplicate_indices:
+                errors.append(
+                    f"Row {row_index + 1}: another row already uses the same effective period and identifier."
+                )
+
+    for idx in indices:
+        for column in match_columns:
+            value = df.at[idx, column]
+            if value is None or pd.isna(value) or not str(value).strip():
+                errors.append(f"Row {idx + 1}: {column} is required.")
+
+    if "Annual Increment %" in df.columns:
+        for idx in indices:
+            value = pd.to_numeric(pd.Series([df.at[idx, "Annual Increment %"]]), errors="coerce").iloc[0]
+            if pd.isna(value):
+                errors.append(f"Row {idx + 1}: Annual Increment % must be numeric.")
+            elif float(value) <= -100.0:
+                errors.append(f"Row {idx + 1}: Annual Increment % must be greater than -100%.")
+
+    if table.name == "Production Monthly" and "Cassava ton" in df.columns:
+        for idx in indices:
+            value = pd.to_numeric(pd.Series([df.at[idx, "Cassava ton"]]), errors="coerce").iloc[0]
+            if pd.isna(value):
+                errors.append(f"Row {idx + 1}: Cassava ton must be numeric.")
+            elif float(value) < 0.0:
+                errors.append(f"Row {idx + 1}: Cassava ton cannot be negative.")
+
+    return list(dict.fromkeys(errors))
+
+
+def _workspace_production_periods(table: EditableTable, suffix: str) -> set[str]:
+    return _normalise_period_strings(
+        st.session_state.get(_workspace_state_key(table, suffix), set())
+    )
+
+
+def _commit_workspace_draft(
+    page: InputLandingPage,
+    table: EditableTable,
+    draft: pd.DataFrame,
+) -> List[str]:
+    """Commit the complete table draft and synchronize dependent inputs."""
+
+    errors = _validate_workspace_draft(table, draft, page.projection)
+    if errors:
+        return errors
+
+    committed = draft[table.columns].copy().reset_index(drop=True)
+    if table.name == "Production Monthly":
+        committed = _sync_production_outputs(committed)
+    table.set_data(committed, mark_user_input=True)
+
+    if table.name == "Production Monthly":
+        valid_periods = set()
+        month_column = _get_month_column(committed)
+        if month_column:
+            valid_periods = _normalise_period_strings(committed[month_column].tolist())
+        overrides = _workspace_production_periods(table, "manual_overrides") & valid_periods
+        generated = _workspace_production_periods(table, "generated_periods") & valid_periods
+        generated -= overrides
+        st.session_state["production_user_override_periods"] = overrides
+        st.session_state["production_generated_increment_periods"] = generated
+        st.session_state["production_manual_periods"] = overrides | generated
+        st.session_state[PRODUCTION_EDIT_FLAG] = True
+        st.session_state.pop("production_compound_cache", None)
+
+    _apply_dependent_updates(page)
+    _sync_global_assumption_dependencies(page)
+    _sync_table_editors(page)
+    _mark_inputs_dirty()
+
+    for current_table in page.tables().values():
+        is_dirty = bool(
+            st.session_state.get(_workspace_state_key(current_table, "dirty"), False)
+        )
+        if current_table is table or not is_dirty:
+            _reset_workspace_draft(current_table)
+    return []
+
+
+
 def _row_editor_form(
     table: EditableTable,
     row_idx: int,
@@ -2473,7 +2775,7 @@ def _modify_default_inputs(page: InputLandingPage) -> None:
         _update_table_editor_state(table)
 
 
-def _edit_workspace(page: InputLandingPage) -> None:
+def _legacy_edit_workspace(page: InputLandingPage) -> None:
     """Render a user-friendly unified editor with explicit apply/reset actions."""
 
     st.subheader("Edit Workspace")
@@ -2582,6 +2884,314 @@ def _edit_workspace(page: InputLandingPage) -> None:
     _mark_inputs_dirty()
 
     st.success(f"Applied changes to {table.name} and synchronized dependent assumptions/tables.")
+
+
+
+def _edit_workspace(page: InputLandingPage) -> None:
+    """Render the draft-based row editor and explicit table commit workflow."""
+
+    st.subheader("Edit Workspace")
+    st.caption(
+        "Choose a row, edit it in the focused form, and click **Save Row** to stage it. "
+        "Use **Save All Changes** to commit the complete table and synchronize the model."
+    )
+
+    grouped = page.grouped_tables()
+    section_names = list(grouped.keys())
+    selected_section = st.selectbox(
+        "Section",
+        options=section_names,
+        key="edit_workspace_section",
+    )
+    section_tables = grouped.get(selected_section, [])
+    if not section_tables:
+        st.info("No editable tables found in this section.")
+        return
+
+    table_lookup = {item.name: item for item in section_tables}
+    selected_table_name = st.selectbox(
+        "Table",
+        options=list(table_lookup.keys()),
+        key="edit_workspace_table",
+    )
+    table = table_lookup[selected_table_name]
+
+    if table.name == "Production Annual":
+        st.info(
+            "Production Annual is calculated from the saved Production Monthly schedule. "
+            "Select Production Monthly to edit production and annual increments."
+        )
+        st.dataframe(table.data, use_container_width=True, hide_index=True)
+        return
+
+    safe_key = _safe_table_key(table)
+    flash_key = _workspace_state_key(table, "flash")
+    flash_message = st.session_state.pop(flash_key, None)
+    if flash_message:
+        st.success(str(flash_message))
+
+    draft = _workspace_draft(table)
+    dirty_key = _workspace_state_key(table, "dirty")
+    source_key = _workspace_state_key(table, "source_signature")
+    is_dirty = bool(st.session_state.get(dirty_key, False))
+    if is_dirty:
+        st.warning(
+            f"{len(_workspace_dirty_rows(table)) or 1} draft row change(s) are waiting to be saved."
+        )
+        if st.session_state.get(source_key) != table.signature():
+            st.warning(
+                "The saved table changed while this draft was open. Review the draft before saving all changes."
+            )
+    else:
+        st.success("This draft matches the saved table.")
+
+    selected_state_key = _workspace_state_key(table, "selected_row")
+    revision = _table_editor_revision(table)
+
+    if draft.empty:
+        if st.button("Add first row", key=f"workspace_add_first_{safe_key}_r{revision}"):
+            draft = pd.DataFrame([{column: None for column in table.columns}])
+            _store_workspace_draft(table, draft, dirty_rows={0})
+            st.session_state[selected_state_key] = 0
+            st.session_state[flash_key] = "A blank row was added to the draft. Complete it and save the row."
+            st.rerun()
+        st.info("This table has no rows. Add the first row to begin editing.")
+        return
+
+    row_indices = list(draft.index)
+    row_option_map = {
+        _format_workspace_row(table, draft, index): int(index) for index in row_indices
+    }
+    row_options = list(row_option_map.keys())
+    selected_default = int(st.session_state.get(selected_state_key, row_indices[0]))
+    if selected_default not in row_indices:
+        selected_default = row_indices[0]
+    selected_label = _format_workspace_row(table, draft, selected_default)
+    row_choice = st.selectbox(
+        "Select row to edit",
+        options=row_options,
+        index=row_options.index(selected_label),
+        key=f"workspace_row_select_{safe_key}_r{revision}",
+    )
+    row_idx = row_option_map[str(row_choice)]
+    st.session_state[selected_state_key] = row_idx
+
+    row_controls = st.columns(2)
+    if row_controls[0].button("Add row", key=f"workspace_add_{safe_key}_r{revision}"):
+        new_index = len(draft)
+        draft = pd.concat(
+            [draft, pd.DataFrame([{column: None for column in table.columns}])],
+            ignore_index=True,
+        )
+        dirty_rows = _workspace_dirty_rows(table) | {new_index}
+        _store_workspace_draft(table, draft, dirty_rows=dirty_rows)
+        st.session_state[selected_state_key] = new_index
+        st.session_state[flash_key] = "A blank row was added to the draft."
+        st.rerun()
+
+    if row_controls[1].button(
+        "Remove selected row",
+        key=f"workspace_remove_{safe_key}_r{revision}",
+    ):
+        month_column = _get_month_column(draft) if table.name == "Production Monthly" else None
+        removed_period = None
+        if month_column:
+            try:
+                removed_period = pd.Period(str(draft.at[row_idx, month_column]), freq="M").strftime("%Y-%m")
+            except Exception:
+                removed_period = None
+        draft = draft.drop(index=row_idx).reset_index(drop=True)
+        if removed_period:
+            for suffix in ("manual_overrides", "generated_periods"):
+                periods = _workspace_production_periods(table, suffix)
+                periods.discard(removed_period)
+                st.session_state[_workspace_state_key(table, suffix)] = periods
+        dirty_rows = set(range(len(draft)))
+        _store_workspace_draft(table, draft, dirty_rows=dirty_rows)
+        st.session_state[selected_state_key] = min(row_idx, max(0, len(draft) - 1))
+        st.session_state[flash_key] = "The selected row was removed from the draft."
+        st.rerun()
+
+    draft_table = EditableTable(
+        name=table.name,
+        columns=list(table.columns),
+        data=draft.copy(),
+        placeholder=False,
+    )
+    with st.form(key=f"workspace_row_form_{safe_key}_r{revision}_{row_idx}"):
+        st.markdown("**Edit selected row**")
+        candidate, _, derived_metrics = _row_editor_form(
+            draft_table,
+            row_idx,
+            page.projection,
+            widget_prefix=f"workspace_row_r{revision}",
+        )
+        if table.name == "Production Monthly":
+            _display_production_metrics(derived_metrics)
+        submit_columns = st.columns(2)
+        save_row_clicked = submit_columns[0].form_submit_button("Save Row", type="primary")
+        save_all_from_form = submit_columns[1].form_submit_button("Save Row & Save All Changes")
+
+    if save_row_clicked or save_all_from_form:
+        if table.name == "Production Monthly":
+            candidate = _sync_production_outputs(candidate)
+        row_errors = _validate_workspace_draft(
+            table,
+            candidate,
+            page.projection,
+            row_index=row_idx,
+        )
+        if row_errors:
+            for error in row_errors:
+                st.error(error)
+        else:
+            dirty_rows = _workspace_dirty_rows(table) | {row_idx}
+            draft = _store_workspace_draft(table, candidate, dirty_rows=dirty_rows)
+            if table.name == "Production Monthly":
+                month_column = _get_month_column(draft)
+                if month_column:
+                    period = pd.Period(str(draft.at[row_idx, month_column]), freq="M").strftime("%Y-%m")
+                    overrides = _workspace_production_periods(table, "manual_overrides")
+                    generated = _workspace_production_periods(table, "generated_periods")
+                    overrides.add(period)
+                    generated.discard(period)
+                    st.session_state[_workspace_state_key(table, "manual_overrides")] = overrides
+                    st.session_state[_workspace_state_key(table, "generated_periods")] = generated
+
+            if save_all_from_form:
+                commit_errors = _commit_workspace_draft(page, table, draft)
+                if commit_errors:
+                    for error in commit_errors:
+                        st.error(error)
+                else:
+                    st.session_state[flash_key] = (
+                        f"Saved all changes to {table.name} and synchronized dependent tables."
+                    )
+                    st.rerun()
+            else:
+                st.session_state[flash_key] = (
+                    "Row saved to the draft. Use Save All Changes to update the model."
+                )
+                st.rerun()
+
+    if "Annual Increment %" in draft.columns:
+        st.caption(
+            "The row's Annual Increment % compounds automatically from its effective month after "
+            "Save All Changes. A later row for the same category or department becomes the next override."
+        )
+
+    if table.name == "Production Monthly" and "Cassava ton" in draft.columns:
+        st.markdown("---")
+        st.markdown("**Annual production increment**")
+        st.caption(
+            "Save the selected row first. The percentage then compounds production at each anniversary. "
+            "Later manually saved rows are protected and become new propagation anchors."
+        )
+        annual_columns = st.columns([1.2, 1.6])
+        annual_rate_percent = annual_columns[0].number_input(
+            "Annual increment %",
+            min_value=-99.9,
+            value=0.0,
+            step=0.1,
+            format="%.2f",
+            key=f"workspace_annual_rate_{safe_key}_r{revision}_{row_idx}",
+        )
+        propagate_all_years = annual_columns[1].checkbox(
+            "Propagate through all remaining production years",
+            value=True,
+            key=f"workspace_annual_all_years_{safe_key}_r{revision}_{row_idx}",
+        )
+
+        month_column = _get_month_column(draft)
+        projected = draft.copy()
+        base_period = None
+        target_end = None
+        if month_column:
+            try:
+                base_period = pd.Period(str(draft.at[row_idx, month_column]), freq="M")
+                projection_end = pd.Period(f"{int(page.projection.end_year):04d}-12", freq="M")
+                target_end = projection_end if propagate_all_years else min(base_period + 12, projection_end)
+                projected = apply_production_annual_increment(
+                    draft,
+                    row_idx,
+                    date_column=month_column,
+                    value_column="Cassava ton",
+                    annual_rate=float(annual_rate_percent) / 100.0,
+                    horizon_end=target_end,
+                    override_periods=_workspace_production_periods(table, "manual_overrides"),
+                )
+                projected = _sync_production_outputs(projected)
+            except (TypeError, ValueError):
+                projected = draft.copy()
+
+        if month_column and base_period is not None:
+            preview_periods = pd.to_datetime(projected[month_column].astype(str), errors="coerce").dt.to_period("M")
+            preview_columns = [
+                column
+                for column in (month_column, "Cassava ton", "Ethanol litres", "Animal Feed ton")
+                if column in projected.columns
+            ]
+            preview = projected.loc[preview_periods >= base_period, preview_columns]
+            st.caption(f"Preview from {base_period} through {target_end} ({len(preview)} monthly rows)")
+            st.dataframe(preview, use_container_width=True, hide_index=True, height=280)
+
+        increment_changed = not projected.equals(draft)
+        if st.button(
+            "Apply annual increment to draft",
+            key=f"workspace_apply_annual_{safe_key}_r{revision}_{row_idx}",
+            disabled=not increment_changed,
+        ):
+            if month_column and base_period is not None and target_end is not None:
+                overrides = _workspace_production_periods(table, "manual_overrides")
+                overrides.add(base_period.strftime("%Y-%m"))
+                affected_periods = {
+                    period.strftime("%Y-%m")
+                    for period in pd.period_range(base_period, target_end, freq="M")
+                }
+                generated = _workspace_production_periods(table, "generated_periods")
+                generated.update(affected_periods - overrides)
+                st.session_state[_workspace_state_key(table, "manual_overrides")] = overrides
+                st.session_state[_workspace_state_key(table, "generated_periods")] = generated
+            draft = _store_workspace_draft(
+                table,
+                projected,
+                dirty_rows=set(range(len(projected))),
+            )
+            st.session_state[flash_key] = (
+                "Annual production increment applied to the draft. Review it, then save all changes."
+            )
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("**Current table draft**")
+    st.dataframe(draft, use_container_width=True, hide_index=True, height=320)
+
+    final_controls = st.columns(2)
+    if final_controls[0].button(
+        "Save All Changes",
+        key=f"workspace_save_all_{safe_key}_r{revision}",
+        type="primary",
+    ):
+        if not bool(st.session_state.get(dirty_key, False)):
+            st.info("There are no draft changes to save.")
+        else:
+            commit_errors = _commit_workspace_draft(page, table, draft)
+            if commit_errors:
+                for error in commit_errors:
+                    st.error(error)
+            else:
+                st.session_state[flash_key] = (
+                    f"Saved all changes to {table.name} and synchronized dependent tables."
+                )
+                st.rerun()
+
+    if final_controls[1].button(
+        "Discard Unsaved Changes",
+        key=f"workspace_discard_{safe_key}_r{revision}",
+    ):
+        _reset_workspace_draft(table)
+        st.session_state[flash_key] = "Unsaved draft changes were discarded."
+        st.rerun()
 
 
 def _apply_production_delta(
@@ -5469,14 +6079,10 @@ def main() -> None:
         _update_projection(input_page)
         _key_assumptions_controls(input_page)
         _global_input_outlier_warnings(input_page.global_inputs)
-        _edit_workspace(input_page)
-        with st.expander("Advanced Row Editor (Legacy)", expanded=False):
-            _modify_default_inputs(input_page)
-        _render_production_panel(input_page)
-        _sync_table_editors(input_page)
         _apply_dependent_updates(input_page)
-        _editable_tables(input_page)
         _sync_global_assumption_dependencies(input_page)
+        _sync_table_editors(input_page)
+        _edit_workspace(input_page)
 
     snapshot = _coerce_input_snapshot(st.session_state.get("input_snapshot"))
     if snapshot is not None:
