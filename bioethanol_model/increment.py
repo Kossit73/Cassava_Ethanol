@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -270,5 +270,110 @@ def apply_yearly_increment(
             if current_val is None or not np.isclose(current_val, new_value, rtol=1e-9, atol=1e-9):
                 _set_increment_value(result, idx, column, new_value)
 
+    return result[df.columns]
+
+def apply_production_annual_increment(
+    df: pd.DataFrame,
+    base_index: int,
+    *,
+    date_column: str,
+    value_column: str,
+    annual_rate: float,
+    horizon_end: object,
+    override_periods: Iterable[object] | None = None,
+) -> pd.DataFrame:
+    """Propagate a production row across future months using annual steps.
+
+    The selected row is the first anchor. Values remain flat until the
+    anchor's anniversary and then compound once per completed year. A period
+    listed in ``override_periods`` becomes a new anchor, which protects manual
+    production changes and restarts the annual compounding clock from that
+    row. Missing monthly rows are created through ``horizon_end``.
+
+    ``annual_rate`` is expressed as a decimal (``0.05`` for +5%).
+    """
+
+    if df.empty or base_index not in df.index:
+        return df.copy()
+    if date_column not in df.columns or value_column not in df.columns:
+        return df.copy()
+    if not np.isfinite(annual_rate) or float(annual_rate) <= -1.0:
+        raise ValueError("Annual increment must be greater than -100%.")
+
+    base_period = _coerce_period(df.at[base_index, date_column], "M")
+    end_period = _coerce_period(horizon_end, "M")
+    base_value = _base_value(df.loc[base_index], value_column)
+    if base_period is None or end_period is None or base_value is None:
+        return df.copy()
+    if end_period < base_period:
+        return df.copy()
+
+    working = df.copy()
+    parsed_periods = working[date_column].apply(lambda value: _coerce_period(value, "M"))
+    valid_mask = parsed_periods.notna()
+    if not valid_mask.any():
+        return df.copy()
+
+    # Production is month-unique. Keep the last row when duplicate months are
+    # supplied, matching the model engine's existing duplicate policy.
+    working = working.loc[valid_mask].copy()
+    working["_period"] = parsed_periods.loc[working.index]
+    working = (
+        working.sort_values("_period", kind="stable")
+        .drop_duplicates("_period", keep="last")
+        .reset_index(drop=True)
+    )
+
+    override_set: set[pd.Period] = {base_period}
+    for value in override_periods or []:
+        period = _coerce_period(value, "M")
+        if period is not None and base_period <= period <= end_period:
+            override_set.add(period)
+
+    existing_by_period = {row["_period"]: row.copy() for _, row in working.iterrows()}
+    sample_date = df.at[base_index, date_column]
+    base_template = df.loc[base_index].copy()
+
+    output_rows: list[pd.Series] = []
+    for _, row in working.loc[working["_period"] < base_period].iterrows():
+        output_rows.append(row.copy())
+
+    anchor_period = base_period
+    anchor_value = float(base_value)
+    for period in pd.period_range(base_period, end_period, freq="M"):
+        existing = existing_by_period.get(period)
+        if existing is None:
+            row = base_template.copy()
+            row[date_column] = _format_period_value(period, sample_date, "M")
+            row["_period"] = period
+        else:
+            row = existing.copy()
+
+        if period in override_set and period != base_period:
+            override_value = _base_value(row, value_column)
+            if override_value is not None:
+                anchor_period = period
+                anchor_value = float(override_value)
+
+        completed_years = (period.year - anchor_period.year) - int(period.month < anchor_period.month)
+        completed_years = max(0, completed_years)
+        propagated_value = anchor_value * ((1.0 + float(annual_rate)) ** completed_years)
+        row[value_column] = propagated_value
+        row[date_column] = _format_period_value(period, sample_date, "M")
+        row["_period"] = period
+        output_rows.append(row)
+
+    for _, row in working.loc[working["_period"] > end_period].iterrows():
+        output_rows.append(row.copy())
+
+    result = pd.DataFrame(output_rows)
+    result = result.sort_values("_period", kind="stable").drop(columns="_period", errors="ignore")
+    result = result.reset_index(drop=True)
+
+    for column in df.columns:
+        if column not in result.columns:
+            result[column] = None
+    if value_column in result.columns:
+        result[value_column] = pd.to_numeric(result[value_column], errors="coerce").astype(float)
     return result[df.columns]
 
