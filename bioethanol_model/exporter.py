@@ -292,6 +292,7 @@ def export_to_excel(
         scenario_page = results.get("input_page_snapshot", model.input_page)
         _write_executive_summary(writer, model, results)
         _write_input_page(writer, scenario_page)
+        _write_integrated_cycle_pages(writer, results)
         _write_financial_statements_page(writer, results)
         _write_key_metrics(writer, model, results)
         _write_financial_performance(writer, results)
@@ -359,6 +360,10 @@ def _write_executive_summary(writer: pd.ExcelWriter, model: CassavaBioethanolMod
     navigation = pd.DataFrame(
         [
             {"Workbook Area": "Input Landing Page", "Purpose": "Editable assumptions and operating schedules"},
+            {"Workbook Area": "Cycle Model", "Purpose": "Crop-cycle timing and monthly physical ledger"},
+            {"Workbook Area": "FarmCo Model", "Purpose": "Standalone farming operations and financial statements"},
+            {"Workbook Area": "Product Routing", "Purpose": "Staged processing yields and derivative hierarchy"},
+            {"Workbook Area": "Segments & Eliminations", "Purpose": "FarmCo, ProcessingCo, and consolidation bridge"},
             {"Workbook Area": "Financial Statements", "Purpose": "Integrated monthly and annual statements"},
             {"Workbook Area": "Key Metrics", "Purpose": "Returns, bankability, and operating summaries"},
             {"Workbook Area": "Sensitivity Analyses", "Purpose": "Monte Carlo, tornado, and driver stress testing"},
@@ -393,6 +398,83 @@ def _write_input_page(writer: pd.ExcelWriter, page: InputLandingPage) -> None:
                 worksheet.write_number(next_row, 1, page.total_initial_investment, _export_formats(writer)["money"])
                 next_row += SECTION_GAP + 1
         next_row += 1
+
+
+def _write_integrated_cycle_pages(
+    writer: pd.ExcelWriter,
+    results: Dict[str, object],
+) -> None:
+    """Export the complete crop-cycle, FarmCo, routing, and consolidation audit trail."""
+
+    integrated = results.get("integrated_cycle")
+    if integrated is None:
+        return
+
+    def _frame(attribute: str, index_label: str | None = None) -> pd.DataFrame:
+        value = getattr(integrated, attribute, None)
+        if not isinstance(value, pd.DataFrame):
+            return pd.DataFrame()
+        frame = value.copy()
+        if index_label is not None and not isinstance(frame.index, pd.RangeIndex):
+            return _reset_period_index(frame, index_label)
+        return frame
+
+    sheet_tables = {
+        "Cycle Model": [
+            ("Cycle Summary", _frame("cycle_summary")),
+            ("Annual Physical Ledger", _frame("annual_physical", "Year")),
+            ("Monthly Physical Ledger", _frame("monthly_physical", "Month")),
+        ],
+        "FarmCo Model": [
+            ("Farm Operations (Annual)", _frame("farm_annual", "Year")),
+            ("FarmCo Income Statement (Annual)", _frame("farm_income_annual", "Year")),
+            ("FarmCo Cash Flow (Annual)", _frame("farm_cashflow_annual", "Year")),
+            ("FarmCo Balance Sheet (Annual)", _frame("farm_balance_annual", "Year")),
+            ("Farm Operations (Monthly)", _frame("farm_monthly", "Month")),
+            ("FarmCo Income Statement (Monthly)", _frame("farm_income_monthly", "Month")),
+            ("FarmCo Cash Flow (Monthly)", _frame("farm_cashflow_monthly", "Month")),
+            ("FarmCo Balance Sheet (Monthly)", _frame("farm_balance_monthly", "Month")),
+        ],
+        "Cassava Sourcing": [
+            ("Procurement Schedule (Annual)", _frame("procurement_annual", "Year")),
+            ("Procurement Schedule (Monthly)", _frame("procurement_monthly", "Month")),
+        ],
+        "Product Routing": [
+            ("Product Output (Annual)", _frame("product_annual", "Year")),
+            ("Product Output (Monthly)", _frame("product_monthly", "Month")),
+            ("Processing Route Ledger", _frame("processing_ledger")),
+        ],
+        "Commercialisation": [
+            ("Commercialisation (Annual)", _frame("commercialization_annual", "Year")),
+            ("Commercialisation (Monthly)", _frame("commercialization_monthly", "Month")),
+            ("Product Sales & Inventory Ledger", _frame("commercialization_ledger")),
+            ("Product Revenue (Annual)", _frame("revenue_annual", "Year")),
+        ],
+        "Segments & Eliminations": [
+            ("Segment Results (Annual)", _frame("segment_annual", "Year")),
+            ("Intercompany Eliminations (Annual)", _frame("eliminations_annual", "Year")),
+            ("Segment Results (Monthly)", _frame("segment_monthly", "Month")),
+            ("Intercompany Eliminations (Monthly)", _frame("eliminations_monthly", "Month")),
+        ],
+        "Mass Balance": [
+            ("Mass Balance (Annual)", _frame("mass_balance_annual", "Year")),
+            ("Mass Balance (Monthly)", _frame("mass_balance_monthly", "Month")),
+            ("Validation Messages", _frame("validations")),
+        ],
+    }
+
+    for sheet, tables in sheet_tables.items():
+        next_row = 0
+        for title, frame in tables:
+            next_row = _write_table(
+                writer,
+                sheet,
+                frame,
+                title,
+                startrow=next_row,
+                index=False,
+            )
+
 
 
 def _write_financial_statements_page(writer: pd.ExcelWriter, results: Dict[str, object]) -> None:

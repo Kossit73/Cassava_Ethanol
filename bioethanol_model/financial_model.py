@@ -9,10 +9,15 @@ import numpy as np
 import pandas as pd
 
 from . import inputs
+from .integrated_cycle import IntegratedCycleOutput, build_integrated_cycle
 if TYPE_CHECKING:
     from .advanced_tools import AdvancedAnalyticsToolkit
 
 from .schedules import (
+    CostOutput,
+    ProductionOutput,
+    RevenueOutput,
+    WorkingCapitalOutput,
     compute_break_even,
     compute_cost_tables,
     compute_depreciation_schedule,
@@ -71,8 +76,12 @@ class CassavaBioethanolModel:
         ]
         return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
-    def _prepare_page_for_scenario(self, scenario: str) -> inputs.InputLandingPage:
-        page = copy.deepcopy(self.input_page)
+    def _prepare_page_for_scenario(
+        self,
+        scenario: str,
+        source_page: inputs.InputLandingPage | None = None,
+    ) -> inputs.InputLandingPage:
+        page = copy.deepcopy(source_page if source_page is not None else self.input_page)
         scenario = scenario.upper()
         global_inputs = page.global_inputs.model_frame
         if not global_inputs.empty and "Parameter" in global_inputs.columns:
@@ -87,13 +96,33 @@ class CassavaBioethanolModel:
             except (TypeError, ValueError):
                 return default
 
-        farm_cost = _get_global("Cassava farm cost per ton", 0.0)
-        purchase_cost = _get_global("Cassava purchase cost per ton", 0.0)
-        farm_share = float(np.clip(_get_global("Hybrid farm share", 0.0), 0.0, 1.0))
+        farm_share = float(
+            np.clip(_get_global("Hybrid farm share", 0.0), 0.0, 1.0)
+        )
+        cycle_plan = page.annual_cycle_plan.model_frame
+        if not cycle_plan.empty and "Hybrid Farm Share %" in cycle_plan.columns:
+            cycle_shares = pd.to_numeric(
+                cycle_plan["Hybrid Farm Share %"],
+                errors="coerce",
+            ).dropna()
+            cycle_shares = cycle_shares.map(
+                lambda value: value / 100.0 if abs(value) > 1.0 else value
+            )
+            if not cycle_shares.empty:
+                farm_share = float(np.clip(cycle_shares.mean(), 0.0, 1.0))
 
         invest_df = page.initial_investment.model_frame
         if not invest_df.empty and "Item" in invest_df.columns:
-            farm_mask = invest_df["Item"].astype(str).str.contains("farm", case=False, na=False)
+            farm_assets = {
+                str(value).strip().casefold()
+                for value in page.farm_capex.model_frame.get("Asset", pd.Series(dtype=object))
+                if str(value).strip()
+            }
+            item_names = invest_df["Item"].astype(str).str.strip().str.casefold()
+            farm_mask = (
+                item_names.isin(farm_assets)
+                | invest_df["Item"].astype(str).str.contains("farm", case=False, na=False)
+            )
             numeric_costs = pd.to_numeric(invest_df.loc[farm_mask, "Cost"], errors="coerce").fillna(0.0)
             if scenario == "BUY_ONLY":
                 invest_df.loc[farm_mask, "Cost"] = 0.0
@@ -140,19 +169,108 @@ class CassavaBioethanolModel:
         return page
 
 
-    def _materialize_required_defaults(self, page: inputs.InputLandingPage) -> None:
+    def _should_use_integrated_cycle(self, page: inputs.InputLandingPage) -> bool:
+        """Return whether the cycle-ledger model is enabled for this input page."""
+
+        frame = page.global_inputs.data
+        enabled = 1.0
+        if isinstance(frame, pd.DataFrame) and {"Parameter", "Value"}.issubset(frame.columns):
+            mask = (
+                frame["Parameter"].astype(str).str.strip().str.casefold()
+                == "integrated cycle model enabled"
+            )
+            if mask.any():
+                try:
+                    enabled = float(frame.loc[mask, "Value"].iloc[-1])
+                except (TypeError, ValueError):
+                    enabled = 1.0
+        if enabled < 0.5 or page.annual_cycle_plan.data.empty:
+            return False
+
+        # Backward compatibility: a saved legacy monthly schedule from an older
+        # workbook should remain authoritative until the new cycle assumptions
+        # are changed. Fresh defaults keep the monthly table as a placeholder,
+        # so the integrated cycle engine remains the default for new projects.
+        if not page.production_monthly.placeholder:
+            default_cycle = inputs.default_input_page().annual_cycle_plan.data
+            current_cycle = page.annual_cycle_plan.data.reset_index(drop=True)
+            if current_cycle.equals(default_cycle.reset_index(drop=True)):
+                return False
+        return True
+
+    def _materialize_required_defaults(
+        self,
+        page: inputs.InputLandingPage,
+        *,
+        integrated_cycle: bool = False,
+    ) -> None:
         """Use seeded default tables when placeholders are still active."""
 
         required_tables = [
             page.global_inputs,
             page.initial_investment,
             page.revenue_inputs,
-            page.production_monthly,
             page.loan_schedule,
         ]
+        if integrated_cycle:
+            required_tables.extend(
+                [
+                    page.annual_cycle_plan,
+                    page.farm_cost_assumptions,
+                    page.farm_capex,
+                    page.procurement_plan,
+                    page.product_routing,
+                    page.commercialization_plan,
+                    page.staff_positions,
+                    page.staff_costs_monthly,
+                    page.other_opex_monthly,
+                ]
+            )
+        else:
+            required_tables.append(page.production_monthly)
         for table in required_tables:
             if table.placeholder and table.data is not None and not table.data.empty:
                 table.set_data(table.data, mark_user_input=True)
+
+    def _sync_farm_capex_to_initial_investment(
+        self,
+        page: inputs.InputLandingPage,
+    ) -> Dict[str, object]:
+        """Keep FarmCo fixed assets inside the consolidated depreciation schedule."""
+
+        farm = page.farm_capex.model_frame
+        investment = page.initial_investment.model_frame
+        if farm.empty or not {"Asset", "Cost"}.issubset(farm.columns):
+            return {"applied": 0, "assets": []}
+        if investment.empty:
+            investment = pd.DataFrame(columns=page.initial_investment.columns)
+
+        working = investment.copy()
+        assets: list[str] = []
+        for _, row in farm.iterrows():
+            asset = str(row.get("Asset", "")).strip()
+            if not asset:
+                continue
+            item_names = working.get("Item", pd.Series(dtype=object)).astype(str).str.strip().str.casefold()
+            mask = item_names == asset.casefold()
+            values = {
+                "Item": asset,
+                "Cost": max(0.0, float(pd.to_numeric(pd.Series([row.get("Cost")]), errors="coerce").fillna(0.0).iloc[0])),
+                "Life (years)": max(0.0, float(pd.to_numeric(pd.Series([row.get("Life (years)")]), errors="coerce").fillna(0.0).iloc[0])),
+                "Depreciation Rate": None,
+                "Start Month": str(row.get("Start Month", page.projection.planning_start)),
+            }
+            if mask.any():
+                for column, value in values.items():
+                    if column in working.columns:
+                        working.loc[mask, column] = value
+            else:
+                working = pd.concat([working, pd.DataFrame([values])], ignore_index=True)
+            assets.append(asset)
+
+        if not working.equals(investment):
+            page.initial_investment.set_data(working, mark_user_input=True)
+        return {"applied": len(assets), "assets": assets}
 
     def _normalize_global_units(self, page: inputs.InputLandingPage) -> Dict[str, object]:
         """Normalize percent-like global inputs so both 12 and 0.12 are accepted."""
@@ -182,6 +300,10 @@ class CassavaBioethanolModel:
             "refinancing interest rate",
             "repricing fee rate",
             "break cost rate",
+            "raw cassava sorting reject %",
+            "residue recovery to feed %",
+            "farm transfer markup %",
+            "default annual production increment %",
             "cash sweep share",
         }
 
@@ -430,17 +552,39 @@ class CassavaBioethanolModel:
         page.loan_schedule.set_data(working, mark_user_input=True)
         return {"Loan Start Month Fixes": float(int(invalid_mask.sum()))}
 
-    def _validate_required_inputs(self, page: inputs.InputLandingPage) -> None:
+    def _validate_required_inputs(
+        self,
+        page: inputs.InputLandingPage,
+        *,
+        integrated_cycle: bool = False,
+    ) -> None:
         """Hard validation gate for investor-grade completeness checks."""
 
         missing: list[str] = []
         required_tables = [
             ("Global Inputs", page.global_inputs.model_frame),
-            ("Initial Investment", page.initial_investment.model_frame),
             ("Revenue Inputs", page.revenue_inputs.model_frame),
-            ("Production Monthly", page.production_monthly.model_frame),
+            ("Initial Investment", page.initial_investment.model_frame),
             ("Loan Schedule", page.loan_schedule.model_frame),
         ]
+        if integrated_cycle:
+            required_tables.extend(
+                [
+                    ("Annual Cycle Plan", page.annual_cycle_plan.model_frame),
+                    ("Farm Cost Assumptions", page.farm_cost_assumptions.model_frame),
+                    ("Farm Capex", page.farm_capex.model_frame),
+                    ("Procurement Plan", page.procurement_plan.model_frame),
+                    ("Product Routing", page.product_routing.model_frame),
+                    ("Commercialization Plan", page.commercialization_plan.model_frame),
+                ]
+            )
+        else:
+            required_tables.extend(
+                [
+                    ("Production Monthly", page.production_monthly.model_frame),
+                ]
+            )
+
         for name, frame in required_tables:
             if frame is None or frame.empty:
                 missing.append(name)
@@ -533,13 +677,48 @@ class CassavaBioethanolModel:
                     f"{projection_start.strftime('%Y-%m')} to {projection_end.strftime('%Y-%m')}"
                 )
 
+        if integrated_cycle:
+            cycle_frame = page.annual_cycle_plan.model_frame
+            _validate_year_column(cycle_frame, "Annual Cycle Plan")
+            for column in ("Planting Month", "Harvest Month", "Processing Start Month"):
+                _validate_month_column(cycle_frame, "Annual Cycle Plan", column)
+            cultivation = pd.to_numeric(cycle_frame.get("Cultivation Months"), errors="coerce")
+            if cultivation.isna().any() or not cultivation.between(9, 12).all():
+                raise ValueError("Annual Cycle Plan: Cultivation Months must be between 9 and 12")
+            processing = pd.to_numeric(cycle_frame.get("Processing Months"), errors="coerce")
+            if processing.isna().any() or not (processing == 3).all():
+                raise ValueError("Annual Cycle Plan: Processing Months must equal 3")
+
+            routing = page.product_routing.model_frame.copy()
+            required_products = {
+                "fuel ethanol",
+                "hqcf",
+                "garri",
+                "industrial starch",
+                "dextrin",
+                "glucose syrup",
+                "sorbitol",
+                "animal feed",
+            }
+            supplied = {
+                str(value).strip().casefold()
+                for value in routing.get("Output Stream", pd.Series(dtype=object))
+            }
+            missing_products = sorted(required_products - supplied)
+            if missing_products:
+                raise ValueError(
+                    "Product Routing: missing required saleable routes: "
+                    + ", ".join(missing_products)
+                )
+
         _validate_year_column(page.production_annual.model_frame, "Production Annual")
         _validate_year_column(
             page.inflation_schedule.model_frame,
             "Inflation Schedule",
             enforce_projection_start=False,
         )
-        _validate_month_column(page.production_monthly.model_frame, "Production Monthly", "Start Month")
+        if not integrated_cycle:
+            _validate_month_column(page.production_monthly.model_frame, "Production Monthly", "Start Month")
         _validate_month_column(page.direct_costs_monthly.model_frame, "Direct Costs Monthly", "Month")
         _validate_month_column(page.staff_costs_monthly.model_frame, "Staff Costs Monthly", "Month")
         _validate_month_column(page.other_opex_monthly.model_frame, "Other Opex Monthly", "Month")
@@ -668,6 +847,8 @@ class CassavaBioethanolModel:
         revenue,
         cost_outputs: Dict[str, object],
         loan_schedule,
+        *,
+        integrated_cycle: bool = False,
     ) -> Dict[str, float]:
         """Integrate risk register and commercial contract assumptions."""
 
@@ -786,17 +967,52 @@ class CassavaBioethanolModel:
         monthly_rev = revenue.monthly.copy()
         if "Total Revenue" in monthly_rev.columns and not monthly_rev.empty:
             total_rev = pd.to_numeric(monthly_rev["Total Revenue"], errors="coerce").fillna(0.0)
-            volume = pd.to_numeric(getattr(production, "monthly", pd.DataFrame()).get("Ethanol litres"), errors="coerce").fillna(0.0)
-            implied_price = total_rev / volume.replace(0.0, np.nan)
-            adjusted_price = implied_price.clip(lower=floor_price if floor_price > 0 else None, upper=ceiling_price)
-            price_factor = (adjusted_price / implied_price.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(1.0)
-            top_factor = np.clip(take_or_pay + (1 - take_or_pay) * 0.7, 0.0, 1.0)
+            volume = pd.to_numeric(
+                getattr(production, "monthly", pd.DataFrame()).get("Ethanol litres"),
+                errors="coerce",
+            ).fillna(0.0)
+            if integrated_cycle:
+                price_factor = pd.Series(1.0, index=monthly_rev.index)
+                top_factor = 1.0
+            else:
+                implied_price = total_rev / volume.replace(0.0, np.nan)
+                adjusted_price = implied_price.clip(
+                    lower=floor_price if floor_price > 0 else None,
+                    upper=ceiling_price,
+                )
+                price_factor = (
+                    adjusted_price / implied_price.replace(0.0, np.nan)
+                ).replace([np.inf, -np.inf], np.nan).fillna(1.0)
+                top_factor = np.clip(
+                    take_or_pay + (1 - take_or_pay) * 0.7,
+                    0.0,
+                    1.0,
+                )
             price_risk_factor = max(0.0, 1.0 - price_stress)
             volume_risk_factor = max(0.0, 1.0 - volume_stress)
             schedule_risk_factor = max(0.0, 1.0 - 0.5 * schedule_stress)
-            overall = price_factor * top_factor * price_risk_factor * volume_risk_factor * schedule_risk_factor
-            monthly_rev = monthly_rev.mul(overall, axis=0)
-            monthly_rev["Total Revenue"] = pd.to_numeric(monthly_rev.sum(axis=1), errors="coerce").fillna(0.0)
+            overall = (
+                price_factor
+                * top_factor
+                * price_risk_factor
+                * volume_risk_factor
+                * schedule_risk_factor
+            )
+            revenue_columns = [
+                column for column in monthly_rev.columns if column != "Total Revenue"
+            ]
+            if integrated_cycle:
+                monthly_rev.loc[:, revenue_columns] = monthly_rev[revenue_columns].mul(
+                    overall,
+                    axis=0,
+                )
+                monthly_rev["Total Revenue"] = monthly_rev[revenue_columns].sum(axis=1)
+            else:
+                # Preserve the historical legacy-mode contract for previously
+                # saved workbooks. Integrated mode uses the corrected product-only
+                # roll-up above.
+                monthly_rev = monthly_rev.mul(overall, axis=0)
+                monthly_rev["Total Revenue"] = monthly_rev.sum(axis=1)
 
             schedule_delay_months = int(round(duration_vectors["schedule"] * schedule_stress))
             if schedule_delay_months > 0:
@@ -820,7 +1036,9 @@ class CassavaBioethanolModel:
                 production.annual.index.name = "Year"
 
         direct = cost_outputs.get("Direct Costs")
-        feedstock_saving = contracted_share * contracted_discount
+        feedstock_saving = (
+            0.0 if integrated_cycle else contracted_share * contracted_discount
+        )
         risk_cost_uplift = 0.2 * risk_intensity + 0.35 * cost_stress
         cost_multiplier = max(0.0, 1.0 - feedstock_saving + risk_cost_uplift)
         if direct is not None and hasattr(direct, "monthly"):
@@ -1277,15 +1495,29 @@ class CassavaBioethanolModel:
         if cached and cached[0] == signature:
             return copy.deepcopy(cached[1])
 
-        page = self._prepare_page_for_scenario(scenario_name)
-        self._materialize_required_defaults(page)
+        base_page = copy.deepcopy(self.input_page)
+        integrated_mode = self._should_use_integrated_cycle(base_page)
+        self._materialize_required_defaults(
+            base_page,
+            integrated_cycle=integrated_mode,
+        )
+        farm_capex_sync_audit = (
+            self._sync_farm_capex_to_initial_investment(base_page)
+            if integrated_mode
+            else {"applied": 0, "assets": []}
+        )
+        page = self._prepare_page_for_scenario(scenario_name, source_page=base_page)
         assumption_audit = self._normalize_global_units(page)
         global_automation_audit = self._auto_balance_global_inputs(page)
         tax_schedule_sync_audit = self._sync_tax_schedule_from_global_rate(page)
-        production_annual_sync_audit = self._sync_production_annual_from_monthly(page)
+        production_annual_sync_audit = (
+            {"applied": False, "rows": 0}
+            if integrated_mode
+            else self._sync_production_annual_from_monthly(page)
+        )
         loan_start_sanitize_audit = self._sanitize_loan_schedule_start_month(page)
         debt_envelope_adjustment = self._align_debt_to_capex_envelope(page)
-        self._validate_required_inputs(page)
+        self._validate_required_inputs(page, integrated_cycle=integrated_mode)
         self._apply_debt_strategy_toggles(page)
 
         staff_schedule = self._apply_staff_schedule(page)
@@ -1299,30 +1531,140 @@ class CassavaBioethanolModel:
 
         planning_start = projection.planning_start_timestamp
 
-        production = compute_production_tables(
-            page.production_monthly.model_frame,
-            projection.start_year,
-            projection.end_year,
-            planning_start=planning_start,
-        )
-        feedstock_sync = self._sync_cassava_feedstock_costs(page, production, scenario_name)
+        integrated_cycle_output: IntegratedCycleOutput | None = None
+        if integrated_mode:
+            integrated_cycle_output = build_integrated_cycle(
+                page,
+                scenario_name,
+                projection.start_year,
+                projection.end_year,
+                planning_start=planning_start,
+            )
+            production = ProductionOutput(
+                integrated_cycle_output.monthly_physical.copy(),
+                integrated_cycle_output.annual_physical.copy(),
+            )
+            revenue = RevenueOutput(
+                integrated_cycle_output.revenue_monthly.copy(),
+                integrated_cycle_output.revenue_annual.copy(),
+            )
 
-        revenue = compute_revenue_schedule(
-            production,
-            page.revenue_inputs.model_frame,
-            page.inflation_schedule.model_frame,
-            planning_start=planning_start,
-        )
+            annual_input = integrated_cycle_output.annual_physical.reset_index()
+            annual_input = annual_input.loc[
+                annual_input["Year"] >= int(planning_start.year)
+            ].copy()
+            annual_input["Start Month"] = annual_input["Year"].map(
+                lambda year: f"{int(year):04d}-01"
+            )
+            annual_input = annual_input.rename(
+                columns={
+                    "Farm Cassava Delivered ton": "Farm Cassava ton",
+                    "Purchased Cassava Delivered ton": "Purchased Cassava ton",
+                }
+            )
+            for column in page.production_annual.columns:
+                if column not in annual_input.columns:
+                    annual_input[column] = 0.0
+            page.production_annual.set_data(
+                annual_input[page.production_annual.columns],
+                mark_user_input=True,
+            )
+            production_annual_sync_audit = {
+                "applied": True,
+                "rows": int(len(annual_input)),
+                "source": "Integrated annual crop-cycle ledger",
+            }
 
-        cost_outputs = compute_cost_tables(
-            page.direct_costs_monthly.model_frame,
-            page.staff_costs_monthly.model_frame,
-            page.other_opex_monthly.model_frame,
-            page.inflation_schedule.model_frame,
-            projection.start_year,
-            projection.end_year,
-            planning_start=planning_start,
-        )
+            processed_ton = float(
+                integrated_cycle_output.monthly_physical["Cassava Processed ton"].sum()
+            )
+            feedstock_cost = float(
+                integrated_cycle_output.farm_monthly["Total Farm Operating Cost"].sum()
+                + integrated_cycle_output.procurement_monthly[
+                    "Total Purchased Feedstock Cost"
+                ].sum()
+            )
+            feedstock_sync = {
+                "Cassava Feedstock Cost Per Ton (effective)": (
+                    feedstock_cost / processed_ton if processed_ton > 0 else 0.0
+                )
+            }
+
+            direct_inputs = page.direct_costs_monthly.model_frame.copy()
+            if not direct_inputs.empty and "Cost Category" in direct_inputs.columns:
+                replaced = {"cassava feedstock", "enzymes & chemicals", "energy cost"}
+                direct_inputs = direct_inputs.loc[
+                    ~direct_inputs["Cost Category"].astype(str).str.strip().str.casefold().isin(replaced)
+                ]
+            staff_inputs = page.staff_costs_monthly.model_frame.copy()
+            if not staff_inputs.empty and "Department" in staff_inputs.columns:
+                staff_inputs = staff_inputs.loc[
+                    ~staff_inputs["Department"].astype(str).str.contains(
+                        "farm", case=False, na=False
+                    )
+                ]
+            other_inputs = page.other_opex_monthly.model_frame.copy()
+            if not other_inputs.empty and "Category" in other_inputs.columns:
+                replaced_opex = {"energy cost", "sales & marketing"}
+                other_inputs = other_inputs.loc[
+                    ~other_inputs["Category"].astype(str).str.strip().str.casefold().isin(replaced_opex)
+                ]
+
+            cost_outputs = compute_cost_tables(
+                direct_inputs,
+                staff_inputs,
+                other_inputs,
+                page.inflation_schedule.model_frame,
+                projection.start_year,
+                projection.end_year,
+                planning_start=planning_start,
+            )
+            base_direct = cost_outputs["Direct Costs"].monthly.reindex(
+                integrated_cycle_output.direct_cost_monthly.index
+            ).fillna(0.0)
+            integrated_direct = integrated_cycle_output.direct_cost_monthly.copy()
+            combined_direct = (
+                pd.concat([base_direct, integrated_direct], axis=1)
+                .T.groupby(level=0)
+                .sum()
+                .T
+            )
+            combined_direct.index.name = "Month"
+            combined_direct_annual = combined_direct.groupby(
+                combined_direct.index.year
+            ).sum()
+            combined_direct_annual.index.name = "Year"
+            cost_outputs["Direct Costs"] = CostOutput(
+                combined_direct,
+                combined_direct_annual,
+            )
+        else:
+            production = compute_production_tables(
+                page.production_monthly.model_frame,
+                projection.start_year,
+                projection.end_year,
+                planning_start=planning_start,
+            )
+            feedstock_sync = self._sync_cassava_feedstock_costs(
+                page,
+                production,
+                scenario_name,
+            )
+            revenue = compute_revenue_schedule(
+                production,
+                page.revenue_inputs.model_frame,
+                page.inflation_schedule.model_frame,
+                planning_start=planning_start,
+            )
+            cost_outputs = compute_cost_tables(
+                page.direct_costs_monthly.model_frame,
+                page.staff_costs_monthly.model_frame,
+                page.other_opex_monthly.model_frame,
+                page.inflation_schedule.model_frame,
+                projection.start_year,
+                projection.end_year,
+                planning_start=planning_start,
+            )
 
         loan_schedule = compute_loan_schedule(
             page.loan_schedule.model_frame,
@@ -1330,12 +1672,23 @@ class CassavaBioethanolModel:
             projection.end_year,
         )
 
-        working_capital = compute_working_capital(
-            revenue,
-            cost_outputs,
-            page.accounts_receivable.model_frame,
-            page.inventory_payable.model_frame,
-        )
+        if integrated_mode and integrated_cycle_output is not None:
+            working_capital_monthly = integrated_cycle_output.working_capital_monthly.copy()
+            working_capital_annual = working_capital_monthly.groupby(
+                working_capital_monthly.index.year
+            ).last()
+            working_capital_annual.index.name = "Year"
+            working_capital = WorkingCapitalOutput(
+                working_capital_monthly,
+                working_capital_annual,
+            )
+        else:
+            working_capital = compute_working_capital(
+                revenue,
+                cost_outputs,
+                page.accounts_receivable.model_frame,
+                page.inventory_payable.model_frame,
+            )
 
         global_inputs = page.global_inputs.model_frame.set_index("Parameter")
 
@@ -1349,7 +1702,14 @@ class CassavaBioethanolModel:
 
         tax_rate = _get_global("Corporate tax rate", 0.0)
 
-        risk_commercial = self._apply_risk_and_contract_mechanics(page, production, revenue, cost_outputs, loan_schedule)
+        risk_commercial = self._apply_risk_and_contract_mechanics(
+            page,
+            production,
+            revenue,
+            cost_outputs,
+            loan_schedule,
+            integrated_cycle=integrated_mode,
+        )
 
         financials = compute_financial_statements(
             revenue,
@@ -1433,6 +1793,11 @@ class CassavaBioethanolModel:
                 **loan_start_sanitize_audit,
                 **debt_envelope_adjustment,
                 **feedstock_sync,
+                **(
+                    integrated_cycle_output.metrics
+                    if integrated_cycle_output is not None
+                    else {"Integrated Cycle Model Enabled": 0.0}
+                ),
                 **risk_commercial,
                 **debt_covenants,
                 **self._compute_accounting_invariants(financials, loan_schedule),
@@ -1468,6 +1833,7 @@ class CassavaBioethanolModel:
             "payback": payback,
             "scenario": scenario_name,
             "input_page_snapshot": page,
+            "integrated_cycle": integrated_cycle_output,
             "staff_schedule": staff_schedule,
             "assumption_quality_audit": assumption_audit,
             "automation_audit": {
@@ -1475,6 +1841,7 @@ class CassavaBioethanolModel:
                 "tax_schedule_sync": tax_schedule_sync_audit,
                 "production_annual_sync": production_annual_sync_audit,
                 "loan_start_month_sanitize": loan_start_sanitize_audit,
+                "farm_capex_sync": farm_capex_sync_audit,
             },
         }
         self._scenario_cache[scenario_name] = (signature, copy.deepcopy(results))

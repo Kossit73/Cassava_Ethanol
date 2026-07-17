@@ -86,7 +86,19 @@ _HERO_IMAGE_PATH = Path(__file__).resolve().parent / "assets" / "cassava_bioetha
 # keyed by landing-page table name to keep the behaviour scoped and explicit.
 DERIVED_COLUMN_MAP = {
     "Production Monthly": {"Ethanol litres", "Animal Feed ton"},
-    "Production Annual": {"Ethanol litres", "Animal Feed ton"},
+    "Production Annual": {
+        "Cassava ton",
+        "Farm Cassava ton",
+        "Purchased Cassava ton",
+        "Ethanol litres",
+        "HQCF ton",
+        "Garri ton",
+        "Industrial Starch ton",
+        "Dextrin ton",
+        "Glucose Syrup ton",
+        "Sorbitol ton",
+        "Animal Feed ton",
+    },
 }
 
 
@@ -140,9 +152,72 @@ CATEGORY_SELECT_OPTIONS = {
         ],
         "allow_custom": True,
     },
+    ("Farm Cost Assumptions", "Stage"): {
+        "options": [
+            "Land Preparation",
+            "Planting",
+            "Cultivation",
+            "Harvesting",
+            "Transport",
+            "Administration",
+        ],
+        "allow_custom": True,
+    },
+    ("Farm Cost Assumptions", "Basis"): {
+        "options": [
+            "USD/ha",
+            "USD/ha/month",
+            "USD/ton harvested",
+            "USD/ton",
+            "USD/month",
+            "USD/cycle",
+        ],
+        "allow_custom": True,
+    },
+    ("Product Routing", "Input Stream"): {
+        "options": [
+            "Cassava",
+            "Starch Pool",
+            "Glucose Syrup Pool",
+            "Residue Pool",
+        ],
+        "allow_custom": True,
+    },
+    ("Product Routing", "Output Type"): {
+        "options": ["Product", "Intermediate"],
+        "allow_custom": False,
+    },
+    ("Product Routing", "Output Unit"): {
+        "options": ["ton", "litres"],
+        "allow_custom": True,
+    },
+    ("Commercialization Plan", "Product"): {
+        "options": [
+            "Fuel Ethanol",
+            "HQCF",
+            "Garri",
+            "Industrial Starch",
+            "Dextrin",
+            "Glucose Syrup",
+            "Sorbitol",
+            "Animal Feed",
+        ],
+        "allow_custom": True,
+    },
+    ("Commercialization Plan", "Unit"): {
+        "options": ["ton", "litres"],
+        "allow_custom": True,
+    },
 }
 
 YEARLY_INCREMENT_CONFIG = {
+    "Annual Cycle Plan": {
+        "date_column": "Year",
+        "frequency": "Y",
+        "value_columns": ["Cultivated Hectares", "Cassava Processing Target ton"],
+        "match_columns": ["Cycle ID"],
+        "description": "Compound cultivated area and processing throughput across production years.",
+    },
     "Production Monthly": {
         "date_column": "Start Month",
         "frequency": "M",
@@ -207,6 +282,31 @@ YEARLY_INCREMENT_CONFIG = {
         "description": "Escalate the selected facility amount year over year.",
     },
 }
+
+def _integrated_cycle_enabled(page: InputLandingPage) -> bool:
+    """Read the cycle-ledger switch without requiring placeholder materialization."""
+
+    frame = page.global_inputs.data
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return False
+    if not {"Parameter", "Value"}.issubset(frame.columns):
+        return False
+    mask = (
+        frame["Parameter"].astype(str).str.strip().str.casefold()
+        == "integrated cycle model enabled"
+    )
+    if not mask.any():
+        return False
+    value = pd.to_numeric(frame.loc[mask, "Value"], errors="coerce").dropna()
+    enabled = bool(not value.empty and float(value.iloc[-1]) >= 0.5)
+    if enabled and not page.production_monthly.placeholder:
+        default_cycle = default_input_page().annual_cycle_plan.data.reset_index(drop=True)
+        current_cycle = page.annual_cycle_plan.data.reset_index(drop=True)
+        if current_cycle.equals(default_cycle):
+            return False
+    return enabled
+
+
 
 
 def _inject_app_theme() -> None:
@@ -443,14 +543,14 @@ def _render_model_hero(selected_scenario: str) -> None:
                 <span class="cassava-chip">Cassava Ethanol Strategy Studio</span>
                 <h1>Cassava Bioethanol Financial Model</h1>
                 <p>
-                    A redesigned operating cockpit built for lenders, investors, and project sponsors:
-                    centralised inputs, cleaner analytical flow, disciplined scenario review, and an
-                    export-ready workbook for investment committee use.
+                    An integrated crop-to-market model built around 9-12 month cassava cycles,
+                    a three-month transformation window, standalone FarmCo economics, and
+                    commercialization of ethanol, food, starch, derivative, and circular-feed products.
                 </p>
                 <div class="cassava-meta">
                     Active scenario: <strong>{html.escape(selected_scenario)}</strong> |
-                    Feedstock, production, financing, and downside-risk views are organised into a
-                    tighter executive workflow.
+                    Farm, Buy, and Hybrid sourcing flow through one mass-balanced monthly ledger
+                    and consolidated financial workflow.
                 </div>
             </div>
         </section>
@@ -1321,11 +1421,26 @@ def _sync_projection_from_session(page: InputLandingPage) -> None:
     # new projection horizon and don't fail the _validate_year_column check.
     annual_tables_to_shift = [
         page.inflation_schedule,
+        page.annual_cycle_plan,
         page.production_annual,
     ]
     for tbl in annual_tables_to_shift:
         if _shift_year_column(tbl, year_delta):
             any_shifted = True
+    if year_delta != 0 and not page.annual_cycle_plan.data.empty:
+        for column in ("Planting Month", "Harvest Month", "Processing Start Month"):
+            if column not in page.annual_cycle_plan.data.columns:
+                continue
+            try:
+                periods = pd.PeriodIndex(
+                    page.annual_cycle_plan.data[column].astype(str),
+                    freq="M",
+                )
+            except Exception:
+                continue
+            page.annual_cycle_plan.data.loc[:, column] = (
+                periods + year_delta * 12
+            ).astype(str)
 
     if (
         any_shifted
@@ -1610,6 +1725,9 @@ def _auto_compound_production(page: InputLandingPage) -> None:
         updated = True
 
     st.session_state["production_compound_cache"] = new_monthly.copy()
+
+    if _integrated_cycle_enabled(page):
+        return
 
     annual = production.annual.copy()
     annual.index.name = "Year"
@@ -2343,6 +2461,68 @@ def _validate_workspace_draft(
             elif float(value) < 0.0:
                 errors.append(f"Row {idx + 1}: Cassava ton cannot be negative.")
 
+    if table.name == "Annual Cycle Plan":
+        for idx in indices:
+            cultivation = pd.to_numeric(
+                pd.Series([df.at[idx, "Cultivation Months"]]),
+                errors="coerce",
+            ).iloc[0]
+            processing = pd.to_numeric(
+                pd.Series([df.at[idx, "Processing Months"]]),
+                errors="coerce",
+            ).iloc[0]
+            if pd.isna(cultivation) or not 9 <= float(cultivation) <= 12:
+                errors.append(
+                    f"Row {idx + 1}: Cultivation Months must be between 9 and 12."
+                )
+            if pd.isna(processing) or int(round(float(processing))) != 3:
+                errors.append(
+                    f"Row {idx + 1}: Processing Months must equal 3."
+                )
+            try:
+                planting = pd.Period(str(df.at[idx, "Planting Month"]), freq="M")
+                harvest = pd.Period(str(df.at[idx, "Harvest Month"]), freq="M")
+                processing_start = pd.Period(
+                    str(df.at[idx, "Processing Start Month"]),
+                    freq="M",
+                )
+                if pd.notna(cultivation):
+                    expected_harvest = planting + int(round(float(cultivation))) - 1
+                    if harvest != expected_harvest:
+                        errors.append(
+                            f"Row {idx + 1}: Harvest Month must match crop maturity "
+                            f"({expected_harvest})."
+                        )
+                if processing_start <= harvest:
+                    errors.append(
+                        f"Row {idx + 1}: Processing Start Month must follow Harvest Month."
+                    )
+            except Exception:
+                errors.append(
+                    f"Row {idx + 1}: cycle planting, harvest, and processing months must be valid."
+                )
+
+    if table.name == "Product Routing" and not df.empty:
+        working = df.copy()
+        working["_stage"] = pd.to_numeric(working["Stage Order"], errors="coerce")
+        working["_allocation"] = pd.to_numeric(
+            working["Allocation %"],
+            errors="coerce",
+        )
+        working.loc[working["_allocation"].abs() > 1.0, "_allocation"] /= 100.0
+        if working["_stage"].isna().any() or (working["_stage"] < 1).any():
+            errors.append("Product Routing: Stage Order must be a positive number.")
+        if working["_allocation"].isna().any() or (working["_allocation"] < 0).any():
+            errors.append("Product Routing: Allocation % must be zero or positive.")
+        totals = working.groupby(
+            ["_stage", working["Input Stream"].astype(str).str.strip().str.casefold()]
+        )["_allocation"].sum()
+        if (totals > 1.0 + 1e-9).any():
+            errors.append(
+                "Product Routing: allocations from an input stream cannot exceed 100% within a stage."
+            )
+
+
     return list(dict.fromkeys(errors))
 
 
@@ -2807,8 +2987,9 @@ def _legacy_edit_workspace(page: InputLandingPage) -> None:
 
     if table.name == "Production Annual":
         st.info(
-            "Production Annual is derived from Production Monthly and stays auto-synced. "
-            "Edit Production Monthly to change annual totals."
+            "Production Annual is a calculated output. In integrated mode it is derived from "
+            "the Annual Cycle Plan, sourcing mix, and product-routing yields; in legacy mode it "
+            "is derived from Production Monthly."
         )
         st.dataframe(table.data, use_container_width=True, hide_index=True)
         return
@@ -2918,8 +3099,9 @@ def _edit_workspace(page: InputLandingPage) -> None:
 
     if table.name == "Production Annual":
         st.info(
-            "Production Annual is calculated from the saved Production Monthly schedule. "
-            "Select Production Monthly to edit production and annual increments."
+            "Production Annual is calculated from the saved Annual Cycle Plan in integrated mode "
+            "(or Production Monthly in legacy mode). Edit the cycle, sourcing, routing, and "
+            "commercialization assumptions to change annual output."
         )
         st.dataframe(table.data, use_container_width=True, hide_index=True)
         return
@@ -2931,6 +3113,26 @@ def _edit_workspace(page: InputLandingPage) -> None:
         st.success(str(flash_message))
 
     draft = _workspace_draft(table)
+    if table.name == "Annual Cycle Plan":
+        st.info(
+            "Each row is a cycle anchor. The model enforces 9-12 cultivation months, "
+            "a three-month transformation window, and compounds Cultivated Hectares "
+            "and Cassava Processing Target ton using Annual Increment % through the "
+            "remaining projection years."
+        )
+    elif table.name == "Product Routing":
+        st.info(
+            "Routing is hierarchical: Cassava feeds final products and the Starch Pool; "
+            "Starch Pool feeds Industrial Starch, Dextrin, and Glucose Syrup Pool; "
+            "Glucose Syrup Pool feeds Glucose Syrup and Sorbitol; residues feed Animal Feed."
+        )
+    elif table.name == "Production Monthly" and _integrated_cycle_enabled(page):
+        st.warning(
+            "This is the legacy compatibility schedule. It is ignored while the integrated "
+            "cycle model switch is enabled."
+        )
+
+
     dirty_key = _workspace_state_key(table, "dirty")
     source_key = _workspace_state_key(table, "source_signature")
     is_dirty = bool(st.session_state.get(dirty_key, False))
@@ -3448,14 +3650,18 @@ def _render_table(
                 )
 
         if table.name == "Production Monthly":
-            st.caption(
-                "Edit **Cassava ton** (and optional Growth %) for any month. The model will automatically recompute the matching "
-                "ethanol litres and animal-feed tonnage and roll the results into the annual production table."
-            )
+            if _integrated_cycle_enabled(page):
+                st.caption(
+                    "Legacy compatibility schedule: disabled while the integrated cycle model is enabled."
+                )
+            else:
+                st.caption(
+                    "Edit Cassava ton and Growth %; legacy ethanol and feed outputs update automatically."
+                )
         elif table.name == "Production Annual":
             st.caption(
-                "These annual totals are derived from the monthly production schedule. Update the monthly table to change the "
-                "values shown here."
+                "Calculated annual output from the integrated crop-cycle, sourcing, and routing ledger "
+                "(or from Production Monthly when legacy mode is selected)."
             )
 
         if cache_key not in st.session_state:
@@ -3595,6 +3801,125 @@ def _safe_area_chart(data: pd.DataFrame | pd.Series, *, title: str | None = None
     st.plotly_chart(fig, use_container_width=True, key=_next_chart_key("area_fallback"))
     st.caption("Rendered with Plotly fallback because Streamlit area_chart backend is unavailable in this environment.")
 
+def _render_integrated_cycle_results(results: Dict[str, object]) -> None:
+    """Render the complete crop-cycle, FarmCo, and product-chain audit trail."""
+
+    integrated = results.get("integrated_cycle")
+    if integrated is None:
+        return
+
+    st.markdown("### Integrated Cassava Cycle & Product Chain")
+    metrics = getattr(integrated, "metrics", {})
+    cols = st.columns(5)
+    cols[0].metric(
+        "Farm cassava delivered",
+        f"{float(metrics.get('Farm Cassava Delivered (ton)', 0.0)):,.0f} t",
+    )
+    cols[1].metric(
+        "Purchased cassava delivered",
+        f"{float(metrics.get('Purchased Cassava Delivered (ton)', 0.0)):,.0f} t",
+    )
+    cols[2].metric(
+        "Farm transfer price",
+        _format_currency(metrics.get("Farm Transfer Cost Per Ton")),
+    )
+    cols[3].metric(
+        "External product revenue",
+        _format_currency(metrics.get("Product Revenue")),
+    )
+    cols[4].metric(
+        "Mass balance",
+        "Passed" if float(metrics.get("Mass Balance Passed", 0.0)) >= 1.0 else "Review",
+    )
+
+    def _show(frame: object, *, height: int = 300) -> None:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            st.info("No schedule is available for this selection.")
+            return
+        display = frame.copy()
+        if not isinstance(display.index, pd.RangeIndex):
+            index_name = display.index.name or "Period"
+            display.index.name = index_name
+            display = display.reset_index()
+        st.dataframe(
+            display,
+            use_container_width=True,
+            hide_index=True,
+            height=height,
+        )
+
+    tabs = st.tabs(
+        [
+            "Cycle Plan",
+            "FarmCo",
+            "Sourcing",
+            "Products & Sales",
+            "Segments",
+            "Mass Balance",
+        ]
+    )
+    with tabs[0]:
+        st.caption(
+            "Annual planting anchors are expanded internally into monthly cultivation, "
+            "harvest, and three-month processing windows."
+        )
+        _show(getattr(integrated, "cycle_summary", None), height=340)
+        with st.expander("Monthly physical ledger"):
+            _show(getattr(integrated, "monthly_physical", None), height=360)
+
+    with tabs[1]:
+        farm_tabs = st.tabs(
+            ["Farm Operations", "Income Statement", "Cash Flow", "Balance Sheet"]
+        )
+        with farm_tabs[0]:
+            _show(getattr(integrated, "farm_annual", None))
+        with farm_tabs[1]:
+            _show(getattr(integrated, "farm_income_annual", None))
+        with farm_tabs[2]:
+            _show(getattr(integrated, "farm_cashflow_annual", None))
+        with farm_tabs[3]:
+            _show(getattr(integrated, "farm_balance_annual", None))
+
+    with tabs[2]:
+        _show(getattr(integrated, "procurement_annual", None))
+        with st.expander("Monthly procurement and payable schedule"):
+            _show(getattr(integrated, "procurement_monthly", None), height=360)
+
+    with tabs[3]:
+        product_tabs = st.tabs(
+            ["Production", "Commercialization", "Processing Route Ledger"]
+        )
+        with product_tabs[0]:
+            _show(getattr(integrated, "product_annual", None))
+        with product_tabs[1]:
+            _show(getattr(integrated, "commercialization_annual", None))
+            with st.expander("Product sales, inventory, pricing, and demand ledger"):
+                _show(
+                    getattr(integrated, "commercialization_ledger", None),
+                    height=420,
+                )
+        with product_tabs[2]:
+            _show(getattr(integrated, "processing_ledger", None), height=420)
+
+    with tabs[4]:
+        st.caption(
+            "FarmCo transfer revenue and ProcessingCo transfer cost cancel in consolidation."
+        )
+        _show(getattr(integrated, "segment_annual", None))
+        st.markdown("**Intercompany eliminations**")
+        _show(getattr(integrated, "eliminations_annual", None))
+
+    with tabs[5]:
+        _show(getattr(integrated, "mass_balance_annual", None))
+        validations = getattr(integrated, "validations", None)
+        if isinstance(validations, pd.DataFrame) and not validations.empty:
+            st.markdown("**Validation messages**")
+            _show(validations, height=260)
+        else:
+            st.success("No cycle, route, commercialization, or mass-balance issues were detected.")
+
+
+
 def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object]) -> None:
     metrics = results["metrics"]
     revenue = results["revenue"]
@@ -3612,6 +3937,8 @@ def _render_key_metrics(model: CassavaBioethanolModel, results: Dict[str, object
     col3.metric("Equity IRR (annual)", _format_rate(_annualise(metrics.get("Equity IRR"))))
     payback_years = metrics.get("Payback Period (years)")
     col4.metric("Payback Period (years)", f"{payback_years:,.1f}" if payback_years and not pd.isna(payback_years) else "n/a")
+
+    _render_integrated_cycle_results(results)
 
     st.markdown("### Assumptions Snapshot")
     assumption_snapshot = pd.DataFrame(
@@ -4962,7 +5289,7 @@ def _compose_business_plan(
 
 ## 1. Executive Summary
 This plan is generated from the integrated cassava-ethanol financial model and RAG evidence base for scenario **{scenario}**. [Source ID: METRIC::Scenario]
-The current investment thesis is supported by diversified revenue (fuel ethanol + animal feed), integrated debt-service diagnostics, and projection-consistent forecasting. [Source ID: TABLE::Revenue Annual + METRIC::DSCR (min)]
+The investment thesis is tested across bioethanol, HQCF, Garri, industrial starch, dextrin, glucose syrup, sorbitol, and circular animal feed, with integrated debt-service diagnostics and projection-consistent forecasting. [Source ID: TABLE::Revenue Annual + METRIC::DSCR (min)]
 
 ## 2. Investment Highlights and Key Metrics
 ### Professional Interpretation
@@ -4977,10 +5304,10 @@ Interpretation: this dashboard is the decision core for equity return quality, d
 
 ## 3. Market, Commercial Strategy, and Operations
 ### 3.1 Commercial Positioning
-The model embeds offtake floor/ceiling assumptions, take-or-pay coverage, and contracted feedstock mechanisms to reflect realistic contract economics. [Source ID: TABLE::Input Assumptions]
+The model applies product-level demand, offtake shares, prices, packaging, distribution, storage loss, inventory ageing, and receivable terms, alongside contracted and open-market feedstock procurement. [Source ID: TABLE::Input Assumptions]
 
 ### 3.2 Operational Configuration
-Production planning, capex, staffing, opex, and working-capital assumptions are integrated into three-statement outputs and debt metrics. [Source ID: TABLE::Production Annual + TABLE::Financial Performance]
+Annual crop-cycle anchors are converted into a monthly ledger with 9-12 cultivation months, staged harvest, a three-month transformation window, Farm/Buy/Hybrid sourcing, product mass balance, FarmCo transfer pricing, and consolidated three-statement outputs. [Source ID: TABLE::Production Annual + TABLE::Financial Performance]
 
 ## 4. Annual Financial Statements (Reproduced)
 ### 4.1 Annual Income Statement
