@@ -89,6 +89,30 @@ def test_saved_row_stays_in_draft_until_table_commit(monkeypatch):
     assert reset.at[0, "Amount"] == pytest.approx(100.0)
 
 
+def test_product_routing_row_labels_include_stage_and_output_name():
+    table = EditableTable(
+        "Product Routing",
+        ["Stage Order", "Input Stream", "Output Stream"],
+        pd.DataFrame(
+            [
+                {
+                    "Stage Order": 1.0,
+                    "Input Stream": "Cassava",
+                    "Output Stream": "Fuel Ethanol",
+                },
+                {
+                    "Stage Order": 2,
+                    "Input Stream": "Starch Pool",
+                    "Output Stream": "Dextrin",
+                },
+            ]
+        ),
+    )
+
+    assert app._format_workspace_row(table, table.data, 0) == "1.1. Fuel Ethanol"
+    assert app._format_workspace_row(table, table.data, 1) == "2.2. Dextrin"
+
+
 def test_workspace_validation_rejects_duplicate_month_and_negative_production():
     table = EditableTable(
         "Production Monthly",
