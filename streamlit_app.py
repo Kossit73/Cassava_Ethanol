@@ -2348,6 +2348,31 @@ def _format_workspace_row(table: EditableTable, df: pd.DataFrame, row_idx: int) 
         return f"Row {row_idx + 1}"
 
     row = df.loc[row_idx]
+    if table.name == "Product Routing":
+        stage_value = row.get("Stage Order")
+        output_value = row.get("Output Stream")
+
+        stage_label = ""
+        if stage_value is not None and not pd.isna(stage_value):
+            try:
+                numeric_stage = float(stage_value)
+                stage_label = (
+                    str(int(numeric_stage))
+                    if numeric_stage.is_integer()
+                    else f"{numeric_stage:g}"
+                )
+            except (TypeError, ValueError):
+                stage_label = str(stage_value).strip()
+
+        output_label = ""
+        if output_value is not None and not pd.isna(output_value):
+            output_label = str(output_value).strip()
+
+        row_reference = str(row_idx + 1)
+        if stage_label:
+            row_reference = f"{row_reference}.{stage_label}"
+        return f"{row_reference}. {output_label or 'Product route'}"
+
     config = YEARLY_INCREMENT_CONFIG.get(table.name, {})
     label_columns: List[str] = []
     date_column = config.get("date_column")
