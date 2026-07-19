@@ -145,3 +145,53 @@ def test_workspace_validation_rejects_duplicate_month_and_negative_production():
 
     assert any("Duplicate effective-period" in error for error in errors)
     assert any("cannot be negative" in error for error in errors)
+
+
+def test_workspace_validation_accepts_integer_valued_float_years():
+    table = EditableTable(
+        "Production Annual",
+        ["Year", "Start Month", "Cassava ton", "Ethanol litres", "Animal Feed ton"],
+        pd.DataFrame(
+            [
+                {
+                    "Year": 2025.0,
+                    "Start Month": "2025-01",
+                    "Cassava ton": 110_000.0,
+                    "Ethanol litres": 22_000_000.0,
+                    "Animal Feed ton": 30_250.0,
+                },
+                {
+                    "Year": 2026.0,
+                    "Start Month": "2026-01",
+                    "Cassava ton": 115_000.0,
+                    "Ethanol litres": 23_000_000.0,
+                    "Animal Feed ton": 31_625.0,
+                },
+            ]
+        ),
+    )
+
+    errors = app._validate_workspace_draft(
+        table,
+        table.data,
+        ProjectionHorizon(start_year=2025, end_year=2027),
+        row_index=1,
+    )
+
+    assert errors == []
+
+
+def test_workspace_validation_rejects_fractional_years():
+    table = EditableTable(
+        "Inflation Schedule",
+        ["Year", "CPI", "FX Index", "Tariff Escalation"],
+        pd.DataFrame(
+            [{"Year": 2026.5, "CPI": 0.03, "FX Index": 1.02, "Tariff Escalation": 0.01}]
+        ),
+    )
+
+    errors = app._validate_workspace_draft(
+        table,
+        table.data,
+        ProjectionHorizon(start_year=2025, end_year=2027),
+    )

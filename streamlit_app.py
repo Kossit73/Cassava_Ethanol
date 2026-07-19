@@ -2402,6 +2402,33 @@ def _format_workspace_row(table: EditableTable, df: pd.DataFrame, row_idx: int) 
     return f"{row_idx + 1}. {label}"
 
 
+def _coerce_workspace_period(value: object, frequency: str) -> pd.Period:
+    """Parse editor period values, including integer-valued float years."""
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError("Period value is required.")
+    try:
+        if bool(pd.isna(value)):
+            raise ValueError("Period value is required.")
+    except (TypeError, ValueError):
+        pass
+
+    if frequency.upper().startswith("Y"):
+        try:
+            numeric_year = float(value)
+        except (TypeError, ValueError):
+            numeric_year = None
+        if numeric_year is not None:
+            if not np.isfinite(numeric_year) or not numeric_year.is_integer():
+                raise ValueError("Year must be a whole number.")
+            value = str(int(numeric_year))
+
+    period = pd.Period(value, freq=frequency)
+    if pd.isna(period):
+        raise ValueError("Period value is required.")
+    return period
+
+
 def _validate_workspace_draft(
     table: EditableTable,
     df: pd.DataFrame,
@@ -2438,7 +2465,7 @@ def _validate_workspace_draft(
         for idx in indices:
             value = df.at[idx, date_column]
             try:
-                period = pd.Period(value, freq=frequency)
+                period = _coerce_workspace_period(value, frequency)
             except Exception:
                 errors.append(f"Row {idx + 1}: {date_column} must be a valid {frequency} period.")
                 continue
@@ -2757,7 +2784,7 @@ def _row_editor_form(
                 format=number_format,
                 key=widget_key,
             )
-            if pd.api.types.is_integer_dtype(df[column]):
+            if column == "Year" or pd.api.types.is_integer_dtype(df[column]):
                 new_value = int(round(new_value))
             _set_editor_value(column, new_value)
             if not np.isclose(original_value, float(new_value)):
